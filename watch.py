@@ -16,6 +16,8 @@ import xml.etree.ElementTree as ET
 
 import psutil
 
+import settings
+
 DB = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Notifications", "wpndatabase.db")
 FILETIME_1970 = 116444736000000000  # Windows counts time in 100 ns steps from 1601
 # Windows notes when each app last added a notification, and keeps the note after the notification itself is gone.
@@ -68,12 +70,13 @@ def notifications(since=0.0, messages_only=True, limit=30):
     except sqlite3.Error:
         return []
     out = []
+    bot = str(settings.get("telegram_bot_name") or "").strip().lower()
     for primary_id, payload, arrived in rows:
         app, messaging = _app(primary_id or "")
         if messages_only and not messaging:
             continue
         texts = _texts(payload)
-        if not texts:
+        if not texts or (bot and texts[0].strip().lower() == bot):  # her own replies on your phone's Telegram
             continue
         out.append({"app": app, "from": texts[0][:60], "text": " ".join(texts[1:])[:300],
                     "when": (arrived - FILETIME_1970) / 1e7})

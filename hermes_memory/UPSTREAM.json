@@ -137,6 +137,38 @@
      ]
     }
    ]
+  },
+  {
+   "to": "gateway_bits.py",
+   "doc": "Pieces of Hermes Agent's messaging gateway Hey Jev uses for Telegram (telegram_bot.py): its pairing rules and\ncode hashing (gateway/pairing.py), and its long-message splitting that counts what Telegram counts and keeps code\nblocks whole (gateway/platforms/base.py, helpers.py).",
+   "imports": "import hashlib\nfrom typing import Callable, List, Optional",
+   "extract": [
+    {
+     "from": "gateway/pairing.py",
+     "names": [
+      "ALPHABET",
+      "CODE_LENGTH",
+      "CODE_TTL_SECONDS",
+      "LOCKOUT_SECONDS",
+      "MAX_FAILED_ATTEMPTS",
+      "PairingStore._hash_code"
+     ]
+    },
+    {
+     "from": "gateway/platforms/helpers.py",
+     "names": [
+      "fence_state_after"
+     ]
+    },
+    {
+     "from": "gateway/platforms/base.py",
+     "names": [
+      "utf16_len",
+      "_custom_unit_to_cp",
+      "BasePlatformAdapter.truncate_message"
+     ]
+    }
+   ]
   }
  ]
 }

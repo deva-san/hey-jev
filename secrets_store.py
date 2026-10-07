@@ -10,8 +10,9 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))  # works from the shortcut too
 
 SERVICE = "Hey Jev"  # shows up in Credential Manager > Windows Credentials
-KEY_NAMES = ("OPENCODE_ZEN_API_KEY", "FISH_AUDIO_API_KEY", "KILO_API_KEY")
-OPTIONAL = ("KILO_API_KEY",)  # Kilo Gateway's free models, besides OpenCode's (see opencode.py)
+KEY_NAMES = ("OPENCODE_ZEN_API_KEY", "FISH_AUDIO_API_KEY", "KILO_API_KEY", "TELEGRAM_BOT_TOKEN")
+# Kilo Gateway's free models, besides OpenCode's (see opencode.py); your own Telegram bot, for your phone
+OPTIONAL = ("KILO_API_KEY", "TELEGRAM_BOT_TOKEN")
 ALIASES = {"OPENCODE_ZEN_API_KEY": ("OPENCODE_API_KEY",)}  # the name OpenCode's own docs use
 
 

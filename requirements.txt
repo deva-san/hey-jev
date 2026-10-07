@@ -17,3 +17,5 @@ winrt-runtime==3.2.1
 winrt-Windows.Foundation==3.2.1
 winrt-Windows.Foundation.Collections==3.2.1
 winrt-Windows.Media.Control==3.2.1
+# Jev on your phone (telegram_bot.py): the library Hermes Agent pins, LGPL-3.0, only httpx besides
+python-telegram-bot==22.8

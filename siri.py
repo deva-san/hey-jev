@@ -1,13 +1,14 @@
 """Windows voice assistant: say "Hey Jev" or hold right Alt, then ask for anything. Simple commands are worked out on
 this PC straight away, anything else goes to a free OpenCode Zen model that plans the steps. Fish Audio speaks."""
 import os, re, sys, json, time, queue, random, argparse, threading, hashlib, collections, difflib, contextlib, datetime
+import contextvars
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.parse import quote_plus
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows without Developer Mode: copies instead, works fine
 import subprocess
 import numpy as np, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
-import decider, fast_intent, hermes_memory, history, installer, messaging, opencode, pocket, settings, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
+import decider, fast_intent, hermes_memory, history, installer, messaging, opencode, pocket, settings, telegram_bot, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
 from hermes_memory import curator, hermes_bits, skills
 from hermes_memory.threat_patterns import INVISIBLE_CHARS, first_threat_message
 from secrets_store import get_secret, missing_secrets
@@ -2647,7 +2648,7 @@ def think(text, gate, notify=None, sure=1.0):
                            plain(text))
     # a plain answer to a request with her name is said as it's written (LiveSay); without her name the whole plan
     # decides first whether it was for her, and a task's claim is checked before she says it's done
-    stream = STREAM_SAY and not gate and not needs_task
+    stream = STREAM_SAY and not gate and not needs_task and origin() == "voice"
     for round_ in range(ROUNDS + 1):
         t = time.time()
         live = LiveSay(notify) if stream else None
@@ -4100,7 +4101,16 @@ def tab_not_browser(plan, words):
     return {**plan, "say": confirm_question(risky), "confirm": mended} if risky else mended
 
 
-PENDING = {"plan": None, "until": 0.0, "soon": 0.0}  # a plan waiting on a yes or no, see think. soon: see handle
+PENDING = {"plan": None, "until": 0.0, "soon": 0.0, "origin": "voice", "id": 0}  # a plan waiting on a yes or no,
+# see think. soon: see handle. origin: where it was asked, voice or phone: a yes at the PC can't answer a question
+# asked on the phone, or the other way round. id: which question, for the phone's buttons
+REPLY_TO = contextvars.ContextVar("reply_to", default=None)  # a turn from your phone: her lines go here, not out loud
+TAPPED = contextvars.ContextVar("tapped", default=False)  # the phone's Yes button: the only yes for a phone question
+PHONE_WAITS = 300.0  # seconds a question asked on the phone waits for a tap, as Hermes' approvals do
+
+
+def origin():
+    return "phone" if REPLY_TO.get() is not None else "voice"
 YES = re.compile(r"(?:yes|yeah|yep|yup|ya|sure|ok|okay|do it|go ahead|go on|please|please do|correct|right|haan|ha|"
                  r"avunu|of course)(?: (?:yes|please|do it|go ahead|sure|thanks|thank you))*")  # after plain()
 NO = re.compile(r"(?:no|nope|nah|not|don't|dont|do not|cancel|stop|never ?mind|forget (?:it|about it|that)|leave it|"
@@ -4149,9 +4159,15 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     MEMORY.reset_consolidation_failures()
     note = None  # shown in the window instead of her line, when something needs fixing
     # kept through talk she lets go ("Hmm", a mumble, someone else), so the yes can still follow; gone once she acts
-    pending = PENDING["plan"] if time.time() < PENDING["until"] else None
+    pending = PENDING["plan"] if time.time() < PENDING["until"] and PENDING["origin"] == origin() and \
+        (origin() == "voice" or TAPPED.get()) else None
     answer = plain(words) if pending else ""
-    if pending and said_yes(words, pending) and not (gate and sure < UNSURE):  # a mumbled yes isn't one
+    if origin() == "phone" and not TAPPED.get() and PENDING["origin"] == "phone" and PENDING["plan"] is not None \
+            and time.time() < PENDING["until"] and YES.fullmatch(plain(words)):
+        say("Tap Yes on my question to go ahead.", notify)  # only the button answers a question on the phone
+        return True
+    # a mumbled yes isn't one; the phone's Yes button is as clear as a yes gets
+    if pending and (said_yes(words, pending) or (TAPPED.get() and words == "yes")) and not (gate and sure < UNSURE):
         print("  (yes, doing what she asked about)")
         plan = pending
         if any(s.get("do") in POWER_STEPS for s in plan.get("steps") or []):
@@ -4193,7 +4209,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         else:
             emit(notify, "Thinking", words or text)
             TURN_SPOKE.clear()
-            if not gate and STREAM_SAY:  # with her name it's for her, so a "One moment" if it's slow
+            if not gate and STREAM_SAY and origin() == "voice":  # with her name it's for her: "One moment" if slow
                 threading.Thread(target=fill_silence, args=(words or text, notify), daemon=True).start()
             try:  # without her name: with "Hey Jeff" in it, the model took you for Jeff
                 plan = think(words or text, gate, notify, sure)
@@ -4233,7 +4249,8 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
                 make_plan(say="I didn't catch which app to install.")
     if not plan.get("steps") and not tidy(plan.get("say")):
         plan = make_plan(say=say_line("not_caught"))
-    PENDING["plan"] = None  # answered, or something else asked for instead
+    if PENDING["origin"] == origin():
+        PENDING["plan"] = None  # answered, or something else asked for instead
     failed, dictate, voice_error, spoken = run_plan(plan, notify)
     if plan.get("confirm"):
         # the yes or no window opens once she's finished asking: it was 16 s from before she started, so a long
@@ -4241,8 +4258,9 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         # it's typed in or looked up (90 s), said with her name once the follow-up window has shut
         waits = [STAGED["until"] if s.get("do") == "message_send" else STAGED_INSTALL["until"]
                  for s in plan["confirm"].get("steps") or [] if s.get("do") in ("message_send", "install_run")]
-        soon = time.time() + FOLLOW_UP + 8
-        PENDING.update(plan=plan["confirm"], soon=soon, until=max([soon] + waits))
+        soon = time.time() + (PHONE_WAITS if origin() == "phone" else FOLLOW_UP + 8)
+        PENDING.update(plan=plan["confirm"], soon=soon, until=max([soon] + waits), origin=origin(),
+                       id=PENDING["id"] + 1)
     # what she said, also when it came from the screen: the next turn's "play the third one" needs what she saw
     kept = {"steps": plan.get("steps") or [],
             "say": (tidy(plan.get("say"), not plan.get("confirm")) if not failed else "") or " ".join(spoken)}
@@ -4272,6 +4290,11 @@ def say(line, notify):
     """Say a line, the window shows it too. Returns why her voice failed, or None. Never raises, so a broken voice
     doesn't stop the steps. The mic is paused while she talks, so she doesn't hear herself, and only then: before,
     it was off for the whole turn, thinking too, and what you said meanwhile was lost."""
+    lines = REPLY_TO.get()
+    if lines is not None:  # a turn from your phone: what she'd say goes back to the chat
+        print(f"  say (to the phone): {line}")
+        lines.append(line)
+        return None
     print(f"  say: {line}")
     emit(notify, "Speaking", line)
     rec = MIC[0]
@@ -5108,6 +5131,47 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             while later and not rec.dictating and tell(later[0], "heads-up"):
                 later.pop(0)
 
+    phone_jobs = queue.Queue()  # (text or ("tap", yes, ask, message), chat) from your phone, one at a time
+
+    def phone_turn():
+        """Turns from your phone, as they come: through the same handle() as voice, holding the same lock, with her
+        lines sent back to the chat instead of said, and her questions sent with Yes and No buttons."""
+        while True:
+            job, chat = phone_jobs.get()
+            lines, tapped = [], isinstance(job, tuple)
+            to, tap = REPLY_TO.set(lines), TAPPED.set(tapped)
+            asked = None
+            try:
+                with busy:
+                    before = PENDING["id"]
+                    if tapped:
+                        _, yes, ask, message = job
+                        live = PENDING["origin"] == "phone" and str(PENDING["id"]) == ask and \
+                            PENDING["plan"] is not None and time.time() < PENDING["until"]
+                        phone.settle(chat, message, ("Yes." if yes else "No.") if live else "Expired, not run.")
+                        if not live:
+                            continue
+                        handle("yes" if yes else "no", None, None, notify)
+                    else:
+                        handle(job, job, None, notify)
+                    if PENDING["id"] != before and PENDING["origin"] == "phone":
+                        asked = PENDING["id"]
+            except Exception as exc:
+                print(f"\n  phone turn failed: {exc!r}")
+                lines.append("Something went wrong on the PC, sorry.")
+            finally:
+                REPLY_TO.reset(to)
+                TAPPED.reset(tap)
+            phone.send(chat, "\n".join(lines) or "Done.", ask=asked)
+
+    phone = telegram_bot.Bot(on_message=lambda text, chat: phone_jobs.put((text, chat)),
+                             on_tap=lambda yes, ask, chat, message: phone_jobs.put((("tap", yes, ask, message), chat)),
+                             transcribe=transcribe,
+                             on_pair=lambda name: emit(notify, "Phone", f"{name} asked to pair: type their code in "
+                                                                        f"Settings > Phone"))
+    threading.Thread(target=phone_turn, daemon=True).start()
+    phone.start()  # only once you've paired: until then it doesn't listen at all
+
     start_timer_loop(timer_done)
     threading.Thread(target=task_worker, daemon=True).start()
     threading.Thread(target=warm_cache, daemon=True).start()
@@ -5136,6 +5200,25 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 set_mode(command[1])
             elif isinstance(command, tuple) and command[0] == "mic":
                 rec.set_device(command[1])
+            elif command == "pair phone":  # Settings > Phone > Pair: listen for your /start for 10 minutes
+                phone.pairing.start()
+                emit(notify, "Phone", "Send /start to your bot on Telegram" if phone.start() else
+                     "Add your Telegram bot's token in Keys first")
+            elif isinstance(command, tuple) and command[0] == "pair code":
+                paired, why = phone.pairing.confirm(command[1])
+                if paired:
+                    settings.put("telegram_owner", paired["user_id"])
+                    settings.put("telegram_owner_name", paired["name"])
+                    emit(notify, "Phone", f"Paired with {paired['name']}")
+                    threading.Thread(target=phone.send, args=(paired["user_id"], "Paired. Only you can talk to me "
+                                     "here. Ask me anything, or tell me what to do on the PC."), daemon=True).start()
+                else:
+                    emit(notify, "Phone", {"wrong": "That code isn't right", "locked": "Too many wrong codes, try "
+                                           "again in an hour"}.get(why, "Send /start to your bot first"))
+            elif command == "unpair phone":
+                settings.put("telegram_owner", None)
+                phone.stop()
+                emit(notify, "Phone", "Unpaired")
             elif command == "learn voice":  # Settings > Your voice > Learn my voice
                 threading.Thread(target=start_enrol, args=(lambda line: tell(line, "learning your voice"),),
                                  daemon=True).start()

@@ -134,6 +134,8 @@ KEY_ROWS = (
     ("Fish Audio", "FISH_AUDIO_API_KEY", "Her voice, on Fish's free model", "https://fish.audio/?fpr=henryk"),
     ("Kilo", "KILO_API_KEY", "More free models, like the quick Ling 3.0 Flash, free ones only",
      "https://kilo.ai/docs/gateway/authentication"),
+    ("Telegram bot", "TELEGRAM_BOT_TOKEN", "Jev on your phone: make a bot with @BotFather, then Settings > Phone > "
+     "Pair", "https://core.telegram.org/bots/tutorial#obtain-your-bot-token"),
 )
 
 BG, SIDE, HOVER, SELECT, CARD, LINE = "#ffffff", "#f3f3f3", "#e9e9e9", "#e0e0e0", "#f4f4f5", "#e3e3e3"
@@ -1055,6 +1057,16 @@ class AssistantWindow:
         ttk.Checkbutton(yours, text="Only answer my voice", variable=self.voice_id_var,
                         command=self.voice_id_changed).pack(side="left")
         ttk.Button(yours, text="Learn", command=self.learn_voice).pack(side="left", padx=(self.px(6), 0))
+        row(16, "Phone", "Talk to her from your phone on Telegram. Add your bot's token in Keys, press Pair, send "
+                         "/start to your bot and type the code it gives you here. Only your account can use it, and "
+                         "anything risky waits for your Yes.")
+        phone = tk.Frame(form, bg=BG)
+        phone.grid(row=32, column=1, rowspan=2, sticky="e")
+        self.pair_code = ttk.Entry(phone, width=12)
+        self.pair_code.pack(side="left")
+        self.pair_code.bind("<Return>", lambda e: self.pair_phone())
+        ttk.Button(phone, text="Pair", command=self.pair_phone).pack(side="left", padx=(self.px(6), 0))
+        ttk.Button(phone, text="Unpair", command=self.unpair_phone).pack(side="left", padx=(self.px(6), 0))
         self.settings_note = self._label(page, "", self.f_small, MUTED, wraplength=self.px(660))
         self.settings_note.pack(fill="x", pady=(self.px(18), 0))
         self.models_loaded = False
@@ -1096,6 +1108,21 @@ class AssistantWindow:
         self.controls.put(("mic", self.mic))  # opens the mic again, the new way
         self._note("Echo cancelling on, she hears you over videos and music" if on else
                    "Echo cancelling off. While a video plays, say \u201cHey Jev\u201d close to the mic, or hold right Alt")
+
+    def pair_phone(self):
+        """Pair with a code in the box, or open pairing to get one."""
+        code = self.pair_code.get().strip()
+        if code:
+            self.controls.put(("pair code", code))
+            self.pair_code.delete(0, "end")
+            self._note("Checking the code\u2026")
+        else:
+            self.controls.put("pair phone")
+            self._note("Send /start to your bot on Telegram within 10 minutes, then type its code here and press Pair.")
+
+    def unpair_phone(self):
+        self.controls.put("unpair phone")
+        self._note("Unpaired: the bot won't answer anyone now.")
 
     def learn_voice(self):
         self.controls.put("learn voice")
