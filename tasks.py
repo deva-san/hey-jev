@@ -22,8 +22,11 @@ from winplatform import APPDATA_DIR, CREATE_NO_WINDOW, POWERSHELL
 
 DB_PATH = os.path.join(APPDATA_DIR, "tasks.db")
 STATUSES = {"queued", "running", "waiting_approval", "completed", "failed", "cancelled"}
-KINDS = {"command", "reminder", "lookup", "research", "install"}
-CHANGES_PC = {"command", "install"}  # never re-run by themselves after Jev stopped part-way: they ask again
+KINDS = {"command", "reminder", "lookup", "research", "install", "code"}
+CHANGES_PC = {"command", "install", "code"}  # never re-run by themselves after Jev stopped part-way: they ask again
+# Hermes Agent's cron rule (cron/jobs.py): a one-off job that comes due more than 2 minutes late, as after the PC was
+# off or asleep, doesn't run late by itself. One that changes the PC asks again; a reminder says when it was for
+LATE = 120.0
 OUTPUT_LIMIT = 64 * 1024
 MAX_COMMAND = 1000
 WAKE = threading.Event()
@@ -291,10 +294,10 @@ def normalize_schedule(when=None, repeat=None, now=None):
         if kind == "interval":
             seconds = int(r.get("seconds") or 0)
             spec = {"kind": "interval", "seconds": seconds} if seconds >= 60 else None
-        elif kind in ("daily", "weekly"):
+        elif kind in ("daily", "weekly", "weekdays"):
             clock = _clock(str(r.get("time") or when or ""))
             weekday = WEEKDAYS.get(str(r.get("weekday") or "").lower())
-            if clock and (kind == "daily" or weekday is not None):
+            if clock and (kind in ("daily", "weekdays") or weekday is not None):
                 spec = {"kind": kind, "hour": clock[0], "minute": clock[1]}
                 if kind == "weekly":
                     spec["weekday"] = weekday
@@ -308,7 +311,9 @@ def normalize_schedule(when=None, repeat=None, now=None):
         else:
             clock = _clock(text)
             weekday = next((i for name, i in WEEKDAYS.items() if name in text), None)
-            if weekday is not None and clock:
+            if clock and re.search(r"\b(?:weekdays?|every (?:work|working|week) ?day|monday to friday)\b", text):
+                spec = {"kind": "weekdays", "hour": clock[0], "minute": clock[1]}  # Hermes' cron takes 1-5
+            elif weekday is not None and clock:
                 spec = {"kind": "weekly", "weekday": weekday, "hour": clock[0], "minute": clock[1]}
             # "every day at 9", "every midnight". Not any "every": "every 2 weeks at 9" was every day at 2 AM
             elif clock and re.search(r"\b(?:daily|every ?day|every (?:night|morning|evening|afternoon|midnight|noon|"
@@ -368,6 +373,11 @@ def next_due(previous, spec, now=None):
         target += dt.timedelta(days=(int(spec["weekday"]) - target.weekday()) % 7)
         if target.timestamp() <= now:
             target += dt.timedelta(days=7)
+        return target.timestamp()
+    if kind == "weekdays":
+        target = _at(here, (int(spec["hour"]), int(spec.get("minute", 0))))
+        while target.timestamp() <= now or target.weekday() >= 5:
+            target += dt.timedelta(days=1)
         return target.timestamp()
     raise ValueError("unsupported repeat")
 

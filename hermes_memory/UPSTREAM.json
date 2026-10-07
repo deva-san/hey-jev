@@ -169,6 +169,25 @@
      ]
     }
    ]
+  },
+  {
+   "to": "acp_bits.py",
+   "doc": "Pieces of Hermes Agent's ACP client (agent/copilot_acp_client.py) Hey Jev uses to drive the OpenCode CLI in\ncoder.py: its JSON-RPC replies, and picking the session's model from the ones it offers.",
+   "imports": "from typing import Any",
+   "extract": [
+    {
+     "from": "agent/copilot_acp_client.py",
+     "names": [
+      "_jsonrpc_result",
+      "_jsonrpc_error",
+      "_enabled_id_list",
+      "_model_config_option",
+      "_session_model_ids",
+      "_legacy_session_model_ids",
+      "_model_selection_request"
+     ]
+    }
+   ]
   }
  ]
 }

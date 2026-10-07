@@ -103,12 +103,21 @@ class Schedules(unittest.TestCase):
 
     def test_unknown_repeats_are_refused_not_daily(self):
         """'every <anything> at 9' became daily: 'every 2 weeks at 9' was every day at 2 AM."""
-        for repeat in ("every weekday at 9", "every month on the 5th at 9", "every other day at 9",
+        for repeat in ("every month on the 5th at 9", "every other day at 9",
                        "every weekend at 10", "every 2 weeks at 9", "every year at 9"):
             with self.assertRaises(ValueError, msg=repeat):
                 self.due(repeat=repeat)
+        for repeat in ("every weekday at 9", "weekdays at 9 am", "monday to friday at 9"):  # Hermes' cron 1-5
+            self.assertEqual(self.due(repeat=repeat)[1], {"kind": "weekdays", "hour": 9, "minute": 0}, repeat)
         for repeat, hour in (("every morning at 8", 8), ("every night at 10", 22), ("everyday at 9", 9)):
             self.assertEqual(self.due(repeat=repeat)[1], {"kind": "daily", "hour": hour, "minute": 0}, repeat)
+
+    def test_weekdays_skip_the_weekend(self):
+        import datetime as dt
+        friday_10am = dt.datetime(2026, 10, 9, 10, 0).timestamp()
+        nxt = dt.datetime.fromtimestamp(siri.tasking.next_due(friday_10am, {"kind": "weekdays", "hour": 9, "minute": 0},
+                                                              friday_10am))
+        self.assertEqual((nxt.weekday(), nxt.hour), (0, 9))  # Monday at 9, not Saturday
 
     def test_relative_times_are_never_a_clock(self):
         """'in 15 mins' was 3 PM, 'after 10 minutes' 10 AM and 'at ten thirty' 10:00."""

@@ -8,7 +8,7 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows without
 import subprocess
 import numpy as np, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
-import decider, fast_intent, hermes_memory, history, installer, messaging, opencode, pocket, settings, telegram_bot, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
+import coder, decider, fast_intent, hermes_memory, history, installer, messaging, opencode, pocket, settings, telegram_bot, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
 from hermes_memory import curator, hermes_bits, skills
 from hermes_memory.threat_patterns import INVISIBLE_CHARS, first_threat_message
 from secrets_store import get_secret, missing_secrets
@@ -1532,6 +1532,7 @@ lookup, recall, web, read, weather, news and skill_view send the results back to
 {"do":"note","title":"Shopping list","text":"..."}  save a note for them. {"do":"open_notes"}  show their notes
 {"do":"command","command":"npm test","cwd":"C:\\\\path\\\\to\\\\project","description":"Run the tests"}  only when they explicitly ask for terminal, command, test, build, lint, Git or system-diagnostic work: run it in the background, hidden. Code checks it: read-only checks and tests run; anything that changes files or programs waits for their explicit approval; destructive/admin/security/credential/download commands are blocked. Always give an existing full cwd. Never put secrets in a command
 {"do":"schedule","when":"2026-10-07T18:00:00","repeat":"","description":"Check C drive","task":{"kind":"lookup","what":"disk"}}  durable work at a time. when: local ISO date/time, "tomorrow at 6 PM", "in 2 hours". repeat is empty, "every 30 minutes", "daily at 6 PM", or "every Monday at 9 AM". task is one of: {"kind":"reminder","text":"call Mum"}; {"kind":"lookup","what":"disk|battery|cpu|memory|apps|network|uptime|system"}; {"kind":"research","topic":"..."}; {"kind":"command","command":"git status","cwd":"C:\\\\path"}. Never schedule send, delete, publish, pay, account, security, typing, clicking or screen actions
+{"do":"code","task":"add a dark mode toggle to the settings page","cwd":"C:\\\\path\\\\to\\\\project"}  coding work on one of their projects, when they ask for it: OpenCode does it in the background in that git project folder, she asks first and tells them when it's done. Always the full folder
 {"do":"install","app":"VLC"}  download and install, or update, an app on this PC: app exactly as they named it. She looks it up in winget and the Microsoft Store herself, picks the right version for this PC, reads it back and asks first. Never use a website, google or a command to download an app
 {"do":"message","app":"whatsapp","contact":"Mum","text":"hi"}  message someone in a chat app: whatsapp, telegram, or another one on this PC like signal, slack or discord. app and contact exactly as they said them, text exactly the words to send. You never send it: the chat opens with the text typed in and they say yes first. If you don't know the person or the app, still use this step, she works it out herself. Only for a plain message they dictated; never invent or add to their words
 {"do":"contact","action":"save","alias":"Mum","app":"whatsapp","number":"+919876543210"}  remember who someone is, when they tell you a number or username. action remove forgets them. For telegram use "username" instead of "number"
@@ -2870,27 +2871,57 @@ def background_payload(raw):
         if not topic:
             raise RuntimeError("I didn't catch what to research")
         return {"topic": topic}
+    if kind == "code":
+        task = " ".join(str(raw.get("task") or raw.get("description") or "").split())[:2000]
+        if not task:
+            raise RuntimeError("I didn't catch what to do in the code")
+        return {"task": task, "cwd": coder.check_folder(raw.get("cwd"))}
     raise RuntimeError("That kind of background task isn't supported")
+
+
+def asked_from():
+    """Where a task's result goes: {"phone": chat} for one asked on the phone, else {} (said out loud)."""
+    return {"phone": PHONE_CHAT.get()} if PHONE_CHAT.get() is not None else {}
+
+
+def tell_task(task, line):
+    """A task's result, back where it was asked from: the phone's chat, or out loud (Hermes' cron delivers a job's
+    output to its origin the same way)."""
+    chat = (task.get("payload") or {}).get("origin", {}).get("phone")
+    if chat is not None and PHONE["send"] is not None and PHONE["send"](chat, line):
+        return
+    ANNOUNCE.put(line)
 
 
 def prepare_task_steps(plan):
     """Turn command/schedule model steps into durable rows before run_plan. Returns a plan with harmless markers."""
-    kept, notices = [], []
+    kept, notices, ask = [], [], None
     for step in plan.get("steps") or []:
         do = step.get("do")
         try:
+            if do == "code":  # changes files: she asks first, in so many words, and only then queues it
+                payload = {**background_payload({**step, "kind": "code"}), "origin": asked_from()}
+                task_id = TASK_STORE.create(step.get("description") or payload["task"], "code", payload,
+                                            status="waiting_approval")
+                kept.append({"do": "task_queued", "id": task_id})
+                ask = (f"OpenCode will {payload['task'][:160].rstrip('.')}, in "
+                       f"{os.path.basename(payload['cwd'])}. Should I start it?", task_id)
+                continue
             if do == "command":
-                payload = background_payload({**step, "kind": "command"})
+                payload = {**background_payload({**step, "kind": "command"}), "origin": asked_from()}
                 level, reason = tasking.command_policy(payload["command"], payload["cwd"])
                 status = "waiting_approval" if level == "confirm" else "queued"
                 task_id = TASK_STORE.create(step.get("description") or payload["command"], "command", payload,
                                             status=status)
                 kept.append({"do": "task_queued", "id": task_id})
+                if status == "waiting_approval" and origin() == "phone":  # on the phone: Yes and No buttons
+                    ask = (f"Should I run {payload['command'][:160]}?", task_id)
+                    continue
                 notices.append(f"Task {task_id} needs approval. Say approve task {task_id}." if status ==
                                "waiting_approval" else f"Task {task_id} is running in the background. I'll tell you when it's done.")
                 continue
             if do == "research":
-                payload = background_payload({**step, "kind": "research"})
+                payload = {**background_payload({**step, "kind": "research"}), "origin": asked_from()}
                 task_id = TASK_STORE.create(step.get("description") or f"Research {payload['topic']}", "research", payload)
                 kept.append({"do": "task_queued", "id": task_id})
                 notices.append(f"Task {task_id} is researching that in the background. I'll tell you when it's done.")
@@ -2898,7 +2929,7 @@ def prepare_task_steps(plan):
             if do == "schedule":
                 raw = step.get("task") if isinstance(step.get("task"), dict) else {}
                 kind = str(raw.get("kind") or "").lower()
-                payload = background_payload(raw)
+                payload = {**background_payload(raw), "origin": asked_from()}
                 if kind == "command" and tasking.command_policy(payload["command"], payload["cwd"])[0] != "allow":
                     raise RuntimeError("scheduled commands must be read-only checks or declared tests")
                 due, repeat = tasking.normalize_schedule(step.get("when"), step.get("repeat"))
@@ -2923,6 +2954,10 @@ def prepare_task_steps(plan):
     plan["steps"] = kept
     if notices:
         plan["say"] = " ".join(notices)
+    if ask:  # a yes runs it: it's approved and queued (task_control), a no leaves it waiting, cancellable
+        question, task_id = ask
+        return {"steps": [], "say": " ".join(notices + [question]),
+                "confirm": {"steps": [{"do": "task_control", "action": "approve", "id": task_id}], "say": ""}}
     return plan
 
 
@@ -2935,7 +2970,7 @@ def _task_result_line(task, text, success=True):
     return f"Task {task['id']} failed: {task['description']}." + (f" {text}" if text else "")
 
 
-SLOW_TASKS = ("command", "install", "research")  # minutes at a time, so they get a thread of their own
+SLOW_TASKS = ("command", "install", "research", "code")  # minutes at a time, so they get a thread of their own
 
 
 def task_worker():
@@ -2984,18 +3019,42 @@ def task_worker():
                 text = payload["text"]
                 TASK_STORE.finish(task["id"], text)
                 if not TASK_STORE.is_cancelled(task["id"]):
-                    ANNOUNCE.put(f"Reminder: {text}.")
+                    late = time.time() - task["due"] > tasking.LATE  # the PC was off or asleep: say when it was for
+                    tell_task(task, f"Reminder{' from ' + tasking.describe_due(task['due']) if late else ''}: {text}.")
             elif kind == "lookup":
                 what = payload["what"]
                 text = sysinfo.describe(what, sysinfo.lookup(what), payload.get("detail") or None)
                 TASK_STORE.finish(task["id"], text)
-                if not TASK_STORE.is_cancelled(task["id"]):
-                    ANNOUNCE.put(_task_result_line(task, text))
+                # a repeating check that finds the same as last time stays quiet, as Hermes' cron scripts do
+                if not TASK_STORE.is_cancelled(task["id"]) and not (task["repeat"] and text == task.get("result")):
+                    tell_task(task, _task_result_line(task, text))
             elif kind == "research":
                 ok, text = research(payload["topic"], announce=False)
                 TASK_STORE.finish(task["id"], text if ok else "", "" if ok else text)
                 if not TASK_STORE.is_cancelled(task["id"]):
-                    ANNOUNCE.put(_task_result_line(task, text, ok))
+                    tell_task(task, _task_result_line(task, text, ok))
+            elif kind == "code":
+                if not payload.get("approved"):
+                    TASK_STORE.wait_for_approval(task["id"], "A coding job changes files; approve it to start")
+                    tell_task(task, f"Task {task['id']} is waiting for approval: {task['description']}. "
+                                    f"Say approve task {task['id']}.")
+                    return
+                folder = coder.check_folder(payload["cwd"])
+                snap = coder.snapshot(folder)
+                chat = (payload.get("origin") or {}).get("phone")
+                ask = (lambda q: PHONE["ask"](chat, q)) if chat is not None and PHONE["ask"] else None
+                job = coder.Job(folder, payload["task"], ask=ask, cancelled=lambda: TASK_STORE.is_cancelled(task["id"]))
+                ok, said = job.run()
+                done = said or (f"It changed {len(job.edited)} file{'' if len(job.edited) == 1 else 's'}."
+                                if job.edited else "It didn't change anything.")
+                if job.refused:
+                    done += f" I didn't let it run {'; '.join(job.refused[:3])}."
+                TASK_STORE.finish(task["id"], json.dumps({"said": said, "edited": job.edited, "ran": job.ran,
+                                                          "refused": job.refused, "snapshot": snap}),
+                                  "" if ok else "it stopped before it finished")
+                if not TASK_STORE.is_cancelled(task["id"]):
+                    tell_task(task, _task_result_line(task, done + (f" To undo it: git stash apply {snap[:10]} after "
+                                                                    f"git checkout ." if snap else ""), ok))
         except Exception as exc:
             error = tasking.redact(str(exc))
             if TASK_STORE.is_cancelled(task["id"]):
@@ -3018,6 +3077,13 @@ def task_worker():
         task = TASK_STORE.claim_due(skip=skip)
         if task is None:
             TASK_STORE.wait(30, skip)
+            continue
+        if task["kind"] in tasking.CHANGES_PC and not task["repeat"] and time.time() - task["due"] > tasking.LATE:
+            # due while the PC was off or asleep: it doesn't run late by itself, it asks again
+            TASK_STORE.wait_for_approval(task["id"], f"It was due {tasking.describe_due(task['due'])} and didn't run "
+                                                     f"late; approve it to run it now")
+            tell_task(task, f"Task {task['id']} was due {tasking.describe_due(task['due'])}, so I didn't run it late: "
+                            f"{task['description']}. Say approve task {task['id']} to run it now.")
             continue
         if task["kind"] in SLOW_TASKS:
             slow.set()
@@ -4105,6 +4171,8 @@ PENDING = {"plan": None, "until": 0.0, "soon": 0.0, "origin": "voice", "id": 0} 
 # see think. soon: see handle. origin: where it was asked, voice or phone: a yes at the PC can't answer a question
 # asked on the phone, or the other way round. id: which question, for the phone's buttons
 REPLY_TO = contextvars.ContextVar("reply_to", default=None)  # a turn from your phone: her lines go here, not out loud
+PHONE_CHAT = contextvars.ContextVar("phone_chat", default=None)  # and the chat it came from, for a task's result
+PHONE = {"send": None, "ask": None}  # set by run_voice_assistant once Telegram is there: send(chat, line), ask(chat, q)
 TAPPED = contextvars.ContextVar("tapped", default=False)  # the phone's Yes button: the only yes for a phone question
 PHONE_WAITS = 300.0  # seconds a question asked on the phone waits for a tap, as Hermes' approvals do
 
@@ -5139,7 +5207,12 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         while True:
             job, chat = phone_jobs.get()
             lines, tapped = [], isinstance(job, tuple)
-            to, tap = REPLY_TO.set(lines), TAPPED.set(tapped)
+            if tapped and job[2] in job_asks:  # a running coding job's question, answered
+                phone.settle(chat, job[3], "Yes." if job[1] else "No.")
+                job_asks[job[2]][1] = job[1]
+                job_asks[job[2]][0].set()
+                continue
+            to, tap, where = REPLY_TO.set(lines), TAPPED.set(tapped), PHONE_CHAT.set(chat)
             asked = None
             try:
                 with busy:
@@ -5162,7 +5235,20 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             finally:
                 REPLY_TO.reset(to)
                 TAPPED.reset(tap)
+                PHONE_CHAT.reset(where)
             phone.send(chat, "\n".join(lines) or "Done.", ask=asked)
+
+    job_asks = {}  # a coding job's question on the phone: [answered, the answer]
+
+    def phone_ask(chat, question, wait=PHONE_WAITS):
+        """Asks on the phone with Yes and No buttons and waits for the tap: False if none comes in time."""
+        key = f"job{time.time_ns()}"
+        job_asks[key] = [threading.Event(), False]
+        if not phone.send(chat, question, ask=key):
+            job_asks.pop(key)
+            return False
+        job_asks[key][0].wait(wait)
+        return job_asks.pop(key)[1]
 
     phone = telegram_bot.Bot(on_message=lambda text, chat: phone_jobs.put((text, chat)),
                              on_tap=lambda yes, ask, chat, message: phone_jobs.put((("tap", yes, ask, message), chat)),
@@ -5170,6 +5256,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                              on_pair=lambda name: emit(notify, "Phone", f"{name} asked to pair: type their code in "
                                                                         f"Settings > Phone"))
     threading.Thread(target=phone_turn, daemon=True).start()
+    PHONE.update(send=lambda chat, line: phone.send(chat, line), ask=phone_ask)
     phone.start()  # only once you've paired: until then it doesn't listen at all
 
     start_timer_loop(timer_done)
