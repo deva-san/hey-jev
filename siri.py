@@ -395,15 +395,20 @@ def _soon(fn, secs=3.0):
 NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
                 "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
                 "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
-                "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "ninety": 90, "couple": 2, "few": 3}
+                "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+                "couple": 2, "few": 3}
 UNITS = {"s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1, "m": 60, "min": 60, "mins": 60,
          "minute": 60, "minutes": 60, "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600}
-DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b(\s+and\s+a\s+half)?")
+DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b(\s+and\s+a\s+(?:half|quarter))?")
+IN_DURATION = re.compile(r"\b(?:in|after)\s+(?:" + DURATION.pattern + r"(?:\s+and)?\s*)+")  # when a reminder is due
 
 
 def _digits(text):
-    """'twenty five minutes' -> '25 minutes', 'half an hour' -> '30 minutes'."""
-    t = re.sub(r"\bhalf an? hour\b", "30 minutes", text.lower())
+    """'twenty five minutes' -> '25 minutes', 'half an hour' -> '30 minutes', 'two and a half minutes' -> '2.5 minutes',
+    '1 minute 30' -> '1 minute 30 seconds'."""
+    t = re.sub(r"\bthree quarters of an hour\b", "45 minutes", text.lower())
+    t = re.sub(r"\b(?:a |one )?quarter of an hour\b", "15 minutes", t)  # was "an hour"
+    t = re.sub(r"\bhalf an? (hour|minute)\b", lambda m: "30 minutes" if m[1] == "hour" else "30 seconds", t)
     t = re.sub(r"\ba couple of\b", "couple", t)
     t = re.sub(r"\b(an?|few|couple)\s+(hours?|minutes?|seconds?)\b", lambda m: f"{NUMBER_WORDS[m[1]]} {m[2]}", t)
     words = t.replace("-", " ").split()
@@ -419,24 +424,30 @@ def _digits(text):
         else:
             out.append(words[i])
         i += 1
-    return " ".join(out)
+    t = re.sub(r"\b(\d+) and a half (hours?|minutes?|seconds?)\b", r"\1.5 \2", " ".join(out))
+    # "1 minute 30": the bare number is the next unit down, it used to be dropped
+    return re.sub(r"\b(\d+ (hours?|hrs?|minutes?|mins?))(?: and)? (\d+)\b(?! ?(?:\.\d|hours?|hrs?|h|minutes?|mins?|m|"
+                  r"seconds?|secs?|s)\b)", lambda m: f"{m[1]} {m[3]} {'minutes' if m[2][0] == 'h' else 'seconds'}", t)
 
 
 def parse_duration(text):
     """Total seconds mentioned in the sentence, or None."""
     total = 0
-    for num, unit, half in DURATION.findall(_digits(text)):
+    for num, unit, extra in DURATION.findall(_digits(text)):
         secs = UNITS[unit]
-        total += float(num) * secs + (secs / 2 if half else 0)
+        total += float(num) * secs + (secs / 4 if "quarter" in extra else secs / 2 if extra else 0)
     return int(total) or None
 
 
 def parse_reminder(text):
-    """What to remind about: the part after 'to', minus any duration. 'remind me in 5 min to call mum' -> 'call mum'."""
-    m = re.search(r"\bto\s+(.+)$", _digits(text))
+    """What to remind about: the part after 'to', minus when. 'remind me in 5 min to call mum' -> 'call mum',
+    'remind me to stretch for 10 minutes in 1 hour' -> 'stretch for 10 minutes'."""
+    t = _digits(text)
+    when = IN_DURATION.search(t)
+    m = re.search(r"\bto\s+(.+)$", t[:when.start()] + " " + t[when.end():] if when else t)
     if not m:
         return None
-    what = DURATION.sub("", m[1])
+    what = m[1] if when else DURATION.sub("", m[1])  # without an "in", the duration is when: "5 minutes from now"
     what = re.sub(r"\bplease\b", "", what).strip(" .,!?")
     what = re.sub(r"\s*\b(in|for|after)$", "", what).strip(" .,!?")
     return what or None
@@ -678,7 +689,8 @@ def _scroll(m):
 
 def _timer(m):
     said = m[0]
-    secs = parse_duration(said)
+    when = said.startswith("remind") and IN_DURATION.search(_digits(said))
+    secs = parse_duration(when[0] if when else said)  # "remind me to stretch for 10 minutes in 1 hour": in an hour
     if not secs:
         return None
     if not said.startswith("remind"):
