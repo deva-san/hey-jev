@@ -1060,8 +1060,9 @@ def sys_intent(t):
                                         r"|\b(?:and|then) (?:play|close|search|google|go|show|start|launch|set|type|"
                                         r"write|tell|send)\b"
                                         # a schedule: "check my C drive space every Monday at 9 AM" was answered
-                                        # now and the schedule dropped
-                                        r"|\b(?:every|daily|weekly|hourly|tomorrow|tonight|at \d|at (?:noon|midnight))\b"
+                                        # now and the schedule dropped. An hour, "at 10", not "at 5%" or "at 50"
+                                        r"|\b(?:every|daily|weekly|hourly|tomorrow|tonight|at (?:1[0-2]|\d)(?!\d| ?%| "
+                                        r"percent)|at (?:noon|midnight))\b"
                                         r"|\d ?[ap]m\b", t):
         return None
     drive = re.search(r"\b([a-h]|see|sea)[ -](?:drive|disk)\b", t)

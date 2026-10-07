@@ -281,11 +281,15 @@ class PcQuestions(Routing):
                 self.assertEqual(self.quick(words)["say"], "lookup network")
 
     def test_a_scheduled_check_isnt_answered_now(self):
-        for words in ("check my C drive space every Monday at 9 AM", "tell me the battery every morning"):
+        for words in ("check my C drive space every Monday at 9 AM", "tell me the battery every morning",
+                      "tell me the battery at 10", "how much space is left on the C drive at 11:30"):
             with self.subTest(words=words):
                 self.assertIsNone(siri.sys_intent(siri.plain(words)))
                 self.assertIsNone(self.quick(words))
         self.assertEqual(siri.sys_intent("check the storage of c drive"), ("disk", "c"))
+        for words in ("is my battery at 5%", "is my battery at 50 percent"):  # a level, not a time
+            with self.subTest(words=words):
+                self.assertEqual(siri.sys_intent(siri.plain(words)), ("battery", None))
 
 
 if __name__ == "__main__":
