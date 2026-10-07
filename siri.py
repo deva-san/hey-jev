@@ -3613,6 +3613,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             # what was said while she thought and acted comes next, caught up on rather than skipped (see LAG). Only
             # that: excusing the whole queue after any slow moment left her 771 s behind, answering 13 minute old talk
             allow[0] += max(0, rec.blocks.qsize() - before)
+            answered[0] = rec.gen
 
     def check_partial(audio, session):
         """For Parakeet and Whisper, which only write once you stop: her name at the start of speech that's still
@@ -3652,6 +3653,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     last_audio = [None]  # the latest turn's audio, kept if it was a bare greeting
     window_ask = [None]  # follow-up seconds a turn that just ended asks for, 0 to close it (listen_loop applies it)
     allow = [0]  # mic blocks that piled up while a turn ran, caught up on rather than skipped (see LAG)
+    answered = [None]  # the mic's gen once a turn is over, so the break her answer made is known (see listen_loop)
     calls = [()]  # apps on a call, logged when Windows' mic list changes
     checked = [None]  # where the speech last checked early for her name began
     hers = [None]  # the turn whose first seconds had her name in, for Parakeet and Whisper, see check_partial
@@ -3694,7 +3696,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                           f"{'say Jev or Jarvis' if now_calls else 'unnamed requests count again'}]")
                 if g != gen:
                     gen = g
-                    listener.end()  # a break in the audio: a turn in a pause counts as finished
+                    # a break in the audio. Her answer: a turn in a pause counts as finished. Not right Alt or a mode
+                    # or mic change, as before, or switching back to Always listening acted on what was left hours ago
+                    if g == answered[0]:
+                        listener.end()
                     held[0] = None  # and what was waiting for the rest goes
                     listener.reset(next_window[0])
                     next_window[0] = 0.0

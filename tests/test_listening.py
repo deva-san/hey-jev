@@ -466,6 +466,23 @@ class WhileSheThinks(Case):
         handled = self.two_requests(blocks(0.5, 0.0) + blocks(2.0, 0.8))
         self.assertEqual(handled, [self.FIRST])
 
+    def test_one_left_at_a_break_that_wasnt_her_answer_is_let_go_as_before(self):
+        """Right Alt pressed, or Hold right Alt picked and Always listening again, maybe hours later: what was in a
+        pause then isn't acted on."""
+        def mode(a):
+            for wake in (False, True):
+                a.rec.wake = wake
+                a.rec.sync_mic()
+        for what, breaks in (("right Alt", lambda a: (a.rec.start(), a.rec.stop())), ("mode", mode)):
+            with self.subTest(what=what):
+                a = self.assistant(ears=FakeEars(write=lambda audio: "Hey Jev, what time is it?"))
+                handled = []
+                with mock.patch.object(siri, "handle", lambda text, *args, **kw: handled.append(str(text))):
+                    a.speak(blocks(0.5, 0.0) + blocks(1.5, 0.9) + blocks(0.3, 0.0))
+                    a.then(lambda: (breaks(a), a.speak(blocks(1.5, 0.0))))
+                    a.listen()
+                self.assertEqual(handled, [])
+
     def test_what_the_room_says_while_she_thinks_isnt_a_follow_up(self):
         """She hadn't answered yet, so it needs her name as before, or with Answer without her name on goes through
         is-it-for-her: the window for carrying on opened on it, and "pass the salt" went to her as said to her."""
