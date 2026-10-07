@@ -75,6 +75,29 @@ class CommandRetry(Turn):
         self.assertEqual(self.asked_again(), [])
         self.assertEqual(plan["say"], "Clear and about 24 degrees at 6.")
 
+    def test_checking_the_weather_tomorrow_at_keeps_its_answer(self):
+        plan = self.think("check the weather tomorrow at 6", False,
+                          '{"steps": [{"do": "weather", "place": ""}], "say": ""}',
+                          '{"steps": [], "say": "Clear and about 24 degrees at 6."}',
+                          '{"steps": [], "say": "I will check it again at 6."}')
+        self.assertEqual(self.asked_again(), [])
+        self.assertEqual(plan["say"], "Clear and about 24 degrees at 6.")
+
+    def test_a_look_at_the_pc_still_gets_the_retry(self):
+        plan = self.think("every Monday at 9 check my C drive", False,
+                          '{"steps": [{"do": "lookup", "what": "disk"}], "say": ""}',
+                          '{"steps": [], "say": "Your C drive has 40 GB free."}',
+                          '{"steps": [{"do": "schedule", "when": "", "repeat": "every Monday at 9 AM", "description": '
+                          '"Check C drive", "task": {"kind": "lookup", "what": "disk"}}], "say": ""}')
+        self.assertEqual(len(self.asked_again()), 1)
+        self.assertEqual(plan["steps"][0]["do"], "schedule")
+
+    def test_git_status_on_its_own_gets_the_retry(self):
+        plan = self.think("git status in hey-jev", False, '{"steps": [], "say": "I will check it."}',
+                          '{"steps": [{"do": "command", "command": "git status", "cwd": "C:\\\\hey-jev"}], "say": ""}')
+        self.assertEqual(len(self.asked_again()), 1)
+        self.assertEqual(plan["steps"][0]["do"], "command")
+
     def test_a_named_request_to_schedule_still_gets_the_retry(self):
         plan = self.think("remind me every day at 9 PM to take my medicine", False,
                           '{"steps": [], "say": "Okay, I will remind you."}',

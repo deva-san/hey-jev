@@ -1408,10 +1408,11 @@ LOOKING = {"web": "Searching the web\u2026", "read": "Reading it\u2026", "weathe
            "news": "Getting the news\u2026", "skill_view": "Remembering how\u2026", "recall": "Remembering\u2026",
            "lookup": "Looking it up\u2026"}
 # Words that ask for a command or a schedule, at the start once plain() has taken "can you" off: "run the tests in
-# ...", "every Monday at 9 check my C drive". TASK_REQUEST anywhere also caught questions and talk about one, "what's
-# the PowerShell command to list files?", "I will schedule the call with Ravi", and forced a second request on them
+# ...", "every Monday at 9 check my C drive", "git status in hey-jev". TASK_REQUEST anywhere also caught questions and
+# talk about one, "what's the PowerShell command to list files?", "I will schedule the call with Ravi", and forced a
+# second request on them
 TASK_ASKED = re.compile(r"(?:run|check|schedule|remind|research|set|start|queue|create|add|make|execute|do (?:that|it)|"
-                        r"every|daily|weekly|tomorrow|at)\b")
+                        r"every|daily|weekly|tomorrow|at|git)\b")
 # Overheard words that ask her to remember or forget something, not "I remember ...": room talk put "Nine to Kerawal"
 # in her memory on 6 October
 REMEMBER = re.compile(r"(?<!\bi )(?<!\bwe )\b(?:remember|forget)\b")
@@ -2077,9 +2078,10 @@ def think(text, gate, notify=None, sure=1.0):
             plan["ignore"] = True  # {"to": "others"}, see COLD_NOTE
         task_steps = [s for s in plan["steps"] if s.get("do") in ("command", "schedule", "task_control")]
         # never over "to others", or for overheard words at all: who they were for is the model's call. Not before its
-        # lookups either, or while it asks which folder or time
+        # lookups either, or once it has answered from the weather or the web ("check the weather tomorrow at 6"), or
+        # while it asks which folder or time
         if needs_task and not (task_steps or task_retry or plan.get("ignore") or gate == "cold") \
-                and not any(s["do"] in INFO for s in plan["steps"]) \
+                and not any(s["do"] in INFO for s in plan["steps"]) and not used & {"web", "read", "weather", "news"} \
                 and not str(plan.get("say") or "").rstrip().endswith("?"):
             task_retry = True
             messages += [{"role": "assistant", "content": raw},
