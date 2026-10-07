@@ -315,6 +315,30 @@ class CommandPolicy(unittest.TestCase):
         os.mkdir(os.path.join(self.folder, ".ssh"))
         self.assertEqual(self.level("Get-Content config", os.path.join(self.folder, ".ssh")), "block")
 
+    def test_broad_deletion_and_system_changes_are_blocked(self):
+        for command in ("ri -r x", "ri -Recurse -Force x", r"rm C:\x -Recurse -Force", "Remove-Item -Recu -Fo x",
+                        "Remove-Item -r x", "del /q /s x", "rd /s /q x", "erase /s x", "gci -Recurse | ri",
+                        r"& { ri C:\x -r }", "Invoke-Command -ScriptBlock { Remove-Item x }", "rm -rf x",
+                        "Set-ExecutionPolicy Unrestricted", "vssadmin delete shadows /all /quiet",
+                        r"Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender' -Name X -Value 1",
+                        r"New-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name x -Value y",
+                        "Clear-RecycleBin -Force", "git clean -fd", "git clean -fdx", "git clean -d --force"):
+            self.assertEqual(self.level(command), "block", command)
+        for command in ("Remove-Item x.txt", "del x.txt", "git rm -r --cached build"):  # one thing, with approval
+            self.assertEqual(self.level(command), "confirm", command)
+
+    def test_harmless_commands_arent_blocked(self):
+        self.assertEqual(self.level("git log --format=%h -5"), "allow")
+        self.assertEqual(self.level("git log --pretty=format:%h"), "allow")
+        self.assertEqual(self.level("Get-Process | Format-Table"), "confirm")
+        self.assertEqual(self.level("node -e console.log(1)"), "confirm")
+
+    def test_the_real_blocks_stay(self):
+        for command in ("format C: /q", "Format-Volume -DriveLetter D", "powershell -enc abc", "pwsh -e abc",
+                        r"& 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -enc abc", "ssh me@host",
+                        "Get-Content .env", "git push --force", "curl https://x.example"):
+            self.assertEqual(self.level(command), "block", command)
+
 
 if __name__ == "__main__":
     unittest.main()
