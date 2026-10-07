@@ -3293,7 +3293,7 @@ STRICT_YES = {"message_send", "install_run"} | POWER_STEPS
 
 def said_yes(words, plan):
     """True if words are a yes to her question about doing plan: "Yes, install it", "Okay, shut it down"."""
-    t = " ".join(re.sub(r"[^\w\s']", " ", str(words).lower().replace("’", "'")).split())
+    t = " ".join(re.sub(r"[^\w\s']", " ", str(words).lower().replace("\u2019", "'")).split())
     steps = [s for s in plan.get("steps") or [] if isinstance(s, dict)]
     verbs = "|".join(YES_VERBS[s["do"]] for s in steps if s.get("do") in YES_VERBS)
     names = "".join(f"|{re.escape(w)}" for s in steps for w in key_of(s.get("app") or "").split())  # "close Chrome"
