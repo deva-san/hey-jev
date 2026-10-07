@@ -391,6 +391,12 @@ class Listener:
         """A turn that starts within secs counts without the name, as a follow_up: she decides if it was for her."""
         self.armed, self.window_end = False, self.pos + int(secs * RATE)
 
+    def end(self):
+        """The audio stops here, as when she starts talking: a turn waiting in a pause ends now, as if finished,
+        rather than being lost when the listener starts over. One cut off while still talking is let go."""
+        if self.session is not None and not self.talking:
+            self._end()
+
     def talking_for(self):
         """Seconds the speech going on now has lasted, 0 when nobody is talking."""
         return (self.pos - self.speech_start) / RATE if self.speech_start is not None else 0.0

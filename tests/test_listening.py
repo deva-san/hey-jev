@@ -251,6 +251,9 @@ class FakeListener:
     def reset(self, window=0.0):
         self.resets.append(self.fed)
 
+    def end(self):
+        pass
+
     def open(self, secs):
         pass
 
@@ -409,6 +412,58 @@ class CatchUp(Case):
         a, fake, ran = self.turn_that_takes(siri.CATCH_UP + 5)
         self.assertLess(fake.fed, 10)
         self.assertIn("skipped", a.out.getvalue())
+
+
+# --------------------------------------------------------------------------- A4: said while she was thinking
+class WhileSheThinks(Case):
+    def test_blocks_from_before_she_talked_are_heard_then_the_listener_starts_over(self):
+        a = self.assistant()
+        fake = FakeListener()
+        a.put("listener", fake)
+        a.queue(blocks(0.5, 0.0))
+        a.rec.paused = True  # she talks, so the mic is off for a moment
+        a.rec.paused = False
+        a.queue(blocks(0.5, 0.0))
+        a.listen()
+        n = len(blocks(0.5, 0.0))
+        self.assertEqual(fake.fed, 2 * n)
+        self.assertEqual(fake.resets, [0, n])  # at the start, and at the break while she talked
+
+    FIRST, SECOND = "Hey Jev, who directed Iron Man?", "Hey Jev, also set a timer for five minutes."
+
+    def two_requests(self, said_meanwhile):
+        """'Hey Jev, who directed Iron Man?', and while the model thinks, said_meanwhile is queued (0.8 for the second
+        request's speech), then she answers. What reached handle()."""
+        a = self.assistant(ears=FakeEars(write=lambda audio: self.SECOND if np.any(np.isclose(audio, 0.8))
+                                         else self.FIRST))
+        handled = []
+
+        def handle(text, words, stt_ms=None, notify=None, gate=False):
+            handled.append(str(text))
+            if len(handled) == 1:
+                a.queue(said_meanwhile)
+                siri.say("Jon Favreau directed it.", None)
+            return True
+        with mock.patch.object(siri, "handle", handle), mock.patch.object(siri, "speak", lambda line: 0):
+            a.speak(blocks(0.5, 0.0) + blocks(2.0, 0.9) + blocks(1.5, 0.0))
+            a.listen()
+        return handled
+
+    def test_a_second_request_said_while_she_thinks_is_acted_on(self):
+        """'Hey Jev, also set a timer for five minutes.' said while she thought: her answer to the first used to throw
+        it away."""
+        handled = self.two_requests(blocks(0.5, 0.0) + blocks(2.0, 0.8) + blocks(1.5, 0.0))
+        self.assertEqual(handled, [self.FIRST, self.SECOND])
+
+    def test_one_she_started_talking_just_after_counts_as_finished(self):
+        """Only 0.3 s after you stopped, too soon for the turn to have ended: it ends at the break, not lost."""
+        handled = self.two_requests(blocks(0.5, 0.0) + blocks(2.0, 0.8) + blocks(0.3, 0.0))
+        self.assertEqual(handled, [self.FIRST, self.SECOND])
+
+    def test_one_she_talked_over_is_let_go(self):
+        """Still talking when she started: the rest was never heard, so it isn't acted on half said."""
+        handled = self.two_requests(blocks(0.5, 0.0) + blocks(2.0, 0.8))
+        self.assertEqual(handled, [self.FIRST])
 
 
 if __name__ == "__main__":

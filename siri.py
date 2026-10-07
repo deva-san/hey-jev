@@ -3674,8 +3674,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         gen = None
         while True:
             g, block = rec.blocks.get()
-            if g != rec.gen or not (rec.wake or rec.dictating):
-                continue  # from before she talked, a key press, a mic change, or since switching to right Alt
+            # what was said before she talked is heard too: dropping it lost what you said while she thought, nearly
+            # every turn, as her reply paused the mic. The listener starts over at the break, see below
+            if not (rec.wake or rec.dictating):
+                continue  # since switching to right Alt
             try:  # one bad phrase must never stop her listening
                 now_calls = win.call_apps() if settings.get("call_aware") else ()
                 if now_calls != calls[0]:
@@ -3684,7 +3686,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                           f"{'say Jev or Jarvis' if now_calls else 'unnamed requests count again'}]")
                 if g != gen:
                     gen = g
-                    held[0] = None  # a break in the audio: what was waiting for the rest goes too
+                    listener.end()  # a break in the audio: a turn in a pause counts as finished
+                    held[0] = None  # and what was waiting for the rest goes
                     listener.reset(next_window[0])
                     next_window[0] = 0.0
                 if window_ask[0] is not None:  # a turn ended without her talking, so no reset: open or close it here
