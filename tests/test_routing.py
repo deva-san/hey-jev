@@ -69,6 +69,13 @@ class Writing(Routing):
         self.assertEqual(self.steps("open notepad and type salt then pepper"),
                          [{"do": "open", "app": "Notepad"}, {"do": "type", "text": "salt then pepper"}])
 
+    def test_then_press_enter_still_presses_it(self):
+        typed = [{"do": "type", "text": "hello"}, {"do": "keys", "keys": "enter"}]
+        for words, steps in (("type hello then press enter", typed), ("type hello and then press enter", typed),
+                             ("open notepad and type hello then press enter", [{"do": "open", "app": "Notepad"}, *typed])):
+            with self.subTest(words=words):
+                self.assertEqual(self.steps(words), steps)
+
     def test_literal_text_is_still_typed(self):
         self.assertEqual(self.steps("type Hello, World! and press enter"),
                          [{"do": "type", "text": "Hello, World!"}, {"do": "keys", "keys": "enter"}])

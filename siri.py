@@ -1123,7 +1123,9 @@ NOT_LITERAL = re.compile(
 def _literal(t):
     """A literal type/write command, optional Enter/Tab afterwards. No model changes the text. Requests to compose
     something (a mail, poem, reply) or fill something in (today's date) go to the model instead."""
-    m = re.fullmatch(r"(?:type|write|enter)\s+(.+?)(?:\s+and\s+(?:press|hit)\s+(enter|tab))?", t, re.I)
+    # "then press Enter" too: local_compound passes the joins on as said
+    m = re.fullmatch(r"(?:type|write|enter)\s+(.+?)(?:\s+(?:and then|then|and)\s+(?:press|hit)\s+(enter|tab))?",
+                     t, re.I)
     if not m or NOT_LITERAL.match(m[1]):
         return None
     steps = [{"do": "type", "text": m[1]}]
