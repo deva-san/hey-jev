@@ -276,12 +276,8 @@ class FastIntentMatcher:
             return self.siri.make_plan([{"do": "youtube", "query": q, "play": False}], self.siri.say_line("youtube_results"))
 
         m_google = re.fullmatch(r"(?:google|search(?: google)?(?: for)?|look up) (?P<q>.+?)(?: on google)?", t)
-        if m_google and self.siri.wants_spoken(m_google["q"], spoken):
-            return None  # a question: the model looks it up and answers out loud
-        if m_google:
-            dest = "youtube" if self.siri.focused_on("youtube") else "google"
-            return self.siri.make_plan([{"do": dest, "query": m_google["q"], "play": False}],
-                                       self.siri.say_line("youtube_results" if dest == "youtube" else "google"))
+        if m_google:  # siri's own rule: a question is answered out loud, and "look up, there's a bird" isn't searched
+            return self.siri._search("google")(m_google)
 
         # -------------------------------------------------------------
         # 7. System Power, Lock, Themes

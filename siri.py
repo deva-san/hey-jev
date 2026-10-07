@@ -540,9 +540,12 @@ SITES = {  # "open youtube": what she calls it, and where it is
     "twitter": ("X", "https://x.com"),
 }
 DOMAIN = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|in|io|ai|dev|co|me|tv|app|gov|edu|uk)(?:/\S*)?")
+# "let's" stays before "play": "let's play cricket tomorrow" is talk in the room, so without her name it isn't taken
+# as a direct "play ..." (see handle), and with it fast_intent still plays "let's play some music"
 FILLER = re.compile(r"^(?:please|pls|kindly|can you|could you|would you|will you|can u|just|now|ok|okay|so|alright|"
                     r"yes|yeah|yep|"
-                    r"um+|uh+|hmm+|er+|and|then|also|hey|yo|go ahead and|i want you to|i'd like you to|let's|lets)\s+"
+                    r"um+|uh+|hmm+|er+|and|then|also|hey|yo|go ahead and|i want you to|i'd like you to|"
+                    r"let's(?! play\b)|lets(?! play\b))\s+"
                     r"|\s+(?:please|now|for me|thanks|thank you|okay|ok|right now|quickly)$")
 
 
@@ -631,6 +634,9 @@ def _play(m):
                 r"play|it)\b", q) or " and " in f" {q} " or \
             re.search(r"\b(?:spotify|vlc|jiosaavn|saavn|gaana|wynk|apple music|amazon music|soundcloud)\b", q):
         return None  # "play the first video", "play X and open Y" and Spotify need the model
+    if re.match(r"with\b|.* (?:tomorrow|tonight|today|later|this (?:morning|afternoon|evening|weekend)|after (?:school|"
+                r"work|lunch|dinner))$", q):
+        return None  # "play with the dog", "let's play cricket tomorrow": talk about playing, not a video
     return make_plan([{"do": "youtube", "query": q, "play": True}], say_line("youtube_play"))
 
 
@@ -662,8 +668,8 @@ def wants_spoken(query, said=""):
 def _search(where):
     def make(m):
         q = m["q"]
-        if " and " in f" {q} ":
-            return None
+        if " and " in f" {q} " or re.match(r"look up (?:at|there|there's|here|over|it's)\b", m.string):
+            return None  # "look up, there's a bird on the roof" was searched for
         if where == "google" and wants_spoken(q, m.string):
             print("  a question: the model answers it out loud")
             return None

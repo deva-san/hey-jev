@@ -92,5 +92,19 @@ class Play(Routing):
                          [{"do": "youtube", "query": "arijit singh songs", "play": True}])
 
 
+class RoomTalk(Routing):
+    """R5: talk about playing or looking up isn't a YouTube or Google search, and "let's play" isn't a direct ask."""
+
+    def test_talk_isnt_a_search(self):
+        for words in ("let's play cricket tomorrow", "play with the dog", "look up, there's a bird on the roof"):
+            with self.subTest(words=words):
+                self.assertIsNone(self.quick(words))
+
+    def test_lets_play_goes_to_the_model_without_her_name(self):
+        asked, _, _ = self.handle("let's play some music", "cold")
+        self.assertTrue(asked)
+        self.assertEqual(self.steps("let's play some music"), [{"do": "youtube", "query": "some music", "play": True}])
+
+
 if __name__ == "__main__":
     unittest.main()
