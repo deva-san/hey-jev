@@ -43,7 +43,12 @@ NOTES_DIR = os.path.join(win.APPDATA_DIR, "notes")
 # What the window says she's doing, as the popup shows it (see bubble.LOOKS)
 PILL = {"Listening": "listening", "Still listening": "window", "Transcribing": "thinking", "Thinking": "thinking",
         "Looking": "looking", "Doing it": "doing", "Speaking": "speaking", "Time's up": "speaking",
-        "Dictating": "dictating", "Finishing": "finishing", "Something went wrong": "error"}
+        "Dictating": "dictating", "Finishing": "finishing", "Something went wrong": "error", "Phone": "phone"}
+# learning your voice: siri says "Read this out loud (3 of 10)" or "Once more (3 of 10)", with the sentence
+ENROL = {"Read this out loud": "read", "Once more": "again"}
+HOLD = {"error": 3000, "phone": 6000, "note": 2000}  # ms these stay up before fading, nothing replaces them
+READY_NEWS = ("That didn't sound like you", "Stopped learning your voice", "Didn't catch")  # why a popup went away
+PHONE_BAD = ("Add your", "That code", "Too many", "No code", "Telegram ", "Pairing was busy")  # siri's phone news that's a problem
 LOG_FILE = win.log_path("Hey Jev.log")
 TYPING_WPM, SPEAKING_WPM = 40, 150  # average typing vs talking speed, for "time saved"
 ACTION_NAMES = {"open": "Open app", "close": "Close app", "minimise": "Minimise", "website": "Websites",
@@ -145,7 +150,7 @@ STATUS_COLORS = {
     "Thinking": "#7c3aed", "Looking": "#0891b2", "Doing it": "#ea580c", "Speaking": "#0d9488",
     "Something went wrong": "#dc2626",
     "Still listening": "#dc2626",
-    "Time's up": "#ca8a04", "Dictating": "#dc2626", "Finishing": "#2563eb",
+    "Time's up": "#ca8a04", "Dictating": "#dc2626", "Finishing": "#2563eb", "Phone": "#229ed9",
 }
 
 
@@ -985,7 +990,7 @@ class AssistantWindow:
                         command=lambda: self.toggle_on_top(self.on_top_var.get())).grid(row=8, column=1, rowspan=2, sticky="e")
 
         row(5, "Popup", "A small pill at the bottom of the screen: listening, what she heard, thinking, and what "
-                        "she's saying. Dictation always shows it.")
+                        "she's saying. Dictation and learning your voice always show it.")
         self.popup_var = tk.BooleanVar(value=self.popup)
         ttk.Checkbutton(form, text="Show the popup", variable=self.popup_var,
                         command=self.popup_changed).grid(row=10, column=1, rowspan=2, sticky="e")
@@ -1057,16 +1062,21 @@ class AssistantWindow:
         ttk.Checkbutton(yours, text="Only answer my voice", variable=self.voice_id_var,
                         command=self.voice_id_changed).pack(side="left")
         ttk.Button(yours, text="Learn", command=self.learn_voice).pack(side="left", padx=(self.px(6), 0))
-        row(16, "Phone", "Talk to her from your phone on Telegram. Add your bot's token in Keys, press Pair, send "
-                         "/start to your bot and type the code it gives you here. Only your account can use it, and "
-                         "anything risky waits for your Yes.")
+        row(16, "Phone", "Talk to her from your phone on Telegram. Save your bot's token in Keys, send /start to your "
+                         "bot, then type the 8-letter code it replies with here and press Pair. No code? Press Pair "
+                         "with the box empty first. Only your account can use it, and anything risky waits for "
+                         "your Yes.")
         phone = tk.Frame(form, bg=BG)
         phone.grid(row=32, column=1, rowspan=2, sticky="e")
-        self.pair_code = ttk.Entry(phone, width=12)
+        self.pair_code = HintEntry(phone, "Code from the bot", width=16)
         self.pair_code.pack(side="left")
         self.pair_code.bind("<Return>", lambda e: self.pair_phone())
         ttk.Button(phone, text="Pair", command=self.pair_phone).pack(side="left", padx=(self.px(6), 0))
         ttk.Button(phone, text="Unpair", command=self.unpair_phone).pack(side="left", padx=(self.px(6), 0))
+        # the phone's own line: paired or not, and pairing news, which the shared note below gets written over by
+        self.phone_state = self._label(form, "", self.f_small, MUTED, wraplength=self.px(620))
+        self.phone_state.grid(row=34, column=0, columnspan=2, sticky="w", pady=(self.px(4), 0))
+        self._phone_status()
         self.settings_note = self._label(page, "", self.f_small, MUTED, wraplength=self.px(660))
         self.settings_note.pack(fill="x", pady=(self.px(18), 0))
         self.models_loaded = False
@@ -1110,19 +1120,43 @@ class AssistantWindow:
                    "Echo cancelling off. While a video plays, say \u201cHey Jev\u201d close to the mic, or hold right Alt")
 
     def pair_phone(self):
-        """Pair with a code in the box, or open pairing to get one."""
-        code = self.pair_code.get().strip()
-        if code:
-            self.controls.put(("pair code", code))
-            self.pair_code.delete(0, "end")
-            self._note("Checking the code\u2026")
-        else:
+        """Pair with the code in the box, or open pairing to get one."""
+        typed = self.pair_code.get()
+        pasted = re.search(r"code is\s+([A-Za-z0-9]{8})\b", typed, re.I)  # the bot's whole reply, pasted
+        code = pasted[1] if pasted else "".join(typed.split())
+        if not get_secret("TELEGRAM_BOT_TOKEN"):
+            self._phone_status("Add your bot's token in Keys first, then press Pair here.", error=True)
+        elif not code and settings.get("telegram_owner"):
+            self._phone_status(f"Already paired with {settings.get('telegram_owner_name') or 'your account'}. To "
+                               "pair another Telegram account, press Unpair first.")
+        elif not code:
             self.controls.put("pair phone")
-            self._note("Send /start to your bot on Telegram within 10 minutes, then type its code here and press Pair.")
+            self._phone_status("Pairing is open for 10 minutes: send /start to your bot on Telegram, then type the "
+                               "8-letter code it replies with in the box and press Pair.")
+        elif re.fullmatch(r"[A-Za-z0-9]{8}", code):
+            self.controls.put(("pair code", code))
+            self.pair_code.clear()
+            self._phone_status("Checking the code\u2026")
+        else:  # a token or a bot name pasted here would have been taken for a wrong code
+            self.pair_code.clear()
+            self._phone_status("That isn't a pairing code: it's 8 letters and numbers, from your bot after /start. "
+                               "To get one, leave the box empty and press Pair.", error=True)
 
     def unpair_phone(self):
         self.controls.put("unpair phone")
-        self._note("Unpaired: the bot won't answer anyone now.")
+        self._phone_status("Unpairing\u2026")
+
+    def _phone_status(self, news=None, error=False):
+        """The Phone row's line: the latest pairing news, else whether it's set up and paired."""
+        if news is None:
+            if settings.get("telegram_owner"):
+                news = f"Paired with {settings.get('telegram_owner_name') or 'your Telegram account'}. Message " \
+                       "your bot to talk to her."
+            elif not get_secret("TELEGRAM_BOT_TOKEN"):
+                news = "Not set up: add your bot's token in Keys."
+            else:
+                news = "Not paired yet: send /start to your bot, or press Pair with the box empty."
+        self.phone_state.configure(text=news, fg=ERROR if error else (TEAL if news.startswith("Paired") else MUTED))
 
     def learn_voice(self):
         self.controls.put("learn voice")
@@ -1300,17 +1334,19 @@ class AssistantWindow:
         bar = tk.Frame(page, bg=BG)
         bar.pack(fill="x", pady=(self.px(20), 0))
         ttk.Button(bar, text="Save keys", command=self.save_keys).pack(side="right")
-        self.keys_message = self._label(bar, "", self.f_small, ERROR)
+        self.keys_message = self._label(bar, "", self.f_small, ERROR, wraplength=self.px(520))
         self.keys_message.pack(side="left")
         return page
 
     def save_keys(self):
         try:
+            saved = []
             for key_name in KEY_NAMES:
                 field = self.key_fields[key_name]
                 value = field.get()
                 if value:
                     save_secret(key_name, value)
+                    saved.append(key_name)
                     field.clear()
                     field.set_hint("Already saved")
             still_missing = missing_secrets()
@@ -1320,7 +1356,13 @@ class AssistantWindow:
                 return
             from siri import reload_keys
             reload_keys()
-            self.keys_message.configure(text="Saved", fg=MUTED)
+            phone = "TELEGRAM_BOT_TOKEN" in saved
+            if phone:  # the bot starts with it, and pairing opens for 10 minutes
+                self.controls.put("phone token")
+            self.keys_message.configure(text="Saved. Now send /start to your bot on Telegram and type the code it "
+                                        "replies with in Settings > Phone" if phone and not settings.get(
+                                            "telegram_owner") else "Saved", fg=MUTED)
+            self._phone_status()
             self._start_worker()
         except Exception as exc:
             self.keys_message.configure(text=str(exc), fg=ERROR)
@@ -1386,14 +1428,24 @@ class AssistantWindow:
         if detail is not None:  # None keeps what's there, like her last reply
             detail = " ".join(str(detail).split())
             self.detail.configure(text=detail if len(detail) <= 110 else detail[:109] + "\u2026")
-        self.dot.configure(fg=STATUS_COLORS.get(state, TEXT))
-        pill = PILL.get(state)
-        if pill and (self.popup or pill in ("dictating", "finishing")):
+        enrol = next((look for start, look in ENROL.items() if state.startswith(start)), None)
+        self.dot.configure(fg=STATUS_COLORS.get(state, STATUS_COLORS["Listening"] if enrol else TEXT))
+        if state == "Phone" and detail:  # next to the code box too, where you're looking
+            self._phone_status(detail, error=detail.startswith(PHONE_BAD))
+        pill, text = PILL.get(state) or enrol, detail
+        if enrol:  # the sentence to read, and how far along: "3/10  Hey Jev, set a timer for five minutes."
+            n = re.search(r"(\d+) of (\d+)", state)
+            text = f"{n[1]}/{n[2]}  {detail}" if n else detail
+        elif state == "Ready" and detail and self.bubble.visible and \
+                detail.replace("\u2019", "'").startswith(READY_NEWS):  # why the popup's going, not just a fade
+            pill = "note"
+        # dictation, your voice's sentences, the phone and why it went away show even with the popup off
+        if pill and (self.popup or pill in ("dictating", "finishing", "read", "again", "note", "phone")):
             # "Go ahead" and "Let go of right Alt" are for the window, the popup says Listening
             hint = state == "Listening" and str(detail or "").startswith(("Go ahead", "Let go"))
-            self.bubble.show(pill, None if hint else detail)
-            if pill == "error":
-                self.bubble.hide(3000)
+            self.bubble.show(pill, None if hint else text)
+            if pill in HOLD:
+                self.bubble.hide(HOLD[pill])
         else:
             self.bubble.hide(900 if state == "Ready" else 0)
 

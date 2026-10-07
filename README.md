@@ -283,14 +283,16 @@ Hermes' cron rules: a command, install or coding job that comes due more than 2 
 
 ### Your phone (Telegram)
 
-Talk to her from your phone. Make a bot with [@BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token), paste its token in Keys (it's kept in Credential Manager), press Settings > Phone > Pair, send `/start` to your bot, and type the code it sends back into that box on the PC. That proves you have both. It uses `python-telegram-bot` 22.8, the library Hermes Agent pins (`telegram_bot.py`), and Hermes' pairing rules: 8 letters, kept only hashed, an hour to use it, locked for an hour after 5 wrong codes.
+Talk to her from your phone. Make a bot with [@BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token), paste its token in Keys (it's kept in Credential Manager), press Settings > Phone > Pair, send `/start` to your bot, and type the code it sends back into that box on the PC. That proves you have both. It uses `python-telegram-bot` 22.8, the library Hermes Agent pins (`telegram_bot.py`), and Hermes' pairing rules: 8 letters, kept only hashed, good only while the pairing is open (10 minutes from pressing Pair), locked for an hour after 5 wrong codes. Pressing Pair again starts afresh, so codes strangers asked for can't keep yours out.
 
-- Until you pair, it doesn't listen at all. After, only your account counts, and you're told once about anyone else who tries.
+- Until you pair, all it answers is `/start`: with a code while pairing is open, else with how to open it. Nothing else runs. After, only your account counts, and you're told once about anyone else who tries.
 - It asks Telegram for messages, so nothing on the PC is open to the internet. Only private chats, messages and button taps.
 - Anything sent while the PC was off or asleep, or over 2 minutes ago, is dropped, never run late.
 - A message goes through the same turn as voice, and her answer comes back to the chat.
 - A risky step comes back as a question with Yes and No buttons. Only a tap answers it, within 5 minutes. A typed yes, or a yes said at the PC, doesn't, and a question asked at the PC can't be answered from the phone.
 - Voice notes are written out by the speech-to-text on this PC. They do pass through Telegram's servers, as every Telegram voice note does.
+- "Send me a screenshot" (or just "screenshot" on the phone) sends a picture of the PC's screen to your chat, 1920 pixels wide, her popup left out. It only ever goes to your own paired account.
+- If Telegram can't be reached, it keeps trying. If the token stops working, even while it's listening, the PC says so next to Settings > Phone. A second tap on Yes or No does nothing.
 - The token never reaches the log, even inside the library's own errors. Her heads-ups skip the bot's own messages.
 - It only works while the PC is on.
 

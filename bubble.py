@@ -40,6 +40,10 @@ LOOKS = {  # state: (animation, what moves it, tint, words when there are none)
     "doing": ("dots", None, (1.0, 0.84, 0.66), "On it\u2026"),
     "finishing": ("dots", None, (0.72, 0.86, 1.0), "Writing it up\u2026"),
     "error": ("wave", None, (1.0, 0.3, 0.3), "Something went wrong"),
+    "phone": ("wave", None, (0.45, 0.75, 1.0), "Phone"),  # pairing news, a calm blue line
+    "read": ("wave", "mic", (1.0, 1.0, 1.0), "Read this out loud"),  # learning your voice: the sentence to read
+    "again": ("wave", "mic", (1.0, 0.6, 0.6), "Once more"),  # that one didn't count, read it again
+    "note": ("wave", None, (0.6, 0.6, 0.6), ""),  # why she let it go: "That didn't sound like you"
 }
 GAIN = {"mic": 0.06, "voice": 0.2}  # loudness that fills the wave: a voice into the mic, and her own voice
 
@@ -290,7 +294,7 @@ class Bubble:
         c.create_rectangle(r, 0, w - r, h, fill=PILL, outline=PILL)
         c.create_image(self.x0, 0, image=self.photo, anchor="nw")
         if self.text:
-            colour = {"window": DIM_TEXT, "error": ERROR_TEXT}.get(self.state, TEXT)
+            colour = {"window": DIM_TEXT, "note": DIM_TEXT, "error": ERROR_TEXT}.get(self.state, TEXT)
             c.create_text(self.x0 + self.iw + 6 * s, r, text=self.text, fill=colour, font=self.font, anchor="w")
         if self.state == "window":  # the follow-up window running down
             total = float(getattr(sys.modules.get("siri"), "FOLLOW_UP", 12.0))

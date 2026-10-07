@@ -47,6 +47,21 @@ class Pairing(unittest.TestCase):
         self.assertEqual((paired["user_id"], why), (7, "ok"))
         self.assertEqual(p.confirm(code), (None, "none"))  # used up
 
+    def test_a_strangers_start_doesnt_knock_out_your_code(self):
+        p = telegram_bot.Pairing()
+        p.start()
+        yours = p.request(7, "Hari")
+        p.request(99, "someone")
+        paired, why = p.confirm(yours)
+        self.assertEqual((paired["user_id"], why), (7, "ok"))
+
+    def test_no_more_than_three_waiting(self):
+        p = telegram_bot.Pairing()
+        p.start()
+        self.assertTrue(all(p.request(u, "x") for u in (1, 2, 3)))
+        self.assertIsNone(p.request(4, "x"))
+        self.assertTrue(p.request(2, "x"))  # one already waiting may ask again
+
     def test_five_wrong_codes_lock_it(self):
         p = telegram_bot.Pairing()
         p.start()
@@ -70,14 +85,18 @@ class Messages(unittest.TestCase):
             asyncio.run(bot._message(upd, ctx))
         return ctx
 
-    def test_before_pairing_only_a_start_while_pairing_is_open_gets_anything(self):
+    def test_before_pairing_a_start_gets_how_to_pair_or_a_code_and_nothing_else_runs(self):
         bot, got, pairs = self.bot()
         upd, replies = update("/start")
         self.run_message(bot, upd)
-        self.assertEqual(replies, [])  # pairing not open: silence
+        self.assertIn("press Pair", replies[0])  # pairing not open: how to open it, never silence
+        upd, replies = update("/start")
+        self.run_message(bot, upd)
+        self.assertEqual(replies, [])  # and only once
+        self.run_message(bot, update("shut down the pc")[0])
         bot.pairing.start()
         self.run_message(bot, update("shut down the pc")[0])
-        self.assertEqual(got, [])
+        self.assertEqual(got, [])  # nothing but /start, ever, before pairing
         upd, replies = update("/start")
         self.run_message(bot, upd)
         self.assertIn("Your code is", replies[0])
@@ -112,6 +131,115 @@ class Messages(unittest.TestCase):
                                                      effective_user=SimpleNamespace(id=user_id)), None))
         self.assertEqual(got, [(True, "4", 7, 50)])
         self.assertEqual(len(answered), 2)  # every tap gets its spinner stopped
+
+
+class Fixes(unittest.TestCase):
+    """What the check of the fix found: a restart that was lost, a revoked token going unnoticed, strangers' codes
+    keeping yours out, a second tap, and right Alt over the sentence you're reading."""
+
+    def test_pressing_pair_again_clears_strangers_codes_and_a_closed_pairing_takes_none(self):
+        p = telegram_bot.Pairing()
+        p.start()
+        for u in (1, 2, 3):
+            p.request(u, "stranger")
+        self.assertIsNone(p.request(7, "Hari"))  # busy
+        p.start()  # Pair again
+        code = p.request(7, "Hari")
+        self.assertTrue(code)
+        p.until = time.time() - 1  # the 10 minutes are up
+        self.assertEqual(p.confirm(code), (None, "none"))
+
+    def test_locked_pairing_doesnt_open(self):
+        p = telegram_bot.Pairing()
+        p.locked_until = time.time() + 3000
+        self.assertFalse(p.start())
+        self.assertGreaterEqual(p.minutes_left, 49)
+
+    def test_a_busy_pairing_is_said_on_both_ends(self):
+        pairs = []
+        bot = telegram_bot.Bot(on_message=None, on_tap=None, on_pair=pairs.append)
+        bot.pairing.start()
+        for u in (1, 2, 3):
+            bot.pairing.request(u, "stranger")
+        upd, replies = update("/start")
+        with mock.patch.dict(siri.settings._load(), {"telegram_owner": None}):
+            asyncio.run(bot._message(upd, Context()))
+        self.assertIn("press Pair again", replies[0])
+        self.assertEqual(pairs, [None])
+
+    def test_a_second_tap_on_the_same_question_does_nothing(self):
+        got = []
+        bot = telegram_bot.Bot(on_message=None, on_tap=lambda *a: got.append(a))
+
+        async def answer():
+            pass
+        for _ in range(2):
+            q = SimpleNamespace(data="yes:4", answer=answer, message=SimpleNamespace(chat_id=7, message_id=50))
+            with mock.patch.dict(siri.settings._load(), {"telegram_owner": 7}):
+                asyncio.run(bot._tap(SimpleNamespace(callback_query=q, effective_user=SimpleNamespace(id=7)), None))
+        self.assertEqual(len(got), 1)
+
+    def test_a_token_revoked_while_listening_stops_it_with_why(self):
+        from telegram.error import InvalidToken
+        bot = telegram_bot.Bot(on_message=None, on_tap=None)
+        loop = asyncio.new_event_loop()
+
+        async def polling():
+            await asyncio.sleep(0.05)
+            raise InvalidToken()
+        try:
+            loop.create_task(polling(), name=telegram_bot.POLLING)
+            loop.create_task(bot._watch())
+            loop.call_later(5, loop.stop)  # a backstop: the test fails rather than hangs
+            loop.run_forever()
+        finally:
+            loop.close()
+        self.assertEqual(bot.why, "InvalidToken")
+
+    def test_restart_while_stopping_starts_again_and_stop_ends_a_stuck_start(self):
+        """Telegram unreachable as it starts (the library retries for ever): a new token still gets used."""
+        polls, gate = [], __import__("threading").Event()
+
+        def poll(bot):
+            polls.append(1)
+            loop = asyncio.new_event_loop()
+            with bot.lock:
+                if bot.stopping:
+                    loop.close()
+                    return ""
+                bot.loop = loop
+            try:  # stands in for run_polling stuck getting going: run_until_complete on what never finishes
+                gate.set()
+                loop.run_until_complete(asyncio.sleep(3600))
+            except RuntimeError:
+                return "RuntimeError"
+            finally:
+                bot.loop = None
+                loop.close()
+            return ""
+        bot = telegram_bot.Bot(on_message=None, on_tap=None)
+        with mock.patch.object(telegram_bot, "get_secret", lambda k: "t"),                 mock.patch.object(telegram_bot.Bot, "_poll", poll):
+            self.assertTrue(bot.start())
+            self.assertTrue(gate.wait(5))
+            gate.clear()
+            self.assertTrue(bot.restart())  # doesn't wait: stops the stuck one, then starts again
+            self.assertTrue(gate.wait(5))
+            self.assertEqual(len(polls), 2)
+            bot.stop()
+            self.assertFalse(bot.running)
+            self.assertTrue(bot.start())  # and a start after a stop starts afresh
+            self.assertTrue(gate.wait(5))
+            bot.stop()
+        self.assertEqual(len(polls), 3)
+
+    def test_a_bad_token_is_said_once_and_it_stops(self):
+        stops = []
+        bot = telegram_bot.Bot(on_message=None, on_tap=None, on_stop=stops.append)
+        with mock.patch.object(telegram_bot, "get_secret", lambda k: "t"),                 mock.patch.object(telegram_bot.Bot, "_poll", lambda self: "InvalidToken"):
+            bot.start()
+            bot.thread.join(5)
+        self.assertEqual(stops, ["InvalidToken"])
+        self.assertFalse(bot.running)
 
 
 class Questions(unittest.TestCase):

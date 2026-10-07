@@ -334,6 +334,7 @@ REPLIES = {
     "go_ahead": ["Sure, what would you like me to do?", "Okay, what can I do for you?"],
     "screen_ask": ["Should I look at your screen for that?"],
     "filler": ["On it.", "One moment.", "Sure, one sec."],  # while she thinks, see fill_silence
+    "screenshot_sent": ["Sent it to your phone.", "It's on your phone."],
     "filler_ask": ["Let me check.", "Let me see.", "One moment."],
 }
 
@@ -1532,6 +1533,7 @@ lookup, recall, web, read, weather, news and skill_view send the results back to
 {"do":"note","title":"Shopping list","text":"..."}  save a note for them. {"do":"open_notes"}  show their notes
 {"do":"command","command":"npm test","cwd":"C:\\\\path\\\\to\\\\project","description":"Run the tests"}  only when they explicitly ask for terminal, command, test, build, lint, Git or system-diagnostic work: run it in the background, hidden. Code checks it: read-only checks and tests run; anything that changes files or programs waits for their explicit approval; destructive/admin/security/credential/download commands are blocked. Always give an existing full cwd. Never put secrets in a command
 {"do":"schedule","when":"2026-10-07T18:00:00","repeat":"","description":"Check C drive","task":{"kind":"lookup","what":"disk"}}  durable work at a time. when: local ISO date/time, "tomorrow at 6 PM", "in 2 hours". repeat is empty, "every 30 minutes", "daily at 6 PM", or "every Monday at 9 AM". task is one of: {"kind":"reminder","text":"call Mum"}; {"kind":"lookup","what":"disk|battery|cpu|memory|apps|network|uptime|system"}; {"kind":"research","topic":"..."}; {"kind":"command","command":"git status","cwd":"C:\\\\path"}. Never schedule send, delete, publish, pay, account, security, typing, clicking or screen actions
+{"do":"send_screenshot","caption":""}  send a picture of their screen to their phone on Telegram, only when they ask for one ("send me a screenshot", "send my screen to my phone"). It goes only to their own paired Telegram, never anyone else; to a person, that's a message. On the phone, "screenshot" means this
 {"do":"code","task":"add a dark mode toggle to the settings page","cwd":"C:\\\\path\\\\to\\\\project"}  coding work on one of their projects, when they ask for it: OpenCode does it in the background in that git project folder, she asks first and tells them when it's done. Always the full folder
 {"do":"install","app":"VLC"}  download and install, or update, an app on this PC: app exactly as they named it. She looks it up in winget and the Microsoft Store herself, picks the right version for this PC, reads it back and asks first. Never use a website, google or a command to download an app
 {"do":"message","app":"whatsapp","contact":"Mum","text":"hi"}  message someone in a chat app: whatsapp, telegram, or another one on this PC like signal, slack or discord. app and contact exactly as they said them, text exactly the words to send. You never send it: the chat opens with the text typed in and they say yes first. If you don't know the person or the app, still use this step, she works it out herself. Only for a plain message they dictated; never invent or add to their words
@@ -1576,7 +1578,8 @@ EDIT_WORDS = re.compile(r"\b(?:writ|typ|add|put|replac|chang|delet|eras|remov|pr
 # Google Chrome?" A model once planned that for "No, it is already opened."
 ASKS_FOR = {"type": EDIT_WORDS, "keys": EDIT_WORDS, "close": re.compile(r"\b(?:close|quit|exit|kill|shut)", re.I),
             "minimise": re.compile(r"\b(?:minimi[sz]e|hide)", re.I), "lock": re.compile(r"\block", re.I),
-            "sleep": re.compile(r"\bsleep", re.I)}
+            "sleep": re.compile(r"\bsleep", re.I),
+            "send_screenshot": re.compile(r"\b(?:screen ?shot|screen|snap|picture|photo)", re.I)}
 # After reading the web or messages, only these go ahead without a yes, whatever the words: they show, play or look
 # things up, or ask for themselves later (a message, an install, a command's approval). Words can't count there:
 # "look up how to make biryani" would let a page's typing through, "make" being an edit word, and nothing would stop
@@ -2352,6 +2355,7 @@ KNOWN_STEPS = {"open", "close", "minimise", "website", "youtube", "google", "med
                "new_tab", "timer", "cancel_timers", "dark_mode", "lock", "sleep", "shutdown", "restart", "abort_shutdown",
                "dictate", "screen", "memory", "lookup", "recall", "web", "read", "weather", "news", "skill_view",
                "skill", "research", "note", "open_notes", "command", "schedule", "install", "message", "contact", "code",
+               "send_screenshot",
                "task_control", "window", "open_folder", "screenshot", "message_send", "install_run", "task_queued",
                "click", "wait"}
 
@@ -3125,7 +3129,8 @@ WAIT_AFTER = {"open": 0.8, "new_tab": 0.5, "website": 3.0, "youtube": 3.0, "goog
 SPEAK_FIRST = ("lock", "sleep")  # and muting: she says it first, or she'd cut herself off
 # and these she says once they're done, never while they run: she said "Closed Messages." with Messages not running,
 # and "Sent to Mum." for a message to Ravi before it was sent, or refused. All quick, closing an app takes longest
-SAY_AFTER = {"close", "minimise", "message_send", "install_run", "contact", "task_control", "memory", "skill", "note"}
+SAY_AFTER = {"close", "minimise", "message_send", "install_run", "contact", "task_control", "memory", "skill", "note",
+             "send_screenshot"}
 
 
 def find_app(name):
@@ -3572,6 +3577,17 @@ def do_step(step):
     if do == "screenshot":
         win.open_snipping_tool()
         return "screenshot"
+    if do == "send_screenshot":  # only ever to your own paired Telegram (telegram_bot.owner), her popup left out
+        chat = telegram_bot.owner()
+        if chat is None or PHONE["photo"] is None:
+            raise RuntimeError("Pair your phone in Settings > Phone first, then I can send it there")
+        rgb, _ = win.screenshot()
+        picture = vision.png(vision.shrink(rgb, SCREENSHOT_WIDTH))
+        caption = " ".join(str(step.get("caption") or "").split())[:200] or \
+            time.strftime("Your screen at %I:%M %p").replace(" 0", " ")
+        if not PHONE["photo"](chat, picture, caption):
+            raise RuntimeError("Telegram didn't take the screenshot")
+        return f"sent to your phone ({len(picture) // 1024} KB)"
     if do == "message_send":  # only ever reached through a yes to the question stage_message asked
         SENT_LINE[0] = ""  # never the last one's: she said "Sent to Mum." for a message to Ravi
         ready = STAGED["ready"] if time.time() < STAGED["until"] else None
@@ -3669,11 +3685,14 @@ def memory_trouble(error):
     return "That didn't go into my memory"
 
 
+SCREENSHOT_WIDTH = 1920  # a screenshot for your phone: sharp there, and well under Telegram's 10 MB for a photo
+
+
 def default_line(steps):
     """A scripted line for steps the model said nothing about, so opening things isn't silent. Scroll, keys, media
     and volume stay quiet, they show for themselves."""
     lines = {"open": "app_open", "website": "app_open", "google": "google", "close": "closed", "type": "typed",
-             "timer": "timer_set", "new_tab": None, "task_queued": None}
+             "timer": "timer_set", "new_tab": None, "task_queued": None, "send_screenshot": "screenshot_sent"}
     for s in steps:
         if s["do"] == "youtube":
             return say_line("youtube_play" if s.get("play", True) else "youtube_results")
@@ -4189,7 +4208,8 @@ PENDING = {"plan": None, "until": 0.0, "soon": 0.0, "origin": "voice", "id": ""}
 # asked on the phone, or the other way round. id: which question, for the phone's buttons
 REPLY_TO = contextvars.ContextVar("reply_to", default=None)  # a turn from your phone: her lines go here, not out loud
 PHONE_CHAT = contextvars.ContextVar("phone_chat", default=None)  # and the chat it came from, for a task's result
-PHONE = {"send": None, "ask": None}  # set by run_voice_assistant once Telegram is there: send(chat, line), ask(chat, q)
+PHONE = {"send": None, "ask": None, "photo": None}  # set by run_voice_assistant once Telegram is there: send(chat,
+# line), ask(chat, question), photo(chat, png bytes, caption)
 TAPPED = contextvars.ContextVar("tapped", default=False)  # the phone's Yes button: the only yes for a phone question
 PHONE_WAITS = 300.0  # seconds a question asked on the phone waits for a tap, as Hermes' approvals do
 
@@ -4234,6 +4254,22 @@ def said_yes(words, plan):
         bool(re.search(rf"\b(?:{CLEAR_YES}{'|' + verbs if verbs else ''})\b", t))
 
 
+SEND_SHOT = re.compile(r"(?:(?:send|share|show|give)(?: me| it)?(?: a| the| my)? screen ?shot(?: of (?:the |my )?screen)?"
+                       r"|(?:send|share)(?: me)?(?: the| my)? screen)(?: (?:to|on) (?:my |the )?(?:phone|mobile|"
+                       r"telegram))?|(?:take|grab)(?: a)? screen ?shot(?: and send it(?: to (?:my |the )?(?:phone|mobile|"
+                       r"telegram))?| for my phone)", re.I)
+PHONE_SHOT = re.compile(r"(?:(?:take|grab|get)(?: me)?(?: a)? )?screen ?shot|(?:my )?screen|what'?s on (?:my|the) screen "
+                        r"(?:as|in) a (?:picture|photo)", re.I)  # said on the phone, where a snipping tool is no use
+
+
+def phone_screenshot(words):
+    """A screenshot for your phone, asked for in so many words, or just "screenshot" on the phone: no model needed."""
+    t = plain(words)
+    if SEND_SHOT.fullmatch(t) or (origin() == "phone" and PHONE_SHOT.fullmatch(t)):
+        return make_plan([{"do": "send_screenshot"}])
+    return None
+
+
 def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     """One turn. text is what she heard, words the same without her name. gate: she wasn't called by name first, so
     she may decide it wasn't for her. Returns "dictate", "playing" if she put music or a video on, "chat" if she only
@@ -4274,7 +4310,9 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
             return False
         plan = make_plan(say=say_line("go_ahead"))  # "yes" to her "Anything you'd like me to do?"
     else:
-        plan = quick(words, gate)
+        # a screenshot for the phone: straight away when called by name, or asked on the phone; heard without her
+        # name, the model decides it was for her first, as for anything that leaves the PC
+        plan = (None if gate else phone_screenshot(words)) or quick(words, gate)
         # Always-on mic: typing, Enter, closing apps and other consequential changes need the model to decide the
         # words were for her first. Safe opens, sites, volume, media, scrolling and tab navigation stay instant, and
         # so do shutdown and restart, which always get a yes or no first (below): asked instead, the model said it
@@ -4858,7 +4896,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             return
         if find_name(text):
             hers[0] = session
-        if find_name(text) and not busy.locked() and not rec.dictating and listener.state() is None and not held[0]:
+        if find_name(text) and not busy.locked() and not rec.dictating and listener.state() is None and not held[0] \
+                and enrolling[0] is None:  # reading her a sentence: it stays up while you read it
             named[0] = True
             emit(notify, "Listening", "Go ahead\u2026")
 
@@ -4866,7 +4905,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         """The words so far while someone talks, from Nemotron: her name brings the popup up before you've
         finished, and from then on, as after a bare "Hey Jev" or in the follow-up window, it shows what she's
         hearing. Talk in the room that isn't for her shows nothing."""
-        if busy.locked() or held[0] or not words:
+        if busy.locked() or held[0] or not words or enrolling[0] is not None:  # the sentence stays up as you read
             return
         latest = lambda t: t if len(t) <= 50 else "\u2026" + t[-49:]  # the popup has room for about 50 letters
         if rec.dictating:
@@ -5030,7 +5069,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             time.sleep(0.05)
 
     def ptt_turn(audio, press=None):
-        emit(notify, "Transcribing", "Working out what you said\u2026")
+        if enrolling[0] is None:  # reading her the sentences for your voice: the one to read stays up
+            emit(notify, "Transcribing", "Working out what you said\u2026")
         try:
             if press is None:
                 text, ms = transcribe(audio)
@@ -5076,7 +5116,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 pressed[0]["feeder"] = threading.Thread(target=feed_ptt, args=(pressed[0],), daemon=True)
                 pressed[0]["feeder"].start()
             print("\n[listening]", end="", flush=True)
-            emit(notify, "Listening", "Let go of right Alt when you\u2019re done")
+            if enrolling[0] is None:
+                emit(notify, "Listening", "Let go of right Alt when you\u2019re done")
 
     def stop_recording():
         if rec.on:
@@ -5226,42 +5267,54 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         lines sent back to the chat instead of said, and her questions sent with Yes and No buttons."""
         while True:
             job, chat = phone_jobs.get()
-            lines, tapped = [], isinstance(job, tuple)
-            if tapped and job[2] in job_asks:  # a running coding job's question, answered
-                phone.settle(chat, job[3], "Yes." if job[1] else "No.")
-                job_asks[job[2]][1] = job[1]
-                job_asks[job[2]][0].set()
-                continue
-            to, tap, where = REPLY_TO.set(lines), TAPPED.set(tapped), PHONE_CHAT.set(chat)
-            asked = None
             try:
-                with busy:
-                    before = PENDING["id"]
-                    if tapped:
-                        _, yes, ask, message = job
-                        live = PENDING["origin"] == "phone" and str(PENDING["id"]) == ask and \
-                            PENDING["plan"] is not None and time.time() < PENDING["until"]
-                        phone.settle(chat, message, ("Yes." if yes else "No.") if live else "Expired, not run.")
-                        if not live:
-                            continue
-                        handle("yes" if yes else "no", None, None, notify)
-                    else:
-                        handle(job, job, None, notify)
-                    if PENDING["id"] != before and PENDING["origin"] == "phone":
-                        asked = PENDING["id"]
-            except Exception as exc:
+                phone_job(job, chat)
+            except Exception as exc:  # one bad job never ends the phone: the next message is answered
                 print(f"\n  phone turn failed: {exc!r}")
-                lines.append("Something went wrong on the PC, sorry.")
-            finally:
-                REPLY_TO.reset(to)
-                TAPPED.reset(tap)
-                PHONE_CHAT.reset(where)
-            phone.send(chat, "\n".join(lines) or "Done.", ask=asked)
+
+    def phone_job(job, chat):
+        """One message or tap from your phone."""
+        if chat != telegram_bot.owner():  # unpaired while it waited its turn
+            return
+        lines, tapped = [], isinstance(job, tuple)
+        entry = job_asks.get(job[2]) if tapped else None
+        if entry is not None:  # a running coding job's question, answered
+            entry[1] = job[1]
+            entry[0].set()
+            phone.settle(chat, job[3], "Yes." if job[1] else "No.")
+            return
+        to, tap, where = REPLY_TO.set(lines), TAPPED.set(tapped), PHONE_CHAT.set(chat)
+        asked = None
+        try:
+            with busy:
+                before = PENDING["id"]
+                if tapped:
+                    _, yes, ask, message = job
+                    live = PENDING["origin"] == "phone" and str(PENDING["id"]) == ask and \
+                        PENDING["plan"] is not None and time.time() < PENDING["until"]
+                    phone.settle(chat, message, ("Yes." if yes else "No.") if live else "Expired, not run.")
+                    if not live:
+                        return
+                    handle("yes" if yes else "no", None, None, notify)
+                else:
+                    handle(job, job, None, notify)
+                if PENDING["id"] != before and PENDING["origin"] == "phone":
+                    asked = PENDING["id"]
+        except Exception as exc:
+            print(f"\n  phone turn failed: {exc!r}")
+            lines.append("Something went wrong on the PC, sorry.")
+        finally:
+            REPLY_TO.reset(to)
+            TAPPED.reset(tap)
+            PHONE_CHAT.reset(where)
+        phone.send(chat, "\n".join(lines) or "Done.", ask=asked)
 
     job_asks = {}  # a coding job's question on the phone: [answered, the answer]
 
     def phone_ask(chat, question, wait=PHONE_WAITS):
         """Asks on the phone with Yes and No buttons and waits for the tap: False if none comes in time."""
+        if chat != telegram_bot.owner():
+            return False
         key = f"job{time.time_ns()}"
         job_asks[key] = [threading.Event(), False]
         if not phone.send(chat, question, ask=key):
@@ -5270,14 +5323,31 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         job_asks[key][0].wait(wait)
         return job_asks.pop(key)[1]
 
+    def pairing_news(state):
+        """What Bot.open_pairing's answer means for you."""
+        return {"open": "Send /start to your bot on Telegram, within 10 minutes",
+                "no token": "Add your Telegram bot's token in Keys first"}.get(
+            state, f"Too many wrong codes, try again in {phone.pairing.minutes_left} minutes")
+
+    def phone_news(line):
+        """What the phone part says, in the popup, next to Settings > Phone, and in the log."""
+        print(f"[phone: {line}]")
+        emit(notify, "Phone", line)
+
     phone = telegram_bot.Bot(on_message=lambda text, chat: phone_jobs.put((text, chat)),
                              on_tap=lambda yes, ask, chat, message: phone_jobs.put((("tap", yes, ask, message), chat)),
                              transcribe=transcribe,
-                             on_pair=lambda name: emit(notify, "Phone", f"{name} asked to pair: type their code in "
-                                                                        f"Settings > Phone"))
+                             # the instruction first: the popup has room for about 50 letters, the name can be cut
+                             on_pair=lambda name: phone_news(f"Type the code from Telegram in Settings > Phone "
+                                                             f"({name} asked for it)" if name else
+                                                             "Pairing was busy: press Pair again, then /start"),
+                             on_stop=lambda why: phone_news("Telegram didn't take the bot's token, check it in Keys"
+                                                            if why == "InvalidToken" else f"Telegram stopped ({why})"))
     threading.Thread(target=phone_turn, daemon=True).start()
-    PHONE.update(send=lambda chat, line: phone.send(chat, line), ask=phone_ask)
-    phone.start()  # only once you've paired: until then it doesn't listen at all
+    PHONE.update(send=lambda chat, line: phone.send(chat, line), ask=phone_ask,
+                 photo=lambda chat, picture, caption: phone.send_photo(chat, picture, caption))
+    # whenever a bot token is saved: paired, it's you; not yet, it only answers /start with how to pair
+    phone.start()
 
     start_timer_loop(timer_done)
     threading.Thread(target=task_worker, daemon=True).start()
@@ -5307,25 +5377,34 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 set_mode(command[1])
             elif isinstance(command, tuple) and command[0] == "mic":
                 rec.set_device(command[1])
-            elif command == "pair phone":  # Settings > Phone > Pair: listen for your /start for 10 minutes
-                phone.pairing.start()
-                emit(notify, "Phone", "Send /start to your bot on Telegram" if phone.start() else
-                     "Add your Telegram bot's token in Keys first")
+            elif command in ("pair phone", "phone token"):  # Settings > Phone > Pair, or a bot token saved in Keys
+                if command == "phone token":
+                    phone.restart()  # with the new token, once the old one's stopped: not waited for here
+                if telegram_bot.owner():
+                    phone_news("New bot token saved" if command == "phone token" else
+                               f"Already paired with {settings.get('telegram_owner_name') or 'you'}, Unpair first")
+                else:
+                    phone_news(pairing_news(phone.open_pairing()))  # 10 minutes for your /start
             elif isinstance(command, tuple) and command[0] == "pair code":
                 paired, why = phone.pairing.confirm(command[1])
                 if paired:
                     settings.put("telegram_owner", paired["user_id"])
                     settings.put("telegram_owner_name", paired["name"])
-                    emit(notify, "Phone", f"Paired with {paired['name']}")
+                    phone_news(f"Paired with {paired['name']}")
                     threading.Thread(target=phone.send, args=(paired["user_id"], "Paired. Only you can talk to me "
                                      "here. Ask me anything, or tell me what to do on the PC."), daemon=True).start()
+                elif why == "none":  # no code was asked for yet, or it ran out: pairing opens now
+                    opened = phone.open_pairing()
+                    phone_news("No code was waiting. Send /start to your bot now, then type its code"
+                               if opened == "open" else pairing_news(opened))
                 else:
-                    emit(notify, "Phone", {"wrong": "That code isn't right", "locked": "Too many wrong codes, try "
-                                           "again in an hour"}.get(why, "Send /start to your bot first"))
+                    phone_news("That code isn't right" if why == "wrong" else pairing_news("locked"))
             elif command == "unpair phone":
                 settings.put("telegram_owner", None)
-                phone.stop()
-                emit(notify, "Phone", "Unpaired")
+                settings.put("telegram_owner_name", None)
+                phone.strangers.clear()
+                phone.told.clear()
+                phone_news("Unpaired: it only answers /start now, with how to pair")
             elif command == "learn voice":  # Settings > Your voice > Learn my voice
                 threading.Thread(target=start_enrol, args=(lambda line: tell(line, "learning your voice"),),
                                  daemon=True).start()
