@@ -556,6 +556,32 @@ class NotOverYou(Case):
     def test_a_timer_waits_till_you_finish(self):
         self.wait_then_talk(lambda a: a.timer_done({"label": "", "line": "Your pasta is ready.", "secs": 60}))
 
+    def test_not_over_a_dictation_you_started_while_it_waited(self):
+        """What you were saying was "Hey Jev, transcribe": the heads-up and the timer are told once it stops."""
+        t = {"label": "", "line": "Your pasta is ready.", "secs": 60}
+        for what, start in (("heads-up", lambda a: a.var("tell")("New message from Mum on WhatsApp.", "heads-up")),
+                            ("timer", lambda a: a.timer_done(t))):
+            with self.subTest(what=what):
+                a = self.assistant()
+                said, told = [], []
+                a.listener.session = object()  # you're half way through "Hey Jev, transcribe"
+                with mock.patch.object(siri, "say", lambda line, notify: said.append(line)), \
+                        mock.patch.object(siri.history, "add", lambda *args: None), \
+                        mock.patch.object(siri.win, "chime", lambda name: None), contextlib.redirect_stdout(a.out):
+                    import threading
+                    th = threading.Thread(target=lambda: told.append(start(a)), daemon=True)
+                    th.start()
+                    time.sleep(0.4)
+                    a.rec.dictating, a.listener.session = True, None  # and she's started taking it down
+                    th.join(5)
+                self.assertFalse(th.is_alive())
+                self.assertEqual(said, [])
+                self.assertFalse(a.rec.paused)
+                if what == "timer":
+                    self.assertEqual(a.var("late_timers"), [t])
+                else:
+                    self.assertEqual(told, [False])  # heads_ups keeps it for after
+
     def test_a_timer_kept_till_a_dictation_stops_doesnt_hold_up_listening(self):
         """finish_dictation runs on the listening thread, where a turn can't move on while it waits."""
         a = self.assistant()
@@ -577,9 +603,9 @@ class NotOverYou(Case):
 
 # --------------------------------------------------------------------------- A8/A43: heads-ups during a dictation
 class DuringDictation(Case):
-    def test_reminders_that_come_up_while_dictating_are_told_after(self):
-        a = self.assistant()
-        told, sleeps = [], [0]
+    def heads_ups(self, a, tell, dictating):
+        """heads_ups() for three rounds with "Reminder: call Mum." waiting, the dictation stopping in the second."""
+        sleeps = [0]
 
         def sleep(secs):
             sleeps[0] += 1
@@ -587,18 +613,36 @@ class DuringDictation(Case):
                 a.rec.dictating = False  # "stop transcribing"
             elif sleeps[0] > 2:
                 raise Stop
-        a.put("tell", lambda line, said_for: told.append(line))
+        a.put("tell", tell)
         fake_time = types.SimpleNamespace(time=time.time, sleep=sleep, strftime=time.strftime)
         while not siri.ANNOUNCE.empty():
             siri.ANNOUNCE.get()
         siri.ANNOUNCE.put("Reminder: call Mum.")
-        a.rec.dictating = True
+        a.rec.dictating = dictating
         with mock.patch.object(siri, "time", fake_time):
             try:
                 a.threads["heads_ups"]()
             except Stop:
                 pass
+
+    def test_reminders_that_come_up_while_dictating_are_told_after(self):
+        a, told = self.assistant(), []
+        self.heads_ups(a, lambda line, said_for: told.append(line) or True, True)
         self.assertEqual(told, ["Reminder: call Mum."])
+
+    def test_one_held_back_by_a_dictation_you_started_is_told_after_it(self):
+        """tell() waited while you said "Hey Jev, transcribe", so it didn't say it: once it stops, it does."""
+        a, told = self.assistant(), []
+
+        def tell(line, said_for):
+            if not a.rec.dictating and not told:
+                a.rec.dictating = True
+                told.append(None)
+                return False
+            told.append(line)
+            return True
+        self.heads_ups(a, tell, False)
+        self.assertEqual(told, [None, "Reminder: call Mum."])
 
 
 # --------------------------------------------------------------------------- A3: dictation without her name

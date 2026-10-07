@@ -3846,13 +3846,13 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             time.sleep(0.1)
 
     def timer_done(t, wait=True):
+        if wait and not rec.dictating:
+            wait_her_turn()  # first, as what you were saying may start a dictation: "Hey Jev, transcribe"
         if rec.dictating:  # don't pause the mic or talk over a dictation, just chime and tell her afterwards
             late_timers.append(t)
             emit(notify, "Dictating", f"\u23f0 {t['label'] or 'Timer finished'}, I'll tell you when you stop")
             win.chime("timer")
             return
-        if wait:
-            wait_her_turn()
         with busy:
             rec.paused = True
             try:
@@ -3870,8 +3870,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     def tell(line, said_for):
         """Say something she started herself, a welcome or a heads-up, once she's not in the middle of a turn and
         you're not mid-sentence. You can answer without "Hey Jev", the way you carry on after any reply: "read it",
-        "thanks"."""
+        "thanks". False if it wasn't said, as what you were saying started a dictation, which it never goes over."""
         wait_her_turn()
+        if rec.dictating:
+            return False
         print(f"\n> {said_for}: {line}")
         with busy:
             rec.paused = True
@@ -3889,6 +3891,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 rec.paused = False
         if not rec.wake:
             emit(notify, "Ready", ready_text(rec.wake))
+        return True
 
     def welcome(back, since=None):
         """Hello when you sign in or come back to the laptop, the JARVIS way: see welcome_line."""
@@ -3952,8 +3955,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             later += [line for line in lines if line]
             # never over a dictation, but once it stops: a reminder or a finished task that came up during one was
             # taken off the queue and lost, the reminder already marked done
-            while later and not rec.dictating:
-                tell(later.pop(0), "heads-up")
+            while later and not rec.dictating and tell(later[0], "heads-up"):
+                later.pop(0)
 
     start_timer_loop(timer_done)
     threading.Thread(target=task_worker, daemon=True).start()
