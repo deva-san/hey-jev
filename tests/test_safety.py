@@ -348,7 +348,9 @@ class CommandPolicy(unittest.TestCase):
                         "Set-ExecutionPolicy Unrestricted", "vssadmin delete shadows /all /quiet",
                         r"Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender' -Name X -Value 1",
                         r"New-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name x -Value y",
-                        "Clear-RecycleBin -Force", "git clean -fd", "git clean -fdx", "git clean -d --force"):
+                        "Clear-RecycleBin -Force", "git clean -fd", "git clean -fdx", "git clean -d --force",
+                        r"Microsoft.PowerShell.Management\Remove-Item C:\x -Recurse -Force",
+                        r"& 'Remove-Item' C:\x -Recurse", r"cmd /s /c rd /s /q C:\x", r"cmd /r rd /s /q C:\x"):
             self.assertEqual(self.level(command), "block", command)
         for command in ("Remove-Item x.txt", "del x.txt", "git rm -r --cached build"):  # one thing, with approval
             self.assertEqual(self.level(command), "confirm", command)

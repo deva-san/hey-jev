@@ -354,9 +354,11 @@ CREDENTIALS = (r"(?:\.env\b|credentials?\b|id_(?:rsa|dsa|ecdsa|ed25519)|\.(?:pem
                r"\bgh[\\/]+hosts\.ya?ml\b|\b(?:login|web)\s+data\b|\blocal\s+state\b|\bcookies(?:\.sqlite)?(?![\w.])|"
                r"\blogins\.json\b|\bkey[34]\.db\b)")
 # PowerShell takes any unambiguous start of a parameter (-Recu, -r) and has short aliases (ri, rd, gci), so the
-# deletion rule looks for a delete in command position with any -r... or /s after it, or anything recursive piped into
-# one: "ri -r", "rd /s /q", "gci -Recurse | ri" and "& { ri C:\x -r }" only waited for approval. "format" counts only
-# as the command with a drive: "git log --format=%h" and Format-Table were blocked as formatting a disk
+# deletion rule looks for a delete in command position (quoted, or with its module in front, as the old rule caught)
+# with any -r... or /s after it, or anything recursive piped into one: "ri -r", "rd /s /q", "gci -Recurse | ri" and
+# "& { ri C:\x -r }" only waited for approval. cmd takes /r for /c, and other switches first ("cmd /s /c rd /s /q").
+# "format" counts only as the command with a drive: "git log --format=%h" and Format-Table were blocked as formatting
+# a disk
 BLOCKED = (
     (r"\bformat(?:\.com)?\s+(?:/\S+\s+)*[a-z]:|\b(?:format-volume|diskpart|bcdedit|reagentc|shutdown|restart-computer|"
      r"stop-computer|clear-disk|remove-partition|vssadmin|wbadmin|clear-recyclebin)\b",
@@ -374,11 +376,11 @@ BLOCKED = (
     (r"\b(?:runas|start-process\b[^\r\n]*-verb\s+runas)\b", "administrator commands are blocked"),
     (r"\bgit\s+(?:reset\s+--hard\b|clean\b[^\r\n]*\s(?:-[a-z]*f|--force\b)|"
      r"push\b[^\r\n]*(?:--force|\s-[a-z]*f\b|\s\+\w))", "destructive Git commands are blocked"),
-    (r"(?:^|[;&|{(]\s*)(?:remove-item|ri|rm|rmdir|rd|del|erase)\b[^;|}\r\n]*\s(?:-r[a-z]*\b|/s\b)|"
+    (r"(?:^|[;&|{(]\s*)[\"']?(?:[\w.]+\\)?(?:remove-item|ri|rm|rmdir|rd|del|erase)\b[^;|}\r\n]*\s(?:-r[a-z]*\b|/s\b)|"
      r"\s-r[a-z]*\b[^\r\n]*\|[^\r\n]*?(?<![\w'\"-])(?:remove-item|ri|rm|rmdir|rd|del|erase)\b",
      "recursive deletion is blocked"),
     (CREDENTIALS, "reading credentials, environment variables, and private keys is blocked"),
-    (r"(?:^|[\s&(])(?:cmd(?:\.exe)?\s+/[ck]|powershell(?:\.exe)?\b|pwsh(?:\.exe)?\b)|[\\/'\"](?:cmd|powershell|pwsh)"
+    (r"(?:^|[\s&(])(?:cmd(?:\.exe)?\s+(?:/\S+\s+)*/[ckr]|powershell(?:\.exe)?\b|pwsh(?:\.exe)?\b)|[\\/'\"](?:cmd|powershell|pwsh)"
      r"\.exe\b|\b(?:invoke-command|icm|start-job|start-threadjob)\b|\[scriptblock\]|&\s*\{",
      "nested command shells are blocked"),
     (r"\b(?:invoke-webrequest|iwr|curl|wget|scp|sftp|ftp|ssh|telnet|ncat|netcat)\b", "network transfers belong in Jev's browser tools, not commands"),
