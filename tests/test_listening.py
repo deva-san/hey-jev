@@ -119,6 +119,8 @@ class Blocks(queue.Queue):
         self.coming, self.then, self.gen = collections.deque(), [], gen
 
     def get(self, block=True, timeout=None):
+        if not block:  # get_nowait(), as when she skips to now
+            return super().get(block=False)
         while self.empty() and not self.coming and self.then:
             self.then.pop(0)()
         if self.empty() and self.coming:
@@ -363,6 +365,50 @@ class BareGreeting(Case):
             self.assertEqual(ears.calls, 1)
             ends.append(phrases[0][3])
         self.assertEqual(ends[0], ends[1])
+
+
+# --------------------------------------------------------------------------- A2: how far behind she may fall
+class CatchUp(Case):
+    def test_a_slow_moment_without_a_turn_doesnt_excuse_the_backlog(self):
+        """Slow speech-to-text alone: what piled up counts, and over LAG she skips to now. Before, any feed over
+        0.5 s excused the whole queue, and she fell 771 s behind."""
+        a = self.assistant()
+
+        def slow(n):
+            if n == 1:
+                time.sleep(0.6)
+                a.queue(blocks(1.3, 0.0))
+        fake = FakeListener(slow)
+        a.put("listener", fake)
+        a.queue(blocks(1.3, 0.0))
+        a.listen()
+        self.assertEqual(fake.fed, 1)
+        self.assertIn("skipped", a.out.getvalue())
+
+    def turn_that_takes(self, secs):
+        a = self.assistant()
+        ran = []
+
+        def run_turn(text, words, ms, gate=False):  # she thinks for secs, and the mic keeps going meanwhile
+            ran.append(words)
+            a.queue(blocks(secs, 0.0))
+        a.put("run_turn", run_turn)
+        fake = FakeListener(lambda n: n == 1 and a.var("act_on")("Hey Jev, what time is it?", "other", 100))
+        a.put("listener", fake)
+        a.queue(blocks(0.1, 0.0))
+        a.listen()
+        return a, fake, ran
+
+    def test_what_came_in_while_she_worked_is_caught_up_on(self):
+        a, fake, ran = self.turn_that_takes(3.0)
+        self.assertEqual(len(ran), 1)
+        self.assertEqual(fake.fed, len(blocks(0.1, 0.0)) + len(blocks(3.0, 0.0)))
+        self.assertNotIn("skipped", a.out.getvalue())
+
+    def test_but_never_more_than_catch_up(self):
+        a, fake, ran = self.turn_that_takes(siri.CATCH_UP + 5)
+        self.assertLess(fake.fed, 10)
+        self.assertIn("skipped", a.out.getvalue())
 
 
 if __name__ == "__main__":

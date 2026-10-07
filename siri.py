@@ -26,6 +26,7 @@ SAMPLE_RATE = speech.RATE
 WAKE_WINDOW = 10.0  # after a bare "Hey Jev", how long the request can take to start
 FOLLOW_UP = 8.0  # after she answers, how long the next thing you say doesn't need "Hey Jev"
 LAG = 2.0  # seconds behind the mic at which she skips to now: catching up would answer what you said back then
+CATCH_UP = 20.0  # what was said while she thought and acted is caught up on, but past this she skips to now as well
 
 
 def voice_id(voice=None):
@@ -3599,7 +3600,11 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             listener.arm(WAKE_WINDOW)
             threading.Thread(target=win.chime, args=("wake",), daemon=True).start()
         else:
+            before = rec.blocks.qsize()
             run_turn(what[0], what[1], ms, gate=what[2])
+            # what was said while she thought and acted comes next, caught up on rather than skipped (see LAG). Only
+            # that: excusing the whole queue after any slow moment left her 771 s behind, answering 13 minute old talk
+            allow[0] += max(0, rec.blocks.qsize() - before)
 
     def check_partial(audio, session):
         """For Parakeet and Whisper, which only write once you stop: her name at the start of speech that's still
@@ -3686,9 +3691,11 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                     listener.open(window_ask[0])
                     window_ask[0] = None
                 allow[0] = max(0, allow[0] - 1)
-                # mic audio still waiting after this, apart from what came in while a turn ran
+                # mic audio still waiting after this: all of it, and apart from what came in while a turn ran
+                waiting = rec.blocks.qsize() * Recorder.BLOCK / SAMPLE_RATE
                 late = max(0, rec.blocks.qsize() - allow[0]) * Recorder.BLOCK / SAMPLE_RATE
-                if late > LAG and not rec.dictating:  # a dictation keeps every word, however late
+                # a dictation keeps every word, however late
+                if (late > LAG or waiting > CATCH_UP) and not rec.dictating:
                     skipped = 0
                     try:
                         while True:
@@ -3700,10 +3707,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                     allow[0] = 0
                     listener.reset(0.0)
                     gone = skipped * Recorder.BLOCK / SAMPLE_RATE
-                    print(f"\n  (listening was {late:.1f}s behind, skipped {gone:.1f}s to now, "
+                    print(f"\n  (listening was {waiting:.1f}s behind, skipped {gone:.1f}s to now, "
                           f"{time.strftime('%H:%M:%S')})")
                     continue
-                started = time.time()
                 listener.feed(block, dictating=rec.dictating)
                 if held[0] and time.time() > held[0][3] and not listener.talking:  # the rest never came
                     text, kind, ms, _ = held[0]
@@ -3714,8 +3720,6 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                       and not held[0]):
                     checked[0] = listener.speech_start  # once a phrase, on its first 2.5 seconds
                     partials.submit(check_partial, listener.partial(), listener.session)
-                if time.time() - started > 0.5:  # a turn ran: what was said meanwhile comes next, catch up on it
-                    allow[0] = rec.blocks.qsize()
                 if dictation.timed_out():
                     finish_dictation()
                 show_listening()
