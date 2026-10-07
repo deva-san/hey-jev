@@ -9,7 +9,7 @@ import numpy as np, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
 import fast_intent, hermes_memory, history, installer, messaging, opencode, settings, speech, sysinfo, tasks as tasking, vision, watch, web, winplatform as win
 from hermes_memory import skills
-from hermes_memory.threat_patterns import first_threat_message
+from hermes_memory.threat_patterns import INVISIBLE_CHARS, first_threat_message
 from secrets_store import get_secret, missing_secrets
 from dictation import Dictation, START as DICTATE_START, USER_VOCAB, fix_vocab, read_vocab, save_vocab
 
@@ -1907,7 +1907,11 @@ def untrusted(found):
         return [untrusted(f) for f in found]
     if isinstance(found, dict) and any(isinstance(v, (list, dict)) for v in found.values()):
         return {k: untrusted(v) for k, v in found.items()}
-    if isinstance(found, dict) and first_threat_message(" ".join(map(str, found.values())), scope="context"):
+    # Hermes' plain injection phrases, with invisible characters taken out rather than counted: a facepalm emoji is
+    # joined with one, and the wider list for context files left out "Heavy rain wreaks havoc in Kerala" (a hacking
+    # tool's name) and "I'll check in with you" (malware calling home)
+    if isinstance(found, dict) and first_threat_message("".join(c for c in " ".join(map(str, found.values()))
+                                                                if c not in INVISIBLE_CHARS), scope="all"):
         return {"left out": "it tries to give instructions"}
     return found
 
