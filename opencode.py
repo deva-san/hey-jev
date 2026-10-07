@@ -5,6 +5,7 @@ Same setup as Hermes Agent's opencode-zen provider: an OPENCODE_ZEN_API_KEY from
 and the OpenAI-style relay at https://opencode.ai/zen/v1. A paid model is refused before any request goes out,
 so nothing can be billed even if billing is turned on later.
 """
+import json
 import os
 import re
 import time
@@ -79,20 +80,56 @@ def _text(content):
     return content.strip()
 
 
-def chat(key, messages, max_tokens=400, timeout=30, model=None, **extra):
+def chat(key, messages, max_tokens=400, timeout=30, model=None, on_text=None, stop=None, **extra):
     """One chat completion on a free OpenCode Zen model. Returns (text, usage, model). extra goes in the request,
-    like reasoning_effort."""
+    like reasoning_effort.
+    on_text(text so far): the reply streamed, called as each piece comes in, so she can start saying it before it's
+    all there. stop: a threading.Event that ends the stream early, as when another try won."""
     model = model or settings.get("llm_model")
     require_free(model)
     url, key, model_id = _where(model, key)
-    r = SESSION.post(url, headers={"Authorization": f"Bearer {key}"},
-                     json={"model": model_id, "max_tokens": max_tokens, "messages": messages, **extra}, timeout=timeout)
+    body = {"model": model_id, "max_tokens": max_tokens, "messages": messages, **extra}
+    if on_text is not None:
+        body.update(stream=True, stream_options={"include_usage": True})
+    r = SESSION.post(url, headers={"Authorization": f"Bearer {key}"}, json=body, timeout=timeout,
+                     stream=on_text is not None)
     if not r.ok:
         raise RuntimeError(f"OpenCode ({model}) {error_text(r)}")
+    if on_text is not None:
+        return _streamed(r, model, on_text, stop)
     j = r.json()
     if not j.get("choices"):  # Kilo sends an error this way now and then
         raise RuntimeError(f"OpenCode ({model}) unavailable: {str(j.get('error') or j)[:200]}")
     return _text(j["choices"][0]["message"].get("content")), j.get("usage") or {}, model
+
+
+def _streamed(r, model, on_text, stop):
+    """Server-sent events, as both Kilo and OpenCode send them: "data: {...}" lines, then "data: [DONE]". The words
+    are in delta.content; a model's thinking (delta.reasoning / reasoning_content) is left out."""
+    text, usage = "", {}
+    try:
+        for line in r.iter_lines():
+            if stop is not None and stop.is_set():
+                break
+            if not line.startswith(b"data:"):
+                continue
+            data = line[5:].strip()
+            if data == b"[DONE]":
+                break
+            j = json.loads(data)
+            if j.get("error"):
+                raise RuntimeError(f"OpenCode ({model}) unavailable: {str(j['error'])[:200]}")
+            usage = j.get("usage") or usage
+            for choice in j.get("choices") or []:
+                piece = (choice.get("delta") or {}).get("content")
+                if isinstance(piece, list):
+                    piece = "".join(p.get("text", "") for p in piece if isinstance(p, dict))
+                if piece:
+                    text += piece
+                    on_text(text)
+    finally:
+        r.close()
+    return _text(text), usage, model
 
 
 def _model_ids(timeout):

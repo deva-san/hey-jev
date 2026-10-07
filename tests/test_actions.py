@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.support import TRIPPED, siri, winplatform
+from tests.support import ORIGINAL, TRIPPED, siri, winplatform
 
 
 def original(name):
@@ -437,10 +437,31 @@ class Voice(unittest.TestCase):
         def post(url, **kw):
             raise requests.ReadTimeout("read timed out")
         with mock.patch.object(siri, "FISH", SimpleNamespace(post=post)), \
-                mock.patch.object(siri, "fish", original("fish")), \
+                mock.patch.object(siri, "fish", original("fish")), mock.patch.object(siri, "Line", ORIGINAL["Line"]), \
+                mock.patch.object(siri.pocket, "available", lambda voice=None: False), \
                 mock.patch.object(siri.win, "speak_native", lambda text, **kw: native.append(text)):
             original("speak")("A line nobody has cached, 1729.")
         self.assertEqual(native, ["A line nobody has cached, 1729."])
+
+    def test_slow_fish_gets_her_voice_on_this_pc_when_it_is_there(self):
+        import requests
+        made = []
+
+        def post(url, **kw):
+            raise requests.ReadTimeout("read timed out")
+
+        def stream(text, voice):
+            made.append((text, voice))
+            q = __import__("queue").Queue()
+            q.put(None)  # nothing to play, so no sound in a test
+            return q
+        with mock.patch.object(siri, "FISH", SimpleNamespace(post=post)), \
+                mock.patch.object(siri, "fish", original("fish")), mock.patch.object(siri, "Line", ORIGINAL["Line"]), \
+                mock.patch.object(siri.pocket, "available", lambda voice=None: True), \
+                mock.patch.object(siri.pocket, "stream", stream), \
+                mock.patch.object(siri.win, "speak_native", lambda text, **kw: self.fail("Windows' voice")):
+            original("speak")("A line nobody has cached, 1729.", "9a9cf47702da476aa4629e2506d4a857")
+        self.assertEqual(made, [("A line nobody has cached, 1729.", "p248")])
 
 
 if __name__ == "__main__":

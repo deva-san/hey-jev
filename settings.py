@@ -38,6 +38,9 @@ VOICES = (  # the first is the default when none is picked, so Hannah stays firs
     ("Miku", "75cea27272464f8e8a529c9105d40297", "Indian accent"),
     ("Assistant", "fa97330bb80549fbb3cf84a1c421d70c", "crisp, American"),
     ("Ethan", "536d3a5e000945adb7038665781a4aca", "calm, a man"),
+    # Her voice made on this PC (pocket.py): free for good, used for Fish voices too once Fish's free model ends
+    ("Jev on this PC", "pocket:p248", "Indian English, offline, free for good"),
+    ("Jev on this PC, a man", "pocket:p251", "Indian English, offline, free for good"),
     # Windows' own voices: offline, instant, no Fish account needed
     ("Windows Heera", "onecore:MSTTS_V110_enIN_HeeraM", "offline, Indian English"),
     ("Windows Ravi", "onecore:MSTTS_V110_enIN_RaviM", "offline, Indian English, a man"),

@@ -1008,8 +1008,8 @@ class AssistantWindow:
                         command=lambda: settings.put("welcome", self.welcome_var.get())).pack(side="left",
                                                                                               padx=(self.px(8), 0))
 
-        row(8, "Voice", "Her voice, on Fish Audio\u2019s free model. Try it plays a line. To use any other voice, "
-                        "paste its link from fish.audio.")
+        row(8, "Voice", "Her voice, on Fish Audio\u2019s free model until 30 November, then made on this PC (Jev on "
+                        "this PC). Try it plays a line. To use any other Fish voice, paste its link from fish.audio.")
         voice = tk.Frame(form, bg=BG)
         voice.grid(row=16, column=1, rowspan=2, sticky="e")
         self.voice_menu = ttk.Combobox(voice, width=24, values=[self._voice_label(v) for _, v, _ in settings.VOICES])
@@ -1129,7 +1129,7 @@ class AssistantWindow:
         for name, v, about in settings.VOICES:
             if t.lower() in (name.lower(), f"{name} \u00b7 {about}".lower()):
                 return v
-        if t.lower().startswith("onecore:") or t.lower().startswith("sapi:"):
+        if t.lower().startswith(("onecore:", "sapi:", "pocket:")):
             return t
         m = re.search(r"[0-9a-f]{32}", t.lower())
         return m[0] if m else None

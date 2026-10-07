@@ -55,6 +55,9 @@ for _name in ("prepare", "install", "_run", "find"):
     if hasattr(installer, _name):
         setattr(installer, _name, tripwire(f"installer.{_name}"))
 opencode.chat = tripwire("opencode.chat")
-for _name in ("speak", "fish", "fetch_tts", "warm_cache", "open_page", "see", "spotify_play"):
+siri.STREAM_SAY = False  # no "One moment" on a thread: tests that want it turn it on
+ORIGINAL = {}  # what was swapped for a tripwire, for a test that needs the real one
+for _name in ("speak", "fish", "fetch_tts", "warm_cache", "open_page", "see", "spotify_play", "Line"):
     if hasattr(siri, _name):
+        ORIGINAL[_name] = getattr(siri, _name)
         setattr(siri, _name, tripwire(f"siri.{_name}"))

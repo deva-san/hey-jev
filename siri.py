@@ -7,7 +7,7 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows without
 import subprocess
 import numpy as np, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
-import fast_intent, hermes_memory, history, installer, messaging, opencode, settings, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
+import fast_intent, hermes_memory, history, installer, messaging, opencode, pocket, settings, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
 from hermes_memory import skills
 from hermes_memory.threat_patterns import INVISIBLE_CHARS, first_threat_message
 from secrets_store import get_secret, missing_secrets
@@ -29,12 +29,18 @@ LAG = 2.0  # seconds behind the mic at which she skips to now: catching up would
 CATCH_UP = 20.0  # what was said while she thought and acted is caught up on, but past this she skips to now as well
 
 
+FISH_ENDS = (2026, 12, 1)  # Fish's free voice model is free "through November 30, 2026" (fish.audio, 7 Oct 2026)
+
+
 def voice_id(voice=None):
-    """The voice to speak with: Windows OneCore / SAPI voice, or Fish Audio ID from Settings, else default."""
+    """The voice to speak with: her voice on this PC (pocket:p248), a Windows OneCore / SAPI voice, or a Fish Audio
+    ID from Settings, else the default. Once Fish's free model has ended, a Fish voice becomes her one on this PC."""
     val = str(voice or settings.get("voice") or "").strip()
-    if val.startswith("onecore:") or val.startswith("sapi:"):
+    if val.startswith(("onecore:", "sapi:", "pocket:")):
         return val
     m = re.search(r"[0-9a-f]{32}", val.lower())
+    if time.localtime()[:3] >= FISH_ENDS:
+        return "pocket:" + pocket.DEFAULT if pocket.available() else "onecore:MSTTS_V110_enIN_HeeraM"
     return m[0] if m else DEFAULT_VOICE
 MIC_LEVELS = collections.deque(maxlen=40)  # mic loudness, 10 a second, for the popup's bars
 SPEAK_LEVELS = collections.deque(maxlen=40)  # her voice's loudness while she talks, for the popup
@@ -325,6 +331,8 @@ REPLIES = {
     "note_saved": ["Noted.", "Okay, it's in your notes."],
     "go_ahead": ["Sure, what would you like me to do?", "Okay, what can I do for you?"],
     "screen_ask": ["Should I look at your screen for that?"],
+    "filler": ["On it.", "One moment.", "Sure, one sec."],  # while she thinks, see fill_silence
+    "filler_ask": ["Let me check.", "Let me see.", "One moment."],
 }
 
 
@@ -1615,10 +1623,196 @@ def cooling(model):
     return COOLDOWN.get(model, 0.0) > time.time()
 
 
-def ask_model(messages, deadline=DEADLINE, hedge_after=HEDGE_AFTER, cap=10.0, model=None):
+# Hermes Agent, tools/tts_streaming.py:66-117 (MIT, commit 3569fba6), with its list of thinking tags from
+# agent/think_scrubber.py: a reply that's still being written, cut into sentences to say as they're finished.
+SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])(?:\s|\n)|(?:\n\n)")
+_THINK_NAMES = "|".join(re.escape(name) for name in ("think", "thinking", "reasoning", "thought",
+                                                     "REASONING_SCRATCHPAD", "思考", "反思", "推理", "推敲"))
+_THINK_BLOCK_RE = re.compile(rf"<({_THINK_NAMES})[\s>].*?</\1>", flags=re.DOTALL | re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(rf"<(?:{_THINK_NAMES})(?=[\s>]|$)", flags=re.IGNORECASE)
+
+
+class SentenceChunker:
+    """Incremental sentence cutter for LLM token deltas, shared by the speaker pipeline and the
+    speak-stream WebSocket so every surface cuts speech identically. Strips ``<think>`` blocks (even
+    split across deltas) and merges fragments shorter than *min_len* into the following sentence."""
+
+    def __init__(self, min_len: int = 20):
+        self.min_len = min_len
+        self.buf = ""
+
+    def feed(self, delta: str):
+        """Absorb *delta*; return every complete sentence now ready to speak."""
+        self.buf = _THINK_BLOCK_RE.sub("", self.buf + delta)
+        if _THINK_OPEN_RE.search(self.buf):
+            return []  # open think tag — the closing tag may arrive next delta
+        out = []
+        start = 0  # skip boundaries that would leave the head too short
+        while m := SENTENCE_BOUNDARY_RE.search(self.buf, start):
+            head = self.buf[: m.end()]
+            if len(head.strip()) < self.min_len:
+                start = m.end()
+                continue
+            out.append(head)
+            self.buf = self.buf[m.end():]
+            start = 0
+        return out
+
+    def flush(self):
+        """Drain the tail (end-of-text or long-idle flush)."""
+        tail, self.buf = _THINK_BLOCK_RE.sub("", self.buf), ""
+        if m := _THINK_OPEN_RE.search(tail):
+            tail = tail[: m.start()]  # unterminated reasoning block: never speak it
+        tail = tail.strip()
+        return [tail] if tail else []
+
+# --- end of Hermes' code ---
+
+
+_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+
+def json_string_so_far(s):
+    """The text of a JSON string that's still being written, s starting just after its opening quote: up to its
+    closing quote, or as far as it's come, leaving off an escape that's only half there."""
+    out, i = [], 0
+    while i < len(s):
+        c = s[i]
+        if c == '"':
+            break
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        if i + 1 >= len(s):
+            break
+        if s[i + 1] == "u":
+            if i + 6 > len(s):
+                break
+            try:
+                out.append(chr(int(s[i + 2:i + 6], 16)))
+            except ValueError:
+                pass
+            i += 6
+            continue
+        out.append(_ESCAPES.get(s[i + 1], s[i + 1]))
+        i += 2
+    return "".join(out)
+
+
+class LiveSay:
+    """Her answer said while the model is still writing it. Only a plain answer: once the reply has started
+    {"steps": [], "say": " there's nothing to do, so nothing to check before she talks, and "say" goes out a
+    sentence at a time (SentenceChunker) as it comes, each sentence's voice made while the one before plays (Line).
+    Of several tries streaming at once (ask_model), the first to get that far is the one she says."""
+    START = re.compile(r'\s*(?:```(?:json)?\s*)?\{\s*"steps"\s*:\s*\[\s*\]\s*,\s*"say"\s*:\s*"')
+
+    def __init__(self, notify, make=None):
+        self.notify, self.make = notify, make or Line
+        self.owner, self.player, self.used, self.said, self.error, self.started = None, None, 0, [], None, None
+        self.chunker, self.lines, self.lock = SentenceChunker(), queue.Queue(), threading.Lock()
+        self.first_text = None  # when the first words came, from any try
+
+    def feed(self, key, text):
+        """Try key's reply so far."""
+        with self.lock:
+            self.first_text = self.first_text or time.time()
+            if self.owner not in (None, key):
+                return
+            m = self.START.match(text)
+            if not m:
+                return
+            if self.player is None:
+                self.owner = key
+                self.player = threading.Thread(target=self._play, daemon=True)
+                self.player.start()
+            words = json_string_so_far(text[m.end():])
+            new, self.used = words[self.used:], len(words)
+            for sentence in self.chunker.feed(new):
+                self._queue(sentence)
+
+    def claim(self, key):
+        """True if try key's answer is the one to use: nothing else is being said."""
+        with self.lock:
+            if self.owner is None:
+                self.owner = key
+            return self.owner == key
+
+    def release(self, key):
+        """Try key failed: another may be used, if she hadn't started saying it."""
+        with self.lock:
+            if self.owner == key and self.player is None:
+                self.owner = None
+
+    @property
+    def talking(self):
+        return self.player is not None
+
+    def _queue(self, sentence):
+        line = tidy(sentence)
+        if line:
+            self.lines.put((line, self.make(line)))
+
+    def _play(self):
+        rec = MIC[0]
+        own = rec is not None and not rec.paused  # the mic is off while she talks, so she doesn't hear herself
+        if own:
+            rec.paused = True
+        try:
+            while True:
+                item = self.lines.get()
+                if item is None:
+                    break
+                line, voice = item
+                print(f"  say: {line}  (as it's written)")
+                emit(self.notify, "Speaking", " ".join(self.said + [line]))
+                TURN_SPOKE.set()  # no "One moment" now
+                try:
+                    ms = voice.play()
+                    self.started = self.started or voice.t + ms / 1000
+                    print(f"  fish {'cached' if ms == 0 else f'talking after {ms}ms'}")
+                except Exception as exc:
+                    print(f"  her voice failed: {exc}")
+                    self.error = f"Her voice: {opencode.explain(str(exc))}"
+                self.said.append(line)
+        finally:
+            if own:
+                time.sleep(0.3)  # the last of her voice from the speakers
+                rec.paused = False
+
+    def finish(self):
+        """Once the whole reply is in: the rest of it said, back when she's done. What she said, None if nothing."""
+        with self.lock:
+            if self.player is None:
+                return None
+            for sentence in self.chunker.flush():
+                self._queue(sentence)
+            self.lines.put(None)
+        self.player.join()
+        return self.said
+
+
+REASONING = "low"  # Ling's thinking before it answers, see ask_model
+STREAM_SAY = True  # say plain answers as they're written, see LiveSay
+TURN_SPOKE = threading.Event()  # she's said something this turn, so no "One moment" (see fill_silence)
+FILLER_AFTER = 0.9  # seconds into thinking, about 1.2 s after you stopped: a natural "On it." rather than silence
+
+
+def fill_silence(words, notify):
+    """A short "On it." or "Let me check." if she's still thinking FILLER_AFTER seconds in, from the cache so it
+    starts at once. Spoken fillers make a wait feel shorter where a beep doesn't (arXiv 2507.22352)."""
+    if TURN_SPOKE.wait(FILLER_AFTER):
+        return
+    TURN_SPOKE.set()
+    say(say_line("filler_ask" if QUESTION.match(plain(words)) else "filler"), notify)
+
+
+def ask_model(messages, deadline=DEADLINE, hedge_after=HEDGE_AFTER, cap=10.0, model=None, live=None):
     """(text, usage, model) from the answer model, or model. A slow or failed first try gets a second request, the
     first good answer wins. TimeoutError once the deadline has passed, so she can say so instead of going quiet. cap:
-    the longest one request may take, more for a screenshot."""
+    the longest one request may take, more for a screenshot.
+    Replies are streamed, so a try that's slow to start gets a second one, not one that's still writing; and with
+    live (LiveSay) a plain answer is said as it's written, and that try's answer is the one returned."""
     end = time.time() + deadline
     main = model or settings.get("llm_model")
     if main.startswith(opencode.KILO) and any(isinstance(m.get("content"), list) for m in messages):
@@ -1631,36 +1825,63 @@ def ask_model(messages, deadline=DEADLINE, hedge_after=HEDGE_AFTER, cap=10.0, mo
     if cooling(main) and not cooling(other):
         main, other = other, main  # it said too many requests a moment ago, so start with the other server
 
-    def one(model):
+    stop, first_words, keys = threading.Event(), {}, {}  # first_words: try -> when its first words came
+
+    def one(model, key):
         limit = max(2.0, min(cap, end - time.time()))
+
+        def seen(text):
+            first_words.setdefault(key, time.time())
+            if live is not None:
+                live.feed(key, text)
         try:  # low effort: about 2 seconds, not 3, and it still gets the steps right
-            return opencode.chat(OC_KEY, messages, max_tokens=1500, timeout=limit, model=model, reasoning_effort="low")
+            return opencode.chat(OC_KEY, messages, max_tokens=1500, timeout=limit, model=model,
+                                 reasoning_effort=REASONING, on_text=seen, stop=stop)
         except RuntimeError as exc:
             if " 429 " in str(exc):
                 COOLDOWN[model] = time.time() + COOL_FOR
                 raise
             if " 400 " not in str(exc):
                 raise
-            return opencode.chat(OC_KEY, messages, max_tokens=1500, timeout=limit, model=model)  # no effort levels
+            # no effort levels on this one
+            return opencode.chat(OC_KEY, messages, max_tokens=1500, timeout=limit, model=model, on_text=seen,
+                                 stop=stop)
+
+    def start(model):
+        f = PLANNERS.submit(one, model, len(keys))
+        keys[f] = len(keys)
+        return f
 
     def next_model(tries):
         pick = other if tries % 2 else main
         alt = main if pick == other else other
         return alt if cooling(pick) and not cooling(alt) else pick
-    pending, tries, error = {PLANNERS.submit(one, main)}, 1, None
-    while pending and time.time() < end:
-        left = end - time.time()
-        done, pending = wait(pending, timeout=min(left, hedge_after) if tries < TRIES else left,
-                             return_when=FIRST_COMPLETED)
-        for f in done:
-            if f.exception() is None:
-                return f.result()
-            error = f.exception()
-            print(f"  llm try failed: {error}")
-        # slow, or it failed: ask again, while there's still time for an answer
-        if tries < TRIES and (not done or not pending) and end - time.time() > min(hedge_after, 5.0):
-            pending.add(PLANNERS.submit(one, next_model(tries)))
-            tries += 1
+    pending, tries, error = {start(main)}, 1, None
+    try:
+        while pending and time.time() < end:
+            left = end - time.time()
+            # a try that has started writing is let finish: a second request then only uses up the free limits
+            hedge = tries < TRIES and not first_words
+            done, pending = wait(pending, timeout=min(left, hedge_after) if hedge else left,
+                                 return_when=FIRST_COMPLETED)
+            for f in done:
+                if f.exception() is not None:
+                    error = f.exception()
+                    print(f"  llm try failed: {error}")
+                    if live is not None:
+                        if live.talking and live.owner == keys[f]:
+                            raise error  # it broke off while she was saying it
+                        live.release(keys[f])
+                    continue
+                if live is None or live.claim(keys[f]):  # not another answer than the one she's saying
+                    return f.result()
+            # slow to start, or it failed: ask again, while there's still time for an answer
+            if tries < TRIES and ((not done and not first_words) or not pending) \
+                    and end - time.time() > min(hedge_after, 5.0) and not (live is not None and live.talking):
+                pending.add(start(next_model(tries)))
+                tries += 1
+    finally:
+        stop.set()  # the other tries' streams end, so they don't keep the connection busy
     if pending or error is None:
         raise TimeoutError(f"no answer in {deadline:.0f} s")
     raise error
@@ -2282,7 +2503,7 @@ def think(text, gate, notify=None, sure=1.0):
     system = soul() + "\n\n" + PROMPT + ("\n\n" + known if known else "") + memory_block() + context() \
         + (COLD_NOTE + room_before() if gate == "cold" else GATE_NOTE if gate else "")
     messages = [{"role": "system", "content": system}]
-    for _, said, plan in history.recent(6, 1800):  # the last half hour, for follow-ups like "close it"
+    for _, said, plan in history.recent(3, 1800):  # the last half hour, for follow-ups like "close it"
         messages += [{"role": "user", "content": said}, {"role": "assistant", "content": (plan or "{}")[:800]}]
     unsure = (f"\n(Speech-to-text was only {sure:.0%} sure of these words, so some may be wrong. If you can't tell "
               f"what they meant, ask in a few words what they'd like, don't guess.)") if sure < CHECK_BELOW else ""
@@ -2293,9 +2514,23 @@ def think(text, gate, notify=None, sure=1.0):
     # "Google when is the next India match." is a question too, after the word Google, as _search reads it
     googled = re.fullmatch(r"(?:google|search(?: google)?(?: for| about)?|look up) (?P<q>.+?)(?: on google)?",
                            plain(text))
+    # a plain answer to a request with her name is said as it's written (LiveSay); without her name the whole plan
+    # decides first whether it was for her, and a task's claim is checked before she says it's done
+    stream = STREAM_SAY and not gate and not needs_task
     for round_ in range(ROUNDS + 1):
         t = time.time()
-        raw, plan, usage, model = ask_plan(messages, again=not gate, deadline=DEADLINE if round_ == 0 else 14.0)
+        live = LiveSay(notify) if stream else None
+        try:
+            raw, plan, usage, model = ask_plan(messages, again=not gate, deadline=DEADLINE if round_ == 0 else 14.0,
+                                               live=live)
+        finally:
+            spoken_live = live.finish() if live is not None else None
+        if spoken_live is not None:
+            plan["said"], plan["voice_error"] = spoken_live, live.error
+            TURN_SPOKE.set()
+            if live.started:
+                print(f"  timing: first words {int((live.first_text - t) * 1000)}ms, talking after "
+                      f"{int((live.started - t) * 1000)}ms")
         if gate and str(plan.get("to") or "").strip().lower() not in ("", "you", "jev", "me", "assistant"):
             plan["ignore"] = True  # {"to": "others"}, see COLD_NOTE
         task_steps = [s for s in plan["steps"] if s.get("do") in ("command", "schedule", "task_control")]
@@ -3281,6 +3516,8 @@ def run_plan(plan, notify):
         (say_line("looking") if looks is not None else "" if last >= 0 else default_line(steps))
     failed, voice_error, spoken, seen = [], None, [], []
     reported = threading.Event()  # the steps her line reports on are done
+    if plan.get("said") is not None and not steps:  # said as the model wrote it (LiveSay)
+        spoken, voice_error, line = list(plan["said"]), plan.get("voice_error"), ""
 
     def talk(text):
         spoken.append(text)
@@ -3364,6 +3601,10 @@ def fetch_tts(text, voice=None):
         win.native_to_wav(text, path, voice=v)
         return path, int((time.time() - t) * 1000), False
     try:
+        if str(v).startswith("pocket:"):  # made on this PC
+            pocket.to_wav(text, path + ".part.wav", v.split(":", 1)[1])
+            os.replace(path + ".part.wav", path)
+            return path, int((time.time() - t) * 1000), False
         r = fish(text, "wav", voice=v)
         with open(path + ".part", "wb") as f:  # write then rename, so a cut-off download is never cached
             f.write(r.content)
@@ -3377,41 +3618,91 @@ def fetch_tts(text, voice=None):
         return fallback, int((time.time() - t) * 1000), False
 
 
-def speak(text, voice=None):
-    """Say a line. Scripted ones play from the cache, new ones play while Fish is still making them, which starts
-    her talking about a second after asking, or in Windows' own voice if Fish is slow (FISH_WAIT). voice: another
-    Fish or Windows native voice.
-    Returns ms until she started, 0 from the cache."""
-    v = voice_id(voice)
-    # 1. Native Windows OneCore / SAPI voice (0 MB RAM, < 15ms latency, fully offline)
-    if str(v).startswith(("onecore:", "sapi:")):
-        t = time.time()
-        win.speak_native(text, voice=v, wait=True)
-        return int((time.time() - t) * 1000)
+VOICE = threading.RLock()  # one line at a time: a "One moment" and the answer after it never talk over each other
 
-    path = tts_path(text, v)
-    if os.path.exists(path):
-        done = threading.Event()
-        threading.Thread(target=_follow_voice, args=(path, done), daemon=True).start()
+
+class Line:
+    """One line of her voice, under way from the moment it's made: Fish's stream opened, or her voice on this PC
+    being made (pocket.py). play() says it. So while one sentence plays the next is already being made, and a line
+    streamed from the model as it's written has no gaps between its sentences (LiveSay)."""
+
+    def __init__(self, text, voice=None):
+        self.text, self.v, self.t = text, voice_id(voice), time.time()
+        self.path = tts_path(text, self.v)
+        self.audio = None  # pieces of her voice as they're made, then None; an exception if it failed
+        if str(self.v).startswith(("onecore:", "sapi:")) or os.path.exists(self.path):
+            return
+        if str(self.v).startswith("pocket:"):
+            self.audio = pocket.stream(text, self.v.split(":", 1)[1])
+        else:
+            self.audio = queue.Queue()
+            threading.Thread(target=self._fish, daemon=True).start()
+
+    def _fish(self):
         try:
-            win.play(path)
-        finally:
-            done.set()
-            SPEAK_LEVELS.clear()
-        return 0
-    t = time.time()
-    try:
-        r = fish(text, "pcm", stream=True, voice=v)  # 16-bit mono, played as it arrives
-        out, pending, started = None, b"", 0
-        try:
+            r = fish(self.text, "pcm", stream=True, voice=self.v)  # 16-bit mono, played as it arrives
             for chunk in r.iter_content(8192):
+                self.audio.put(chunk)
+            self.audio.put(None)
+        except Exception as exc:
+            self.audio.put(exc)
+
+    def _next(self, wait):
+        piece = self.audio.get(timeout=wait)
+        if isinstance(piece, Exception):
+            raise piece
+        return piece
+
+    def play(self):
+        """Say it, once anything she's saying already is done. Returns ms from when the line was made until she
+        started, 0 from the cache."""
+        with VOICE:
+            return self._play()
+
+    def _play(self):
+        if str(self.v).startswith(("onecore:", "sapi:")):  # Windows' own voice: no download, offline, instant
+            t = time.time()
+            win.speak_native(self.text, voice=self.v, wait=True)
+            return int((time.time() - t) * 1000)
+        if self.audio is None:  # made before and kept
+            done = threading.Event()
+            threading.Thread(target=_follow_voice, args=(self.path, done), daemon=True).start()
+            try:
+                win.play(self.path)
+            finally:
+                done.set()
+                SPEAK_LEVELS.clear()
+            return 0
+        local, started = str(self.v).startswith("pocket:"), [None]
+        try:
+            self._play_local(started) if local else self._play_fish(started)
+            return started[0] or 0
+        except Exception as exc:
+            if started[0] is not None:  # it broke off partway: what's said is said
+                print(f"  her voice broke off ({exc!r})")
+                return started[0]
+            if not local and pocket.available():
+                print(f"  fish speak failed ({exc}), falling back to her voice on this PC")
+                return Line(self.text, "pocket:" + pocket.DEFAULT).play()
+            print(f"  {'her voice on this PC' if local else 'fish speak'} failed ({exc}), falling back to Windows "
+                  f"native speech")
+            win.speak_native(self.text, wait=True)
+            return int((time.time() - self.t) * 1000)
+
+    def _play_fish(self, started):
+        out, pending = None, b""
+        try:
+            while True:
+                chunk = self._next(sum(FISH_WAIT))
+                if chunk is None:
+                    break
                 pending += chunk
                 if out is None:
                     if len(pending) < PREBUFFER:
                         continue
                     out = sd.RawOutputStream(samplerate=PCM_RATE, channels=1, dtype="int16")
                     out.start()
-                    started = int((time.time() - t) * 1000)
+                    started[0] = int((time.time() - self.t) * 1000)
                 whole = len(pending) - len(pending) % 2
                 SPEAK_LEVELS.append(_pcm_level(pending[:whole]))
                 out.write(pending[:whole])
@@ -3419,18 +3710,40 @@ def speak(text, voice=None):
             if out is None:  # a short line, all of it came before the buffer was full
                 out = sd.RawOutputStream(samplerate=PCM_RATE, channels=1, dtype="int16")
                 out.start()
-                started = int((time.time() - t) * 1000)
+                started[0] = int((time.time() - self.t) * 1000)
                 out.write(pending[:len(pending) - len(pending) % 2])
             out.stop()  # waits for the last of it to play
         finally:
             if out is not None:
                 out.close()
             SPEAK_LEVELS.clear()
-        return started
-    except Exception as exc:
-        print(f"  fish speak failed ({exc}), falling back to Windows native speech")
-        win.speak_native(text, wait=True)
-        return int((time.time() - t) * 1000)
+
+    def _play_local(self, started):
+        out = None
+        try:
+            while True:
+                piece = self._next(20.0)  # the first line after a while loads the model, under a second
+                if piece is None:
+                    break
+                if out is None:
+                    out = sd.OutputStream(samplerate=pocket.RATE, channels=1, dtype="float32")
+                    out.start()
+                    started[0] = int((time.time() - self.t) * 1000)
+                SPEAK_LEVELS.append(float(np.sqrt(np.mean(piece * piece))) if len(piece) else 0.0)
+                out.write(piece.reshape(-1, 1))
+            if out is not None:
+                out.stop()
+        finally:
+            if out is not None:
+                out.close()
+            SPEAK_LEVELS.clear()
+
+
+def speak(text, voice=None):
+    """Say a line. Scripted ones play from the cache, new ones play while they're still being made: on Fish that
+    starts her talking about a second after asking, or in Windows' own voice if Fish is slow (FISH_WAIT); on this PC
+    about half a second. voice: another Fish, on-PC or Windows voice. Returns ms until she started, 0 from the cache."""
+    return Line(text, voice).play()
 
 
 def _pcm_level(data):
@@ -3470,7 +3783,9 @@ def warm():
             session.head(url, timeout=5)
         except requests.RequestException:
             pass
-    for args in ((opencode.SESSION, opencode.BASE + "/models"), (FISH, "https://api.fish.audio/")):
+    # Kilo too: Ling is her model, and its host was the one left cold
+    for args in ((opencode.SESSION, opencode.BASE + "/models"), (opencode.SESSION, opencode.KILO_BASE + "/models"),
+                 (FISH, "https://api.fish.audio/")):
         threading.Thread(target=head, args=args, daemon=True).start()
 
 
@@ -3746,6 +4061,9 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
             print(f"  quick: {json.dumps(plan['steps']) if plan['steps'] else 'reply'}")
         else:
             emit(notify, "Thinking", words or text)
+            TURN_SPOKE.clear()
+            if not gate and STREAM_SAY:  # with her name it's for her, so a "One moment" if it's slow
+                threading.Thread(target=fill_silence, args=(words or text, notify), daemon=True).start()
             try:  # without her name: with "Hey Jeff" in it, the model took you for Jeff
                 plan = think(words or text, gate, notify, sure)
             except Exception as exc:  # she says she's slow, or that the model isn't answering
@@ -3758,6 +4076,8 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
                 plan = make_plan(say=say_line("llm_slow" if slow else "llm_error"))
                 if not slow:
                     note = f"{settings.get('llm_model')}: {opencode.explain(str(exc))}. Pick another model in Settings"
+            finally:
+                TURN_SPOKE.set()  # an answer's here, or she's given up: no filler now
             if plan is None:
                 print("  (not for me, staying quiet)")
                 emit(notify, "Ready", "That didn't sound like it was for me")
@@ -4446,6 +4766,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     def start_recording():  # right Alt works in both modes, so there's always a sure way to talk to her
         if not rec.on and not rec.dictating and not busy.locked():
             rec.start()
+            threading.Thread(target=warm, daemon=True).start()  # the model's connection, ready by the time you stop
             if ears.live:
                 pressed[0] = {"session": ears.session(), "frames": rec.frames, "fed": 0}
                 pressed[0]["feeder"] = threading.Thread(target=feed_ptt, args=(pressed[0],), daemon=True)
