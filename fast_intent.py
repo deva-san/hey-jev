@@ -346,16 +346,14 @@ class FastIntentMatcher:
             if app_raw in self.siri.SITES:
                 s_info = self.siri.SITES[app_raw]
                 return self.siri.make_plan([{"do": "website", "url": s_info[1]}], self.siri.say_line("site_open", site=s_info[0]))
-            # Special Windows folders and tools
+            # Special Windows folders and tools. Known folders by their shell: names, since they can be moved off the
+            # user folder: on this PC Downloads is on D:, so ~\Downloads didn't exist and ~\Pictures was an old one
             if re.fullmatch(r"downloads(?: folder)?", app_raw):
-                import os
-                return self.siri.make_plan([{"do": "open_folder", "path": os.path.expanduser(r"~\Downloads")}], self.siri.say_line("app_open"))
+                return self.siri.make_plan([{"do": "open_folder", "path": "shell:Downloads"}], self.siri.say_line("app_open"))
             if re.fullmatch(r"documents(?: folder)?", app_raw):
-                import os
-                return self.siri.make_plan([{"do": "open_folder", "path": os.path.expanduser(r"~\Documents")}], self.siri.say_line("app_open"))
+                return self.siri.make_plan([{"do": "open_folder", "path": "shell:Personal"}], self.siri.say_line("app_open"))
             if re.fullmatch(r"pictures(?: folder)?", app_raw):
-                import os
-                return self.siri.make_plan([{"do": "open_folder", "path": os.path.expanduser(r"~\Pictures")}], self.siri.say_line("app_open"))
+                return self.siri.make_plan([{"do": "open_folder", "path": "shell:My Pictures"}], self.siri.say_line("app_open"))
             if re.fullmatch(r"(?:the )?recycle bin", app_raw):
                 return self.siri.make_plan([{"do": "open_folder", "path": "shell:RecycleBinFolder"}], self.siri.say_line("app_open"))
             if re.fullmatch(r"(?:file )?explorer|my files", app_raw):
@@ -427,16 +425,13 @@ class FastIntentMatcher:
             return self.siri.make_plan([{"do": "open_folder", "path": "shell:MyComputerFolder"}])
 
         if re.fullmatch(r"(?:open|go to|show)(?: my)? downloads(?: folder)?", t):
-            import os
-            return self.siri.make_plan([{"do": "open_folder", "path": os.path.expanduser(r"~\Downloads")}], self.siri.say_line("app_open"))
+            return self.siri.make_plan([{"do": "open_folder", "path": "shell:Downloads"}], self.siri.say_line("app_open"))
 
         if re.fullmatch(r"(?:open|go to|show)(?: my)? documents(?: folder)?", t):
-            import os
-            return self.siri.make_plan([{"do": "open_folder", "path": os.path.expanduser(r"~\Documents")}], self.siri.say_line("app_open"))
+            return self.siri.make_plan([{"do": "open_folder", "path": "shell:Personal"}], self.siri.say_line("app_open"))
 
         if re.fullmatch(r"(?:open|go to|show)(?: my)? pictures(?: folder)?", t):
-            import os
-            return self.siri.make_plan([{"do": "open_folder", "path": os.path.expanduser(r"~\Pictures")}], self.siri.say_line("app_open"))
+            return self.siri.make_plan([{"do": "open_folder", "path": "shell:My Pictures"}], self.siri.say_line("app_open"))
 
         if re.fullmatch(r"(?:open|go to|show)(?: the)? recycle bin", t):
             return self.siri.make_plan([{"do": "open_folder", "path": "shell:RecycleBinFolder"}], self.siri.say_line("app_open"))

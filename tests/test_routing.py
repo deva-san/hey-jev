@@ -192,5 +192,17 @@ class HeardAs(Routing):
                          [{"do": "youtube", "query": "keto recipes", "play": True}])
 
 
+class Folders(Routing):
+    """A29: Downloads, Documents and Pictures open where Windows keeps them, which needn't be under the user folder."""
+
+    def test_known_folders(self):
+        for words, path in (("open downloads", "shell:Downloads"), ("open my downloads", "shell:Downloads"),
+                            ("show my downloads", "shell:Downloads"), ("open pictures", "shell:My Pictures"),
+                            ("show my pictures", "shell:My Pictures"), ("open documents", "shell:Personal")):
+            with self.subTest(words=words):
+                self.assertEqual(self.steps(words), [{"do": "open_folder", "path": path}])
+                self.assertIn(path, winplatform.SHELL_FOLDERS)
+
+
 if __name__ == "__main__":
     unittest.main()
