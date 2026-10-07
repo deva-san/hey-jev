@@ -297,6 +297,7 @@ REPLIES = {
     "system_restart": ["Restarting the computer in a few seconds.", "Okay, restarting in ten seconds."],
     "system_abort_shutdown": ["Shutdown cancelled.", "Okay, cancelled the shutdown."],
     "greeting": ["Hi! What can I do for you?", "Hey, what can I do for you?", "Hello! What do you need?"],
+    "first_run": ["Hey, I'm Jev, what can I do for you?"],  # once, on her first start after a fresh start
     "how_are_you": ["I'm good, thanks. What can I do for you?", "Doing well, thanks. What do you need?"],
     "thanks": ["You're welcome.", "Anytime.", "Happy to help."],
     "bye": ["Bye for now.", "Talk to you later.", "See you."],
@@ -4400,6 +4401,17 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             print(f"  welcome voice not ready: {exc}")
         tell(line, "back at the PC" if back else "signed in")
 
+    def first_hello():
+        """Her first start, or the first after her memory was started fresh (python backup.py --fresh): she
+        introduces herself, once."""
+        line = say_line("first_run")
+        try:
+            fetch_tts(line)
+        except Exception as exc:
+            print(f"  first hello voice not ready: {exc}")
+        if tell(line, "first start"):
+            settings.put("met", True)
+
     watcher = watch.Watcher()
 
     def keep_warm():
@@ -4459,7 +4471,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     watch_return(lambda since: welcome(True, since))
     threading.Thread(target=listen_loop, daemon=True).start()
     set_mode(mode)
-    if "--startup" in sys.argv:  # Windows started her as you signed in
+    if not settings.get("met"):  # new, or her memory was just started fresh: she introduces herself instead
+        threading.Thread(target=first_hello, daemon=True).start()
+    elif "--startup" in sys.argv:  # Windows started her as you signed in
         threading.Thread(target=welcome, args=(False,), daemon=True).start()
     if controls is None:
         controls = queue.Queue()

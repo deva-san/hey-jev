@@ -224,7 +224,7 @@ def system_prompt_block(entries: Optional[List[Dict[str, Any]]] = None) -> str:
         return ""
     lines = []
     for e in entries:
-        said = f" (Hari says: {', '.join(e['triggers'])})" if e["triggers"] else ""
+        said = f" (the user says: {', '.join(e['triggers'])})" if e["triggers"] else ""  # Hey Jev: no fixed name
         lines.append(f"    - {e['dir']}: {e['description']}{said}")
     return ("## Skills\n"
             "Before replying, scan the skills below. If a skill matches or is even partially relevant to the task, "

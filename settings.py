@@ -17,6 +17,7 @@ DEFAULTS = {
     "popup": True,  # the pill at the bottom of the screen while she listens, thinks and talks
     "name": "",  # what she calls you
     "welcome": True,  # hello when you sign in or come back to the laptop, and what she can do
+    "met": False,  # she's introduced herself since her memory was last started fresh, see backup.py --fresh
     "voice": "",  # her Fish Audio voice, an ID from VOICES or a pasted fish.audio link. Empty: the first in VOICES
     "vision": True,  # she may look at the screen when you ask about it, see siri.see()
     "heads_ups": True,  # she mentions what needs you: messages, a low battery, a nearly full drive, see watch.py
