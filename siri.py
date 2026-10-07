@@ -1401,7 +1401,7 @@ POWER_OK = {"until": 0.0}
 # Shortcuts that only move around, play or open things, fine whoever asked
 SAFE_KEYS = {"ctrl+t", "ctrl+w", "ctrl+shift+t", "alt+left", "alt+right", "f5", "ctrl+r", "f", "k", "space", "esc",
              "page_down", "page_up", "home", "end", "ctrl+tab", "ctrl+shift+tab", "f11", "m", "j", "l", "shift+n",
-             "shift+p", "up", "down", "left", "right", "ctrl+shift+esc", "ctrl+plus", "ctrl+minus", "ctrl+0"}
+             "shift+p", "up", "down", "left", "right", "ctrl+shift+esc", "ctrl+=", "ctrl+-", "ctrl+0"}  # zoom, see KEY_NAMES
 INFO = ("lookup", "recall", "web", "read", "weather", "news", "skill_view")  # their results go back to the model
 ROUNDS = 4  # how many times it can look things up before it has to answer: search, read a page, answer
 LOOKING = {"web": "Searching the web\u2026", "read": "Reading it\u2026", "weather": "Checking the weather\u2026",
@@ -2324,7 +2324,10 @@ SHELLS = {"cmd.exe", "powershell.exe", "pwsh.exe", "windowsterminal.exe", "wt.ex
           "wsl.exe", "bash.exe", "mintty.exe"}
 KEY_NAMES = {"control": "ctrl", "escape": "esc", "return": "enter", "pgup": "page_up", "pageup": "page_up",
              "pgdn": "page_down", "pagedown": "page_down", "del": "delete", "arrowleft": "left", "arrowright": "right",
-             "arrowup": "up", "arrowdown": "down", "spacebar": "space"}
+             "arrowup": "up", "arrowdown": "down", "spacebar": "space",
+             # zoom: pynput has no plus or minus key, and "+" needs Shift, which Ctrl+"+" doesn't reach. "=" and "-"
+             # are the same keys unshifted, so ctrl+plus zooms in where it said "There's no plus key"
+             "plus": "=", "minus": "-", "equals": "="}
 WAIT_AFTER = {"open": 0.8, "new_tab": 0.5, "website": 3.0, "youtube": 3.0, "google": 2.5}  # before the next step
 SPEAK_FIRST = ("lock", "sleep")  # and muting: she says it first, or she'd cut herself off
 
