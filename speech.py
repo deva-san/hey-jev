@@ -25,6 +25,7 @@ import tarfile
 import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -38,8 +39,12 @@ MODELS = {  # name: (file or folder once downloaded, where it comes from, size f
     "nemotron": (NEMOTRON, RELEASES + NEMOTRON + ".tar.bz2", "460 MB"),  # NVIDIA Open Model License
     "turn": ("smart-turn-v3.2-cpu.onnx", "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/"
              "f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.2-cpu.onnx", "9 MB"),  # BSD 2-clause
+    # 3D-Speaker's CAM++ trained on VoxCeleb (English, many accents), Apache 2.0: whose voice it is, see Speaker
+    "speaker": ("3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx", "https://github.com/k2-fsa/sherpa-onnx/releases/"
+                "download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx", "30 MB"),
 }
-SHA256 = {"turn": "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f"}  # from Hugging Face's LFS
+SHA256 = {"turn": "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f",  # from Hugging Face's LFS
+          "speaker": "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b"}  # checked 7 Oct 2026
 PARAKEET_THREADS = 2  # as quick as 4 on this 12th gen i5 (315 vs 294 ms a command), and half the CPU; 6+ was slower
 # Nemotron while someone talks, fed in real time, and its last words once they stop: 4.5 cores and 174 ms at 3
 # threads, 2.3 cores and 222 ms at 2, 0.34 cores and 342 ms at 1. Most of it is sherpa-onnx's own onnxruntime
@@ -57,6 +62,9 @@ class Heard(str):
     On 62 clips from this PC's room, clear speech came out above 0.9, "Hey Joe" said to her about 0.75, and
     mumbling, Telugu and talk across the room 0.4 to 0.6."""
     sure = 1.0
+    owner = None  # how like your voice it was, -1 to 1 (voiceid.Profile.score), None if it wasn't scored
+    spoke = 0.0  # seconds of speech in it, without the quiet
+    voice = None  # its voice print, to add to her picture of yours when it was plainly you
 
 
 def heard(text, sure=1.0):
@@ -333,6 +341,43 @@ class Turn:
         return float(self.session.run(None, {"input_features": _features(audio)})[0].reshape(-1)[0])
 
 
+class Speaker:
+    """Whose voice it is: a voice print of the speech in a turn, 512 numbers, from 3D-Speaker's CAM++ (sherpa-onnx's
+    SpeakerEmbeddingExtractor, as in its speaker-identification-with-vad.py example), compared in voiceid.py. The
+    quiet is taken out first with Silero: with it left in, Windows' voices matched Hari's clips as well as his own did.
+    About 20 to 50 ms for 1 to 4 s of speech here, on one thread, while speech-to-text finishes."""
+
+    def __init__(self, notify=None):
+        import sherpa_onnx
+        config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=model_path("speaker", notify), num_threads=1)
+        self.extractor = sherpa_onnx.SpeakerEmbeddingExtractor(config)
+        self.vad = Voice(notify)
+        self.lock = threading.Lock()
+
+    def speech(self, audio):
+        """Only the speech in the audio, each bit of it with 64 ms either side."""
+        with self.lock:
+            self.vad.reset()
+            chances = np.array(self.vad(audio))
+        keep = np.flatnonzero(np.convolve(chances >= Listener.ON, np.ones(5), "same") > 0)
+        w = Voice.WINDOW
+        return np.concatenate([audio[i * w:(i + 1) * w] for i in keep]) if len(keep) else np.zeros(0, np.float32)
+
+    def print(self, audio):
+        """(voice print or None, seconds of speech)."""
+        audio = self.speech(np.asarray(audio, dtype=np.float32))
+        secs = len(audio) / RATE
+        if secs < 0.3:
+            return None, secs
+        stream = self.extractor.create_stream()
+        stream.accept_waveform(RATE, audio)
+        stream.input_finished()
+        if not self.extractor.is_ready(stream):
+            return None, secs
+        v = np.array(self.extractor.compute(stream), np.float32)
+        return v / (np.linalg.norm(v) or 1.0), secs
+
+
 class Listener:
     """Mic audio in, 32 ms at a time, turns out, as on_phrase(audio, kind, text, ms). kind is one of:
 
@@ -359,13 +404,17 @@ class Listener:
     SETTLE, LONGEST = 0.5, 1.2  # over MAYBE after SETTLE seconds of quiet, and whatever it said after LONGEST
 
     def __init__(self, vad, ears, on_phrase, on_speech=lambda: None, turn=None, on_words=None, hold_for=None,
-                 is_hers=None):
+                 is_hers=None, speaker=None):
         """hold_for(words so far): True to wait the longest before ending, for words that are only the start.
-        is_hers(words so far): True if her name is in them, so a long turn isn't cut at MAX_TURN."""
+        is_hers(words so far): True if her name is in them, so a long turn isn't cut at MAX_TURN.
+        speaker(audio): (voice print or None, seconds of speech), worked out while speech-to-text finishes and put on
+        the text as .voice and .spoke (Speaker.print), for voiceid."""
         self.vad, self.ears, self.on_phrase, self.on_speech, self.turn = vad, ears, on_phrase, on_speech, turn
         self.on_words = on_words or (lambda text, kind: None)
         self.hold_for = hold_for or (lambda words: False)
         self.is_hers = is_hers or (lambda words: False)
+        self.speaker = speaker
+        self.prints = ThreadPoolExecutor(1) if speaker else None
         self.dictating = False
         self.reset()
 
@@ -434,7 +483,14 @@ class Listener:
         quiet = (self.pos - self.voice) / RATE
         self.session, self.words, self.talking, self.early = None, "", False, None
         self.ended = (self.chance, quiet)  # why it ended, for the log: Smart Turn's chance and the quiet
+        whose = self.prints.submit(self.speaker, audio) if self.prints and kind != "dictation" else None
         text, ms = early or session.finish(quiet)
+        if whose is not None:
+            text = text if isinstance(text, Heard) else heard(text)
+            try:
+                text.voice, text.spoke = whose.result()
+            except Exception as exc:
+                print(f"  voice print failed: {exc!r}")
         self.on_phrase(audio, kind, text, ms + self.turn_ms)
 
     def feed(self, block, dictating=False):

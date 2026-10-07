@@ -7,7 +7,7 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows without
 import subprocess
 import numpy as np, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
-import fast_intent, hermes_memory, history, installer, messaging, opencode, settings, speech, sysinfo, tasks as tasking, vision, watch, web, winplatform as win
+import fast_intent, hermes_memory, history, installer, messaging, opencode, settings, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
 from hermes_memory import skills
 from hermes_memory.threat_patterns import INVISIBLE_CHARS, first_threat_message
 from secrets_store import get_secret, missing_secrets
@@ -3527,6 +3527,22 @@ def emit(notify, state, detail=""):
         notify(state, detail)
 
 
+# Only your voice (voiceid.py): what you say to her to teach her your voice, or turn it on and off
+VOICE_LEARN = re.compile(r"(?:please\s+)?(?:learn|re-?learn|teach you|remember)\s+my\s+voice(?:\s+again)?[\s.!?]*",
+                         re.I)
+VOICE_ONLY = re.compile(r"(?:only|just)\s+(?:listen\s+to|answer|respond\s+to|reply\s+to)\s+me(?:\s+from now on)?"
+                        r"[\s.!?]*", re.I)
+VOICE_ALL = re.compile(r"(?:listen\s+to|answer|respond\s+to|reply\s+to)\s+(?:everyone|everybody|anyone)(?:\s+again)?"
+                       r"[\s.!?]*", re.I)
+
+
+def voice_like(heard_text, sentence):
+    """True if what was heard is that sentence read out, near enough: half its words or more."""
+    want = set(re.findall(r"[a-z']{3,}", sentence.lower())) - {"hey", "jev"}
+    got = set(re.findall(r"[a-z']{3,}", str(heard_text).lower()))
+    return bool(want) and len(want & got) >= len(want) / 2
+
+
 # Alfred's measured Indian-English slips for "type". Only nonsense words, and only in a command-verb slot; never
 # touch real words or anything after type/write, because that's the user's literal text.
 VERB_HEARD = {"daye": "type", "taeya": "type", "daeep": "type", "dayeb": "type", "diyeb": "type",
@@ -3999,6 +4015,26 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     print(f"[ears: {ears.engine}{', words as you talk' if ears.live else ''}, smart turn "
           f"{'on' if turn else 'off'}]")
     transcribe = ears.transcribe  # audio -> (text, ms)
+    speaker = [None]  # speech.Speaker, whose voice a turn is: loaded when voice ID is on, or to learn your voice
+    profile = voiceid.Profile()  # your voice, see voiceid.py
+    enrolling = [None]  # {"i": sentence, "prints": [...]} while you read her the sentences for your voice
+
+    def load_speaker():
+        if speaker[0] is None:
+            try:
+                speaker[0] = speech.Speaker(starting)
+            except Exception as exc:
+                print(f"  voice ID didn't load: {exc!r}")
+        return speaker[0]
+
+    if voiceid.mode() != "off":
+        threading.Thread(target=load_speaker, daemon=True).start()  # beside the rest, so starting isn't slower
+
+    def voice_print(audio):
+        if speaker[0] is None or (voiceid.mode() == "off" and enrolling[0] is None):
+            return None, 0.0
+        return speaker[0].print(audio)
+
     rec = Recorder(mic)
     MIC[0] = rec
     busy = threading.Lock()
@@ -4019,8 +4055,14 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             try:
                 # straight to dictating only when called by name or with right Alt: "Can you transcribe this?" said in
                 # the room goes through is-it-for-her like any request, or it took down the room and pasted it
-                result = "dictate" if not gate and DICTATE_START.match(words.strip()) else \
-                    handle(text, words, stt_ms, notify, gate)
+                said = words.strip()
+                if not gate and VOICE_LEARN.fullmatch(said):
+                    result = voice_setup("learn")
+                elif VOICE_ONLY.fullmatch(said) or VOICE_ALL.fullmatch(said):
+                    result = voice_setup("only" if VOICE_ONLY.fullmatch(said) else "all")
+                else:
+                    result = "dictate" if not gate and DICTATE_START.match(said) else \
+                        handle(text, words, stt_ms, notify, gate)
                 if result == "dictate":
                     start_dictation()
             except Exception as exc:
@@ -4037,12 +4079,91 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 next_window[0] = window_ask[0] = FOLLOW_UP if follow else 0.0
                 if gate and result is False:  # someone else's conversation: the model sees it with what comes next
                     ROOM.append((time.time(), str(words)))
+                show_sentence()  # "learn my voice": the first sentence to read, once she's said how it goes
+
+    def show_sentence():
+        e = enrolling[0]
+        if e is not None:
+            emit(notify, f"Read this out loud ({e['i'] + 1} of {len(voiceid.SENTENCES)})", voiceid.SENTENCES[e["i"]])
+
+    def start_enrol(speak_now):
+        """Learning your voice: you read the sentences in the popup, one at a time (enrol_turn). speak_now(line)
+        says something: say() inside a turn, tell() from Settings."""
+        if load_speaker() is None:
+            speak_now("Sorry, I couldn't load what I need to learn your voice.")
+            return
+        enrolling[0] = {"i": 0, "prints": [], "until": time.time() + 300}
+        speak_now("Sure. Read me each sentence that comes up, in your normal voice. Say stop to stop.")
+        show_sentence()
+
+    def enrol_turn(audio, text):
+        """One sentence read for learning your voice: kept if it's the sentence, with enough speech in it."""
+        e = enrolling[0]
+        if time.time() > e["until"] or re.fullmatch(r"\W*(?:stop|cancel|never ?mind)\W*", str(text), re.I):
+            enrolling[0] = None
+            emit(notify, "Ready", "Stopped learning your voice")
+            return
+        want = voiceid.SENTENCES[e["i"]]
+        voice, spoke = getattr(text, "voice", None), getattr(text, "spoke", 0.0)
+        print(f"\n  (learning your voice, {e['i'] + 1}: {str(text)!r}, {spoke:.1f}s of speech)")
+        if voice is None or spoke < voiceid.MIN_SPEECH or not voice_like(text, want):
+            emit(notify, f"Once more ({e['i'] + 1} of {len(voiceid.SENTENCES)})", want)
+            return
+        try:  # the recordings stay on this PC, so a better model later can learn from them without you reading again
+            clips = os.path.join(voiceid.folder(), "clips")
+            os.makedirs(clips, exist_ok=True)
+            sf.write(os.path.join(clips, f"sentence-{e['i'] + 1}.wav"), audio, SAMPLE_RATE)
+        except Exception as exc:
+            print(f"  couldn't keep the recording: {exc!r}")
+        e["prints"].append(voice)
+        e["i"] += 1
+        e["until"] = time.time() + 300
+        if e["i"] < len(voiceid.SENTENCES):
+            show_sentence()
+            return
+        profile.enrol(e["prints"])
+        enrolling[0] = None
+        settings.put("voice_id", "learning")
+        threading.Thread(target=tell, args=("Thanks, I've got your voice. For the next few days I'll just learn it, "
+                                            "then I'll only answer you.", "voice learned"), daemon=True).start()
+
+    def voice_setup(which):
+        """"Learn my voice", "only answer me", "answer everyone", inside a turn."""
+        if which == "learn" or (which == "only" and not profile.ready):
+            start_enrol(lambda line: say(line, notify))
+        elif which == "only":
+            settings.put("voice_id", "on" if profile.calibrated else "learning")
+            threading.Thread(target=load_speaker, daemon=True).start()
+            say("Okay, I'll only answer you." if profile.calibrated else "Okay. I'm still learning your voice, so "
+                "for a few more days I'll answer everyone, then only you.", notify)
+        else:
+            settings.put("voice_id", "off")
+            say("Okay, I'll answer everyone again.", notify)
+        return True
+
+    def owner_ok(text, kind):
+        """False if voice ID is on and this isn't your voice (voiceid.judge). Logs the score while learning."""
+        voice, spoke = getattr(text, "voice", None), getattr(text, "spoke", 0.0)
+        score = profile.score(voice) if voice is not None and profile.ready else None
+        named = bool(find_name(text))
+        counted, why = voiceid.judge(profile, score, spoke, named, kind)
+        if voiceid.after_turn(profile, voice, score, spoke, named, kind, counted):
+            ANNOUNCE.put("I know your voice well now, so from here on I'll only answer you. "
+                         "Say answer everyone to change that.")
+        if not counted:
+            print(f"\n  (not your voice, {why}: {str(text)[:80]!r})")
+        elif score is not None:
+            print(f"\n  (voice {why})")
+        return counted
 
     def on_phrase(audio, kind, text, ms):
         """A turn from the listener, already in words: kind is dictation, armed, follow_up or other (see
         speech.Listener)."""
         if kind == "dictation":
             dictate_turn(text)
+            return
+        if enrolling[0] is not None:
+            enrol_turn(audio, text)
             return
         last_audio[0] = audio  # for keep_missed
         if held[0]:  # the rest of a phrase that a pause cut off
@@ -4063,14 +4184,20 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         if ears.live and kind in ("other", "follow_up") and GREETING_ONLY.fullmatch(text) \
                 and not (settings.get("call_aware") and win.call_apps()):
             what = "maybe"  # "Hello Jev" with her name lost, see GREETING_ONLY
+        # only your voice: too short to check for a bare name, the command after it is checked (voiceid.py)
+        mine = what in ("wake", "maybe") or owner_ok(text, kind)
         if what is None:
             open_mic = kind == "other" and settings.get("no_name") and text.strip(" .,!?")
             if MAYBE_WAKE.match(text) or open_mic:  # else nothing is logged, it's the room talking
                 print(f"\n  (not for me: {text[:80]!r})")
-            if open_mic:
+            if open_mic and mine:  # someone else's words never reach the model, not even as what came before
                 ROOM.append((time.time(), str(text)))
             if was_named:  # the popup came up as you talked, but it wasn't for her after all
                 emit(notify, "Ready", None)
+            return
+        if not mine:  # not your voice: let go, as quietly as room talk
+            if was_named:
+                emit(notify, "Ready", "That didn’t sound like you")
             return
         chance, quiet = listener.ended  # why the turn ended there: Smart Turn's chance, and how much quiet
         late = rec.blocks.qsize() * Recorder.BLOCK / SAMPLE_RATE  # mic audio still waiting: how far behind she is
@@ -4143,7 +4270,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     listener = speech.Listener(speech.end_of_speech(starting), ears, on_phrase, on_speech=warm, turn=turn,
                                on_words=on_words, hold_for=wait_for_rest,
                                is_hers=lambda words: bool(words) and bool(find_name(words))
-                               or (hers[0] is not None and hers[0] is listener.session))
+                               or (hers[0] is not None and hers[0] is listener.session), speaker=voice_print)
 
     def show_listening():
         """Listening after a bare "Hey Jev" or "Hello", Still listening during a follow-up window, Ready after."""
@@ -4152,7 +4279,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             maybe[0] = False
         elif now == "window" and maybe[0]:
             now = "maybe"
-        if now == shown[0] or busy.locked() or rec.dictating or held[0]:
+        if now == shown[0] or busy.locked() or rec.dictating or held[0] or enrolling[0]:
             return
         if now in ("armed", "maybe"):
             emit(notify, "Listening", "Go ahead\u2026")
@@ -4289,6 +4416,11 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 if len(frames) > press["fed"]:
                     press["session"].feed(np.concatenate(frames[press["fed"]:])[:, 0])
                 text, ms = press["session"].finish()
+            if enrolling[0] is not None:  # reading the sentences for your voice while holding the key
+                text = text if isinstance(text, speech.Heard) else speech.heard(text)
+                text.voice, text.spoke = speaker[0].print(audio) if speaker[0] else (None, 0.0)
+                enrol_turn(audio, text)
+                return
         except Exception as exc:
             emit(notify, "Something went wrong", str(exc))
             return
@@ -4490,6 +4622,11 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 set_mode(command[1])
             elif isinstance(command, tuple) and command[0] == "mic":
                 rec.set_device(command[1])
+            elif command == "learn voice":  # Settings > Your voice > Learn my voice
+                threading.Thread(target=start_enrol, args=(lambda line: tell(line, "learning your voice"),),
+                                 daemon=True).start()
+            elif command == "voice on":
+                threading.Thread(target=load_speaker, daemon=True).start()
             elif command == "press":
                 start_recording()
             elif command == "release":

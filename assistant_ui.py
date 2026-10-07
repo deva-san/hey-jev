@@ -1045,6 +1045,15 @@ class AssistantWindow:
             var = self.switches[key] = tk.BooleanVar(value=bool(settings.get(key)))
             ttk.Checkbutton(form, text=text, variable=var, command=lambda k=key, v=var: settings.put(k, v.get())
                             ).grid(row=r * 2, column=1, rowspan=2, sticky="e")
+        row(15, "Your voice", "She answers only you, not other people, the TV or a video. Press Learn, or say "
+                              "“Hey Jev, learn my voice”, and read her 10 short sentences. She learns your "
+                              "voice for a few days first. The recordings stay on this PC.")
+        yours = tk.Frame(form, bg=BG)
+        yours.grid(row=30, column=1, rowspan=2, sticky="e")
+        self.voice_id_var = tk.BooleanVar(value=settings.get("voice_id") != "off")
+        ttk.Checkbutton(yours, text="Only answer my voice", variable=self.voice_id_var,
+                        command=self.voice_id_changed).pack(side="left")
+        ttk.Button(yours, text="Learn", command=self.learn_voice).pack(side="left", padx=(self.px(6), 0))
         self.settings_note = self._label(page, "", self.f_small, MUTED, wraplength=self.px(660))
         self.settings_note.pack(fill="x", pady=(self.px(18), 0))
         self.models_loaded = False
@@ -1086,6 +1095,26 @@ class AssistantWindow:
         self.controls.put(("mic", self.mic))  # opens the mic again, the new way
         self._note("Echo cancelling on, she hears you over videos and music" if on else
                    "Echo cancelling off. While a video plays, say \u201cHey Jev\u201d close to the mic, or hold right Alt")
+
+    def learn_voice(self):
+        self.controls.put("learn voice")
+        self._note("Read her each sentence in the popup, one at a time. Say “stop” to stop.")
+
+    def voice_id_changed(self):
+        import voiceid
+        if not self.voice_id_var.get():
+            settings.put("voice_id", "off")
+            self._note("She answers everyone again.")
+            return
+        profile = voiceid.Profile()
+        if not profile.ready:  # she needs your voice first; reading the sentences turns it on
+            self.voice_id_var.set(False)
+            self.learn_voice()
+            return
+        settings.put("voice_id", "on" if profile.calibrated else "learning")
+        self.controls.put("voice on")
+        self._note("She answers only you." if profile.calibrated else
+                   "She's learning your voice for a few days, then she'll answer only you.")
 
     @staticmethod
     def _voice_label(voice):
