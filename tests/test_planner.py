@@ -179,18 +179,19 @@ class ToolCalls(unittest.TestCase):
         # "when I say work mode, ..." opened Gmail and set the volume on 7 October instead of saving the routine
         skill = {"do": "skill", "action": "create", "name": "work-mode", "triggers": ["work mode"],
                  "steps": [{"do": "open", "app": "Spotify"}], "say": "Work mode's on."}
-        for raw in ('<tool_call>skill\n<arg_key>action</arg_key>\n<arg_value>create</arg_value><arg_key>name</arg_key>\n'
-                    '<arg_value>work-mode</arg_value><arg_key>triggers</arg_key>\n<arg_value>["work mode"]</arg_value>'
-                    '<arg_key>steps</arg_key>\n<arg_value>[{"do": "open", "app": "Spotify"}]</arg_value><arg_key>say'
-                    '</arg_key>\n<arg_value>Work mode\'s on.</arg_value>\n</tool_call>',
-                    '<tool_call>skill\naction="create"\nname="work-mode"\ntriggers=["work mode"]\nsteps=[{"do": "open", '
-                    '"app": "Spotify"}]\nsay="Work mode\'s on."\n</tool_call>',
-                    '<tool_call>skill\n' + json.dumps({k: v for k, v in skill.items() if k != "do"}) + '\n</tool_call>'):
+        for raw in ('<tool_call>skill\n<arg_key>action</arg_key>\n<arg_value>create</arg_value><arg_key>name'
+                    '</arg_key>\n<arg_value>work-mode</arg_value><arg_key>triggers</arg_key>\n<arg_value>["work mode"]'
+                    '</arg_value><arg_key>steps</arg_key>\n<arg_value>[{"do": "open", "app": "Spotify"}]</arg_value>'
+                    '<arg_key>say</arg_key>\n<arg_value>Work mode\'s on.</arg_value>\n</tool_call>',
+                    '<tool_call>skill\naction="create"\nname="work-mode"\ntriggers=["work mode"]\nsteps=[{"do": '
+                    '"open", "app": "Spotify"}]\nsay="Work mode\'s on."\n</tool_call>',
+                    '<tool_call>skill\n' + json.dumps({k: v for k, v in skill.items() if k != "do"}) + '</tool_call>'):
             self.assertEqual(siri.parse_plan(raw), {"steps": [skill], "say": ""}, raw)
 
     def test_what_a_say_call_says(self):
         for raw in ('<tool_call>say\n<arg_key>text</arg_key>\n<arg_value>Hello, Hari.</arg_value>\n</tool_call>',
-                    '<tool_call>say\ntext="Hello, Hari."\n</tool_call>', '<tool_call>do\n{"say": "Hello, Hari."}\n</tool_call>'):
+                    '<tool_call>say\ntext="Hello, Hari."\n</tool_call>',
+                    '<tool_call>do\n{"say": "Hello, Hari."}\n</tool_call>'):
             self.assertEqual(siri.parse_plan(raw), {"steps": [], "say": "Hello, Hari."}, raw)
 
     def test_no_made_up_steps(self):
