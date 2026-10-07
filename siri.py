@@ -1395,6 +1395,13 @@ EDIT_WORDS = re.compile(r"\b(?:writ|typ|add|put|replac|chang|delet|eras|remov|pr
 ASKS_FOR = {"type": EDIT_WORDS, "keys": EDIT_WORDS, "close": re.compile(r"\b(?:close|quit|exit|kill|shut)", re.I),
             "minimise": re.compile(r"\b(?:minimi[sz]e|hide)", re.I), "lock": re.compile(r"\block", re.I),
             "sleep": re.compile(r"\bsleep", re.I)}
+# After reading the web or messages, only these go ahead without a yes, whatever the words: they show, play or look
+# things up, or ask for themselves later (a message, an install, a command's approval). Words can't count there:
+# "look up how to make biryani" let a page's typing through, "make" being an edit word, and nothing stopped a message
+# from having her save its own number as Mum's
+READ_SAFE = {"open", "website", "youtube", "google", "media", "volume", "scroll", "new_tab", "timer", "note",
+             "open_notes", "research", "window", "screenshot", "open_folder", "abort_shutdown", "dictate", "message",
+             "install", "command"}
 # Shutting down or restarting always asks first, whoever planned it, and only runs straight after a spoken yes
 POWER_STEPS = {"shutdown", "restart"}
 POWER_OK = {"until": 0.0}
@@ -1942,30 +1949,54 @@ def confirm_question(step):
         return f"Should I press {pretty_keys(step.get('keys'))}?"
     if do == "screen":
         return say_line("screen_ask")
+    action, on = str(step.get("action") or "").lower(), step.get("on")
+    if do == "contact":  # the number itself, so a yes can't save a stranger's as Mum's
+        who = " ".join(str(step.get("alias") or "them").split())[:40]
+        handle = str(step.get("number") or step.get("username") or step.get("id") or "").strip()[:40]
+        where = messaging.say_of(messaging.app_key(step.get("app")) or step.get("app"))
+        return f"Should I forget {who}?" if action == "remove" else f"Should I save {handle} as {who} on {where}?"
+    if do == "skill":
+        name = str(step.get("name") or "that").replace("-", " ")
+        return {"delete": f"Should I delete the {name} skill?", "patch": f"Should I change the {name} skill?"}.get(
+            action, f"Should I save {name} as a skill?")
+    if do == "memory":
+        content = " ".join(str(step.get("content") or "").split())
+        return f"Should I remember “{content}”?" if action in ("", "add") and 0 < len(content) <= 60 \
+            else "Should I change what I remember?"
+    if do == "task_control":
+        return f"Should I {action or 'change'} task {step.get('id')}?"
+    if do == "dark_mode":
+        return "Should I switch dark mode?" if on in (None, "toggle") else \
+            f"Should I turn dark mode {'on' if on else 'off'}?"
     return {"close": f"Should I close {app}?", "minimise": f"Should I minimise {app}?", "lock": "Should I lock the PC?",
             "sleep": "Should I put the PC to sleep?", "shutdown": "Should I shut down the computer?",
-            "restart": "Should I restart the computer?"}.get(do, f"Should I {do}?")
+            "restart": "Should I restart the computer?", "schedule": "Should I schedule that?",
+            "cancel_timers": "Should I cancel your timers and reminders?"}.get(do, "Should I go ahead with that?")
 
 
-def needs_asking(steps, text):
+def needs_asking(steps, text, read=False):
     """The first step that changes things which these words, said without her name, didn't ask for, else None.
     Closing or minimising an app needs the words to start with it ("close it") or to name the app: a model planned
     closing Kiro for "Yeah, do you open close?" in the middle of a phone call. Looking at the screen needs her name,
-    or her to have looked in the last minute, as in "now click the second one"."""
+    or her to have looked in the last minute, as in "now click the second one". read: after reading the web or
+    messages, every step outside READ_SAFE asks, whatever the words. A yes runs the whole plan, so with a shutdown or
+    restart in it that's the one asked about: a yes to "Should I type that?" once let one through unasked."""
     t = plain(text)
     for s in steps:
         do = s["do"]
         if do == "screen":
             ask = time.time() - LAST_SCREEN[0] > 60
+        elif do == "keys" and combo(s.get("keys")) in SAFE_KEYS:
+            ask = False
+        elif read:
+            ask = do not in READ_SAFE
         elif do in ("close", "minimise"):
             named = set(key_of(s.get("app") or "").split()) & set(t.split())
             ask = not (ASKS_FOR[do].match(t) or (named and ASKS_FOR[do].search(t)))
-        elif do == "keys" and combo(s.get("keys")) in SAFE_KEYS:
-            ask = False
         else:
             ask = do in ASKS_FOR and not ASKS_FOR[do].search(text)
         if ask:
-            return s
+            return next((p for p in steps if p["do"] in POWER_STEPS), s)
     return None
 
 
@@ -2023,9 +2054,10 @@ def think(text, gate, notify=None, sure=1.0):
     if needs_task and not any(s.get("do") in ("command", "schedule", "task_control") for s in plan["steps"]) \
             and re.search(r"\b(?:done|scheduled|queued|running|started|i(?:'ll| will)|will run)\b", str(plan.get("say") or ""), re.I):
         return make_plan(say="I couldn't add that task. Say the folder and time again.")
-    # without her name, or after reading the web or messages, which could try to steer her: changes the words
-    # didn't ask for get a yes or no first
-    risky = needs_asking(plan["steps"], text) if gate or used & {"web", "read", "news", "lookup"} else None
+    # without her name, changes the words didn't ask for get a yes or no first, and after reading the web or
+    # messages, which could try to steer her, any change does
+    read = bool(used & {"web", "read", "news", "lookup"})
+    risky = needs_asking(plan["steps"], text, read) if gate or read else None
     if risky:  # the words didn't ask for this: ask first
         print(f"  (no name and not asked for, asking first: {json.dumps(plan['steps'])})")
         return {"steps": [], "say": confirm_question(risky), "confirm": plan}
