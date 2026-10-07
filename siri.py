@@ -838,10 +838,20 @@ def finish_asked(words):
     if time.time() > ASKED["until"] or not ASKED["alias"]:
         return None
     app, alias, text = ASKED["app"], ASKED["alias"], ASKED["text"]
-    said = " ".join(str(words).split())
-    want = messaging.needs_of(app)
-    handle = (_digits_said(said) or said) if want == "number" else said.strip().lstrip("@").split()[-1:][0] \
-        if said.strip() else ""
+    # the whole reply is the number or username, never a word picked out of it: "Cancel that" saved "that" as
+    # bittu's Telegram username, for every message to bittu from then on
+    said = re.sub(r"^(?:it'?s|it is|that'?s|that is|(?:(?:their|his|her|the) )?(?:phone |whatsapp |telegram )?"
+                  r"(?:number|username) is)\s+", "", " ".join(str(words).split()).strip(" .!?"), flags=re.I)
+    if messaging.needs_of(app) == "number":
+        handle = said if re.fullmatch(r"\+?[\d\s().-]+", said) else _digits_said(said)
+        digits = re.sub(r"\D", "", handle)
+        if re.match(r"(?:\+|plus\b|00)", said, re.I):
+            handle = digits[2:] if said.startswith("00") else digits
+        elif digits and (len(digits) <= 10 or digits[0] == "0"):  # "98765 43210": WhatsApp read it as +98, Iran
+            return make_plan(say="I need the country code too. Say the number again, starting with plus.")
+    else:
+        handle = said.lstrip("@") if re.fullmatch(r"@?\w+", said) and not side_talk(said) \
+            and not NO.fullmatch(plain(said)) else ""
     try:
         saved = messaging.save_contact(alias, app, handle)
     except (ValueError, RuntimeError):

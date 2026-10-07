@@ -5,7 +5,7 @@ import shutil
 import unittest
 from unittest import mock
 
-from tests.support import siri
+from tests.support import messaging, siri
 from hermes_memory import skills
 
 
@@ -145,6 +145,48 @@ class Routines(unittest.TestCase):
                           "steps": [VOLUME]})
         siri.learn_skill({"action": "patch", "name": "deploy", "old": json.dumps(VOLUME), "new": json.dumps(MUM)})
         self.assertNotIn("contact", self.routine("ship it now"))
+
+
+class AskedContact(unittest.TestCase):
+    """After "What's their Telegram username?", anything said in the next 90 s went through finish_asked."""
+
+    def setUp(self):
+        self.addCleanup(lambda: (siri.ASKED.update(alias="", app="", text="", until=0.0),
+                                 messaging._write_json(messaging.CONTACTS_PATH, {})))
+        self.staged = mock.patch.object(siri, "stage_message", return_value={"steps": [], "say": "staged"})
+        self.staged.start()
+        self.addCleanup(self.staged.stop)
+
+    def reply(self, app, said):
+        siri.ASKED.update(alias="bittu", app=app, text="hi", until=siri.time.time() + 90)
+        return siri.finish_asked(said)
+
+    def test_talk_isnt_taken_for_a_username(self):
+        for said in ("Cancel that", "Never mind", "I don't know", "Can you call Ramesh", "Okay", "Thank you"):
+            self.assertIsNone(self.reply("telegram", said), said)
+            self.assertEqual(messaging.read_contacts(), {}, said)
+
+    def test_a_username_on_its_own_is_saved(self):
+        for said, handle in (("@bittu_01", "bittu_01"), ("bittu_01.", "bittu_01"), ("It's bittu_01", "bittu_01"),
+                             ("Their username is @bittu_01", "bittu_01")):
+            self.assertEqual(self.reply("telegram", said)["say"], "staged", said)
+            self.assertEqual(messaging.read_contacts()["bittu"]["telegram"], handle, said)
+
+    def test_a_number_needs_its_country_code(self):
+        for said in ("98765 43210", "nine eight seven six five four three two one zero", "07700 900123"):
+            plan = self.reply("whatsapp", said)
+            self.assertIn("country code", plan["say"], said)
+            self.assertEqual(messaging.read_contacts(), {}, said)
+            self.assertTrue(siri.ASKED["alias"])  # still waiting for it
+
+    def test_a_number_with_its_country_code_is_saved(self):
+        for said in ("+91 98765 43210", "Plus 91 98765 43210", "91 98765 43210", "It's +91 98765 43210"):
+            self.assertEqual(self.reply("whatsapp", said)["say"], "staged", said)
+            self.assertEqual(messaging.read_contacts()["bittu"]["whatsapp"], "919876543210", said)
+
+    def test_a_sentence_with_numbers_in_it_isnt_a_number(self):
+        self.assertIsNone(self.reply("whatsapp", "remind me at 10 30 on 7 10 2026"))
+        self.assertEqual(messaging.read_contacts(), {})
 
 
 if __name__ == "__main__":
