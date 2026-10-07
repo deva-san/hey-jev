@@ -1069,12 +1069,25 @@ def routines():
     return [(plain(t), s) for s in _skill_cache[1] if s["plan"] for t in s["triggers"]]
 
 
+# After type/write/enter, words that ask for something to be written rather than being the text: the README's own
+# "write a short email saying I'll be late" and "open Notepad and write today's date" typed those words, so did
+# "type my email address" and "write down what I say", and "enter full screen" typed "full screen"
+NOT_LITERAL = re.compile(
+    r"(?:(?:me|us|him|her|them)\s+)?(?:(?:a|an|the|some|my|our|your|this|that|another)\s+(?:[\w'-]+\s+){0,3}?)?"
+    r"(?:e-?mails?|mails?|messages?|repl(?:y|ies)|responses?|poems?|letters?|notes?|posts?|tweets?|captions?|"
+    r"summary|drafts?|story|stories|essays?|paragraphs?|bio|reviews?|jokes?|haikus?|speech|articles?|blog|lists?|"
+    r"code|functions?|scripts?|programs?)\b"
+    r"|(?:today's|tomorrow's|yesterday's|the|my|our|your|current|this)\s+(?:[\w'-]+\s+){0,2}?(?:date|time|day|"
+    r"address|name|number|location|birthday|password|pin|username|details)\b"
+    r"|(?:(?:this|that|it)\s+)?down\b|what i(?:'m| am)? (?:say|said|saying)\b|everything i say\b|after me\b"
+    r"|full ?screen\b|.*\bmode$", re.I)
+
+
 def _literal(t):
     """A literal type/write command, optional Enter/Tab afterwards. No model changes the text. Requests to compose
-    something (a mail, poem, reply) go to the model instead."""
+    something (a mail, poem, reply) or fill something in (today's date) go to the model instead."""
     m = re.fullmatch(r"(?:type|write|enter)\s+(.+?)(?:\s+and\s+(?:press|hit)\s+(enter|tab))?", t, re.I)
-    if not m or re.match(r"(?:me\s+)?(?:a|an|the)\s+(?:mail|email|message|reply|poem|letter|note|post|summary|draft)\b",
-                         m[1], re.I):
+    if not m or NOT_LITERAL.match(m[1]):
         return None
     steps = [{"do": "type", "text": m[1]}]
     if m[2]:
@@ -1106,13 +1119,14 @@ def local_compound(t):
         app = known_app(new[1])
         return app and make_plan([{"do": "open", "app": app[0]}, {"do": "keys", "keys": "ctrl+n"},
                                   {"do": "type", "text": new[2]}])
-    parts = re.split(r"\s+(?:and then|then|and)\s+", t, flags=re.I)
+    bits = re.split(r"(\s+(?:and then|then|and)\s+)", t, flags=re.I)  # the joins kept, for the text to type
+    parts = bits[::2]
     if len(parts) < 2:
         return _literal(t)
     steps, i = [], 0
     while i < len(parts):
         if re.match(r"(?:type|write|enter)\b", parts[i], re.I):
-            clause = " and ".join(parts[i:])
+            clause = "".join(bits[2 * i:])  # as said: "type salt then pepper" typed "salt and pepper"
             got = _literal(clause)
             if not got:
                 return None

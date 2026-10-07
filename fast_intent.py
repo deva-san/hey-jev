@@ -198,7 +198,7 @@ class FastIntentMatcher:
         if re.fullmatch(r"reset zoom|normal zoom", t):
             return self.siri.make_plan([{"do": "keys", "keys": "ctrl+0"}])
 
-        if re.fullmatch(r"(?:make it |toggle |exit )?full ?screen|full ?screen mode", t):
+        if re.fullmatch(r"(?:make it |toggle |exit |enter |go )?full ?screen(?: mode)?", t):
             return self.siri.make_plan([{"do": "keys", "keys": "f" if self.siri.focused_on("youtube") else "f11"}])
 
         # -------------------------------------------------------------
@@ -493,7 +493,7 @@ class FastIntentMatcher:
         # 16. Literal Typing
         # -------------------------------------------------------------
         m_type = re.fullmatch(r"(?:type|write|enter) (?P<txt>.+?)(?: and (?:press|hit) (?P<key>enter|tab))?", t)
-        if m_type and not re.match(r"(?:me\s+)?(?:a|an|the)\s+(?:mail|email|message|reply|poem|letter|note|post|summary|draft)\b", m_type["txt"], re.I):
+        if m_type and not self.siri.NOT_LITERAL.match(m_type["txt"]):  # "a short email ...": the model writes it
             # the words as you said them, capitals and punctuation kept: t is lowercased and stripped for matching
             said = re.search(r"\b(?:type|write|enter)\s+(?P<txt>.+?)(?:\s+and\s+(?:press|hit)\s+(?:enter|tab))?[\s.]*$",
                              spoken.strip(), re.I)
