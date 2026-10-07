@@ -3441,11 +3441,14 @@ class Recorder:
         return None
 
     def set_device(self, mic):
-        """Swap to another microphone, carrying on listening if it was."""
+        """Swap to another microphone, carrying on listening if it was. The new one opens first, so if no mic will
+        (one unplugged a moment before) the one there was carries on: closing it first left a closed stream that
+        nothing could start again until she was restarted."""
         with self.mic_lock:
+            stream = self._open(mic)
             was_active = self.stream.active
             self.stream.close()
-            self.stream = self._open(mic)
+            self.stream = stream
             if was_active:
                 self.gen += 1
                 self.stream.start()
@@ -3968,14 +3971,18 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             command = controls.get(timeout=0.5)  # with a timeout, or Ctrl+C never gets through on Windows
         except queue.Empty:
             continue
-        if isinstance(command, tuple) and command[0] == "mode":
-            set_mode(command[1])
-        elif isinstance(command, tuple) and command[0] == "mic":
-            rec.set_device(command[1])
-        elif command == "press":
-            start_recording()
-        elif command == "release":
-            stop_recording()
+        try:  # a mic that won't open or start is shown and she carries on: it ended this loop, and right Alt with it
+            if isinstance(command, tuple) and command[0] == "mode":
+                set_mode(command[1])
+            elif isinstance(command, tuple) and command[0] == "mic":
+                rec.set_device(command[1])
+            elif command == "press":
+                start_recording()
+            elif command == "release":
+                stop_recording()
+        except Exception as exc:
+            print(f"\n[mic failed: {exc!r}]")
+            emit(notify, "Something went wrong", f"The mic didn't start: {exc}")
 
 
 def main():

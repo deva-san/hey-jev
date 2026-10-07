@@ -607,5 +607,27 @@ class DictationStart(Case):
                 self.assertEqual(d.finish(), "So the plan for Monday is simple.")
 
 
+# --------------------------------------------------------------------------- A10: a mic that won't open
+class MicTrouble(Case):
+    def test_a_mic_that_wont_open_leaves_the_one_there_was(self):
+        a = self.assistant(unplugged={"USB mic"})
+        before = a.rec.stream
+        with contextlib.redirect_stdout(a.out):
+            with self.assertRaises(RuntimeError):
+                a.rec.set_device("USB mic")
+            self.assertIs(a.rec.stream, before)
+            self.assertTrue(a.rec.stream.active)
+            a.unplugged.clear()
+            a.rec.set_device("USB mic")  # plugged back in
+        self.assertIsNot(a.rec.stream, before)
+        self.assertTrue(a.rec.stream.active)
+
+    def test_the_control_loop_carries_on_after_a_mic_error(self):
+        """Picking a mic that just went, then switching to right Alt: she says so and the switch still works."""
+        a = self.assistant(unplugged={"USB mic"}, commands=[("mic", "USB mic"), ("mode", "ptt")])
+        self.assertFalse(a.rec.wake)
+        self.assertIn("USB mic isn't there", a.out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
