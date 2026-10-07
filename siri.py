@@ -1884,6 +1884,18 @@ def _day(day):
     return day if re.fullmatch(r"\d{4}-\d\d-\d\d", day) else None
 
 
+def untrusted(found):
+    """Messages, search results and headlines with each one that tries to give her orders left out, the way web.read
+    leaves out such a page: anyone can send you a message or title a story, sender and title included."""
+    if isinstance(found, list):
+        return [untrusted(f) for f in found]
+    if isinstance(found, dict) and any(isinstance(v, (list, dict)) for v in found.values()):
+        return {k: untrusted(v) for k, v in found.items()}
+    if isinstance(found, dict) and first_threat_message(" ".join(map(str, found.values())), scope="context"):
+        return {"left out": "it tries to give instructions"}
+    return found
+
+
 def run_info(steps, links=False):
     """The results of lookup, recall, web, read, weather, news and skill_view steps, as JSON for the model. links:
     news stories come with their links, so research can read them."""
@@ -1894,19 +1906,20 @@ def run_info(steps, links=False):
             if do == "lookup":
                 what = str(s.get("what") or "").lower()
                 if what in ("messages", "notifications"):  # on this PC, sent to the model only because they asked
-                    result = (watch.recent(12, what == "messages") or "nothing new") if settings.get("notifications") \
-                        else "Reading notifications is turned off in Settings"
+                    result = (untrusted(watch.recent(12, what == "messages")) or "nothing new") \
+                        if settings.get("notifications") else "Reading notifications is turned off in Settings"
                 else:
                     result = sysinfo.lookup(what)
                 out.append({"lookup": what, "result": result})
             elif do == "web":
-                out.append({"web": s.get("query"), "results": web.search(s.get("query"), links)})
+                out.append({"web": s.get("query"), "results": untrusted(web.search(s.get("query"), links))})
             elif do == "read":
                 out.append({"read": s.get("url"), "page": web.read(s.get("url"))})
             elif do == "weather":
                 out.append({"weather": s.get("place") or "here", "result": web.weather(s.get("place"))})
             elif do == "news":
-                out.append({"news": s.get("topic") or "top stories", "headlines": web.news(s.get("topic"), links=links)})
+                out.append({"news": s.get("topic") or "top stories",
+                            "headlines": untrusted(web.news(s.get("topic"), links=links))})
             elif do == "skill_view":
                 out.append({"skill_view": s.get("name"), "result": skills.skill_view(str(s.get("name") or ""))})
             else:
