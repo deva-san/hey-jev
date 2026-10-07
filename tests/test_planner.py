@@ -49,6 +49,39 @@ class Turn(unittest.TestCase):
                                                       for x in m)]
 
 
+class CommandRetry(Turn):
+    """A11: the command/schedule retry is only for words that ask for one, and never overrides "to others"."""
+
+    def test_overheard_talk_about_a_schedule_is_let_go_in_one_request(self):
+        plan = self.think("I will schedule the call with Ravi for tomorrow at 5", "cold", '{"to": "others"}',
+                          '{"to": "you", "steps": [{"do": "schedule", "when": "tomorrow at 5 PM", "repeat": "", '
+                          '"description": "Call with Ravi", "task": {"kind": "reminder", "text": "call Ravi"}}]}')
+        self.assertIsNone(plan)
+        self.assertEqual(len(self.model.calls), 1)
+
+    def test_a_question_about_a_command_keeps_its_answer(self):
+        plan = self.think("what's the PowerShell command to list files", False,
+                          '{"steps": [], "say": "It\'s Get-ChildItem. I will spell it out if you like."}')
+        self.assertEqual(len(self.model.calls), 1)
+        self.assertEqual(plan["say"], "It's Get-ChildItem. I will spell it out if you like.")
+
+    def test_a_weather_question_with_tomorrow_at_gets_its_lookup(self):
+        plan = self.think("what will the weather be like tomorrow at 6", False,
+                          '{"steps": [{"do": "weather", "place": ""}], "say": ""}',
+                          '{"steps": [], "say": "Clear and about 24 degrees at 6."}')
+        self.assertEqual(self.looked, [[{"do": "weather", "place": ""}]])
+        self.assertEqual(self.asked_again(), [])
+        self.assertEqual(plan["say"], "Clear and about 24 degrees at 6.")
+
+    def test_a_named_request_to_schedule_still_gets_the_retry(self):
+        plan = self.think("remind me every day at 9 PM to take my medicine", False,
+                          '{"steps": [], "say": "Okay, I will remind you."}',
+                          '{"steps": [{"do": "schedule", "when": "", "repeat": "daily at 9 PM", "description": '
+                          '"Take medicine", "task": {"kind": "reminder", "text": "take my medicine"}}], "say": ""}')
+        self.assertEqual(len(self.asked_again()), 1)
+        self.assertEqual(plan["steps"][0]["do"], "schedule")
+
+
 class ToolCalls(unittest.TestCase):
     """M1, M2, M3: the ways Ling writes a step as a <tool_call>, from the live runs on 7 October."""
 

@@ -1407,6 +1407,11 @@ ROUNDS = 4  # how many times it can look things up before it has to answer: sear
 LOOKING = {"web": "Searching the web\u2026", "read": "Reading it\u2026", "weather": "Checking the weather\u2026",
            "news": "Getting the news\u2026", "skill_view": "Remembering how\u2026", "recall": "Remembering\u2026",
            "lookup": "Looking it up\u2026"}
+# Words that ask for a command or a schedule, at the start once plain() has taken "can you" off: "run the tests in
+# ...", "every Monday at 9 check my C drive". TASK_REQUEST anywhere also caught questions and talk about one, "what's
+# the PowerShell command to list files?", "I will schedule the call with Ravi", and forced a second request on them
+TASK_ASKED = re.compile(r"(?:run|check|schedule|remind|research|set|start|queue|create|add|make|execute|do (?:that|it)|"
+                        r"every|daily|weekly|tomorrow|at)\b")
 HEDGE_AFTER = 2.5  # the free model usually answers in 1 to 3 s but now and then takes 8 or more, so then ask again
 # On her own prompt in October 2026: Ling 3.0 Flash Sante on Kilo 1.8 to 2.2 s (median of 5), space-bunny on
 # OpenCode 3.6 to 3.7 s. Cohere's North Mini Code, Step 3.7 Flash and Nemotron 3 Super were slower or timed out
@@ -2048,20 +2053,24 @@ def think(text, gate, notify=None, sure=1.0):
     # said as an overheard line, not to her: asked straight, a model answered "Why are you so late today?" anyway
     messages.append({"role": "user", "content": (OVERHEARD if gate == "cold" else "") + text + unsure})
     used = set()  # what was looked up, for the asking-first rule below
-    needs_task, task_retry = bool(TASK_REQUEST.search(text)), False
+    needs_task, task_retry = bool(TASK_REQUEST.search(text) and TASK_ASKED.match(plain(text))), False
     for round_ in range(ROUNDS + 1):
         t = time.time()
         raw, plan, usage, model = ask_plan(messages, again=not gate, deadline=DEADLINE if round_ == 0 else 14.0)
+        if gate and str(plan.get("to") or "").strip().lower() not in ("", "you", "jev", "me", "assistant"):
+            plan["ignore"] = True  # {"to": "others"}, see COLD_NOTE
         task_steps = [s for s in plan["steps"] if s.get("do") in ("command", "schedule", "task_control")]
-        if needs_task and not task_steps and not plan.get("ignore") and not task_retry:
+        # never over "to others", or for overheard words at all: who they were for is the model's call. Not before its
+        # lookups either, or while it asks which folder or time
+        if needs_task and not (task_steps or task_retry or plan.get("ignore") or gate == "cold") \
+                and not any(s["do"] in INFO for s in plan["steps"]) \
+                and not str(plan.get("say") or "").rstrip().endswith("?"):
             task_retry = True
             messages += [{"role": "assistant", "content": raw},
                          {"role": "user", "content": "You didn't create the command or schedule. Use the fixed "
                           "command or schedule step now. If a required folder or time is missing, ask for that; never "
                           "claim it was scheduled or run without a step."}]
             continue
-        if gate and str(plan.get("to") or "").strip().lower() not in ("", "you", "jev", "me", "assistant"):
-            plan["ignore"] = True  # {"to": "others"}, see COLD_NOTE
         searches = [s for s in plan["steps"] if s.get("do") == "google"]
         if searches and len(searches) == len(plan["steps"]) and round_ < ROUNDS and wants_spoken(text):
             # a question, and all it planned was opening Google: look it up instead and answer out loud, which is what
