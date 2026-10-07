@@ -1056,7 +1056,11 @@ def sys_intent(t):
     those and can look the same things up itself."""
     if len(t.split()) > 14 or re.search(r"\b(?:open|remind|timer|alarm|turn|switch|enable|disable|settings?|saver)\b"
                                         r"|\b(?:and|then) (?:play|close|search|google|go|show|start|launch|set|type|"
-                                        r"write|tell|send)\b", t):
+                                        r"write|tell|send)\b"
+                                        # a schedule: "check my C drive space every Monday at 9 AM" was answered
+                                        # now and the schedule dropped
+                                        r"|\b(?:every|daily|weekly|hourly|tomorrow|tonight|at \d|at (?:noon|midnight))\b"
+                                        r"|\d ?[ap]m\b", t):
         return None
     drive = re.search(r"\b([a-h]|see|sea)[ -](?:drive|disk)\b", t)
     usage = r"\b(?:usage|use|using|used|load|busy|percent|how much|check|status|free|left|available)\b"
@@ -1079,8 +1083,9 @@ def sys_intent(t):
                  r"(?:on|running|up)", t):
         found.append(("uptime", None))
     if re.search(r"\b(?:internet|wi-?fi|network|ip address|my ip)\b", t) and re.search(
-            r"\b(?:connected|connection|working|online|which|what|what's|check|status|name|am i|is)\b", t):
-        found.append(("network", None))
+            r"\b(?:connected|connection|working|online|which|what|what's|check|status|name|am i|is)\b", t) or \
+            re.fullmatch(r"(?:am i|are we|is (?:the |my |this )?(?:pc|computer|laptop)) (?:online|connected)", t):
+        found.append(("network", None))  # "am I online?" too, a README example that went to the model
     if re.search(r"\b(?:specs|specifications|system info\w*)\b", t):
         found.append(("system", None))
     return found[0] if len(found) == 1 else None

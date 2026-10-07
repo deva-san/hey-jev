@@ -251,5 +251,22 @@ class Numbers(Routing):
         self.assertEqual(self.steps("scroll up 2 times"), [{"do": "scroll", "direction": "up", "times": 2}])
 
 
+class PcQuestions(Routing):
+    """R4, R7: "am I online?" is answered on the PC; a check with a schedule in it is left to the model."""
+
+    def test_am_i_online(self):
+        for words in ("am I online", "Am I connected?", "is the internet working"):
+            with self.subTest(words=words):
+                self.assertEqual(siri.sys_intent(siri.plain(words)), ("network", None))
+                self.assertEqual(self.quick(words)["say"], "lookup network")
+
+    def test_a_scheduled_check_isnt_answered_now(self):
+        for words in ("check my C drive space every Monday at 9 AM", "tell me the battery every morning"):
+            with self.subTest(words=words):
+                self.assertIsNone(siri.sys_intent(siri.plain(words)))
+                self.assertIsNone(self.quick(words))
+        self.assertEqual(siri.sys_intent("check the storage of c drive"), ("disk", "c"))
+
+
 if __name__ == "__main__":
     unittest.main()
