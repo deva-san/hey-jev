@@ -689,6 +689,8 @@ def _scroll(m):
 
 def _timer(m):
     said = m[0]
+    if said.startswith("remind") and re.search(r"\b(?:every|hourly|daily)\b", said):
+        return None  # it repeats, see direct_background: "remind me every one hour to ..." was a one-off in an hour
     when = said.startswith("remind") and IN_DURATION.search(_digits(said))
     secs = parse_duration(when[0] if when else said)  # "remind me to stretch for 10 minutes in 1 hour": in an hour
     if not secs:
@@ -1161,9 +1163,9 @@ TASK_REQUEST = re.compile(r"\b(?:run (?:the )?tests?|git status|command|powershe
 SCHEDULE_TIME = r"(?:\d{1,2}(?::\d\d)?\s*(?:am|pm)?|midnight|noon)"
 SCHEDULE_NUMBER = r"(?:\d+|one|two|three|four|five|ten|fifteen|thirty)"
 SCHEDULE_DAY = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
-REPEAT_PREFIX = re.compile(rf"^(?P<repeat>(?:every (?:(?:{SCHEDULE_NUMBER}) (?:minutes?|hours?|days?)|"
-                           rf"(?:{SCHEDULE_DAY}) at {SCHEDULE_TIME}|day at {SCHEDULE_TIME})|"
-                           rf"daily at {SCHEDULE_TIME})) (?P<action>.+)$", re.I)
+REPEAT = (rf"(?:every (?:(?:{SCHEDULE_DAY}|day) at {SCHEDULE_TIME}|(?:{SCHEDULE_NUMBER} )?(?:minutes?|hours?)|"
+          rf"{SCHEDULE_NUMBER} days?|half an hour)|daily at {SCHEDULE_TIME}|hourly)")  # "every hour" lost a reminder
+REPEAT_PREFIX = re.compile(rf"^(?P<repeat>{REPEAT}) (?P<action>.+)$", re.I)
 WHEN = (rf"(?:(?:(?:tomorrow|today)(?: morning| afternoon| evening| night)?|tonight|this (?:morning|afternoon|evening))"
         rf" at {SCHEDULE_TIME}|(?:on )?{SCHEDULE_DAY} at {SCHEDULE_TIME}|at {SCHEDULE_TIME}(?: tonight| today| tomorrow)?)")
 
@@ -1228,6 +1230,13 @@ def direct_background(words):
         return make_plan([{"do": "schedule", "when": m["when"], "repeat": "",
                            "description": f"Remind me to {m['thing']}",
                            "task": {"kind": "reminder", "text": m["thing"]}}])
+    # "remind me every hour to drink water" went to the model, which asked twice what to say and then made nothing
+    m = re.fullmatch(rf"remind me (?P<repeat>{REPEAT}),? to (?P<thing>.+)", text, re.I) or \
+        re.fullmatch(rf"remind me to (?P<thing>.+?),? (?P<repeat>{REPEAT})", text, re.I)
+    if m:
+        thing = m["thing"].strip(" ,!?")
+        return make_plan([{"do": "schedule", "when": "", "repeat": m["repeat"], "description": f"Remind me to {thing}",
+                           "task": {"kind": "reminder", "text": thing}}])
     m = re.fullmatch(rf"(?P<action>(?:check|research) .+?) (?P<when>{WHEN})", text, re.I)
     if m:
         task = scheduled_payload(m["action"])

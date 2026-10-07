@@ -81,5 +81,38 @@ class Schedules(unittest.TestCase):
         self.assertEqual(self.due(step["when"])[0], at(7, 20))
 
 
+class Repeating(unittest.TestCase):
+    """P3: 'remind me every hour to drink water' was lost, and 'every one hour' made a one-off reminder."""
+
+    def test_every_hour(self):
+        for repeat in ("every hour", "hourly", "every one hour", "every 1 hour"):
+            self.assertEqual(tasks.normalize_schedule("", repeat, WED_7PM)[1], {"kind": "interval", "seconds": 3600},
+                             repeat)
+        self.assertEqual(tasks.normalize_schedule("", "every half an hour", WED_7PM)[1],
+                         {"kind": "interval", "seconds": 1800})
+        with self.assertRaises(ValueError):
+            tasks.normalize_schedule("", "every second", WED_7PM)  # under a minute: refused, as before
+
+    def test_said_locally_and_repeats(self):
+        for said in ("remind me every hour to drink water", "remind me every one hour to drink water",
+                     "Remind me every one hour, to drink water.", "remind me to drink water every hour",
+                     "every hour remind me to drink water", "hourly remind me to drink water"):
+            plan = siri.quick(said)
+            self.assertIsNotNone(plan, said)
+            step = plan["steps"][0]
+            self.assertEqual(step["do"], "schedule", said)
+            self.assertEqual(step["task"], {"kind": "reminder", "text": "drink water"}, said)
+            self.assertEqual(tasks.normalize_schedule(step["when"], step["repeat"], WED_7PM)[1],
+                             {"kind": "interval", "seconds": 3600}, said)
+
+    def test_daily_reminder_said_first(self):
+        step = siri.quick("remind me every day at 9 to take my tablets")["steps"][0]
+        self.assertEqual(step["task"]["text"], "take my tablets")
+        self.assertEqual(tasks.normalize_schedule(step["when"], step["repeat"], WED_7PM)[1],
+                         {"kind": "daily", "hour": 9, "minute": 0})
+        step = siri.quick("every day at 9 remind me to take my tablets")["steps"][0]  # as before
+        self.assertEqual(step["repeat"], "every day at 9")
+
+
 if __name__ == "__main__":
     unittest.main()
