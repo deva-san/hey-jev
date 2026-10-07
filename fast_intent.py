@@ -267,8 +267,8 @@ class FastIntentMatcher:
                 return self.siri.make_plan([{"do": "youtube", "query": query, "play": True, "rank": rank}], self.siri.say_line("youtube_play"))
 
         m_yt_play = re.fullmatch(r"play (?P<q>.+?)(?: on youtube)?", t)
-        if m_yt_play and not re.match(r"(?:first|second|third|next|previous|last|video|song|it|this)\b", m_yt_play["q"]):
-            return self.siri.make_plan([{"do": "youtube", "query": m_yt_play["q"], "play": True}], self.siri.say_line("youtube_play"))
+        if m_yt_play:  # siri's own rule, so what it leaves to the model isn't searched for word for word here:
+            return self.siri._play(m_yt_play)  # "play shape of you on Spotify", "play the second song"
 
         m_yt_search = re.fullmatch(r"(?:search|look up|find)(?: for)? (?P<q>.+?) on youtube|(?:search )?youtube for (?P<q2>.+)", t)
         if m_yt_search:

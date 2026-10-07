@@ -624,9 +624,12 @@ def _bare(thing):
 
 
 def _play(m):
+    """A YouTube play for "play X", or None for the model. fast_intent asks this too, so it doesn't play what's
+    refused here."""
     q = m["q"]
-    if re.match(r"(?:(?:the|a|this|that) )?(?:first|next|previous|last|top|second|same|video|song|play)\b", q) \
-            or " and " in f" {q} " or "spotify" in q:
+    if re.match(r"(?:(?:the|a|this|that) )?(?:first|next|previous|last|top|second|third|fourth|fifth|same|video|song|"
+                r"play|it)\b", q) or " and " in f" {q} " or \
+            re.search(r"\b(?:spotify|vlc|jiosaavn|saavn|gaana|wynk|apple music|amazon music|soundcloud)\b", q):
         return None  # "play the first video", "play X and open Y" and Spotify need the model
     return make_plan([{"do": "youtube", "query": q, "play": True}], say_line("youtube_play"))
 

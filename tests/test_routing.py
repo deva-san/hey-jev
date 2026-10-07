@@ -77,5 +77,20 @@ class Writing(Routing):
                          [{"do": "open", "app": "Notepad"}, {"do": "type", "text": "hello"}])
 
 
+class Play(Routing):
+    """A17, R8: what QUICK leaves to the model isn't played by fast_intent as a YouTube search for those words."""
+
+    def test_what_siri_leaves_to_the_model_isnt_searched(self):
+        for words in ("play shape of you on Spotify", "play the second song", "play the same song again",
+                      "play the top result", "play the second video", "play the third video"):
+            with self.subTest(words=words):
+                self.assertIsNone(self.quick(words))
+                self.assertIsNone(fast_intent.FastIntentMatcher(siri).match(words))
+
+    def test_a_song_still_plays(self):
+        self.assertEqual(self.steps("play Arijit Singh songs"),
+                         [{"do": "youtube", "query": "arijit singh songs", "play": True}])
+
+
 if __name__ == "__main__":
     unittest.main()
