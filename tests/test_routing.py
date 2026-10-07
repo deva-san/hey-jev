@@ -204,5 +204,22 @@ class Folders(Routing):
                 self.assertIn(path, winplatform.SHELL_FOLDERS)
 
 
+class Asking(Routing):
+    """R1: commands the real log dropped as room talk could be requests; room talk still isn't."""
+
+    def test_commands_from_the_log(self):
+        for words in ("Hey Zoe, shut down the computer", "Download and install VLC", "Okay, copy that link",
+                      "Clear notification", "Clear that notification", "I take a screenshot", "J restart the laptop",
+                      "Update", "am I online", "maximise the window"):
+            with self.subTest(words=words):
+                self.assertTrue(siri.could_be_request(words))
+
+    def test_room_talk_still_isnt(self):
+        for words in ("Are you coming for dinner?", "pass me the water", "Okay, so it is gonna rain later",
+                      "Is that clear?", "Thank you very much.", "It installs everything and gets it running for you."):
+            with self.subTest(words=words):
+                self.assertFalse(siri.could_be_request(words))
+
+
 if __name__ == "__main__":
     unittest.main()

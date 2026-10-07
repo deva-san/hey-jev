@@ -246,12 +246,16 @@ def route(text, kind, open_mic=None):
 
 # Without her name, a phrase only goes to the answer model if it could be a request: a word that asks for something,
 # a question, or an app or site. The rest of what's said in the room ("Okay, so it is gonna rain later", "pass the
-# salt", once plain() has taken "can you" off) is let go on this PC, and the model decides on the rest (COLD_NOTE)
+# salt", once plain() has taken "can you" off) is let go on this PC, and the model decides on the rest (COLD_NOTE).
+# The 7 October log let these go as room talk: "Shut down the computer", "Download and install VLC", "Okay, copy
+# that link", "Clear notification". The two lines from "shut ?down" are for those
 ASKING = (r"open|close|clone|quit|exit|play|pause|stop|resume|search|google|look up|find|check|scroll|turn|start|"
           r"launch|show|type|write|tell me|remind|remember|research|read|click|go to|go back|forward|refresh|reload|"
           r"run|do that|command|terminal|powershell|task|schedule|approve|cancel|every|daily|weekly|"
           r"lock|mute|unmute|volume|louder|quieter|softer|next|skip|previous|timer|alarm|note|tab|new term|new tap|"
           r"watch|song|music|video|full ?screen|dark mode|light mode|minimi[sz]e|summari[sz]e|transcrib\w*|dictat\w*|"
+          r"shut ?down|restart|reboot|install|uninstall|download|update|upgrade|copy|paste|undo|redo|maximi[sz]e|"
+          r"screenshot|notifications?|clear (?:it|that|this|all|everything|the|my)|online|"
           r"what|what's|whats|who|who's|how|where|when|why|which|weather|news|battery|ram|cpu|storage|drive|internet|"
           r"wi-?fi|screen|window|page")
 _asking = [None]
