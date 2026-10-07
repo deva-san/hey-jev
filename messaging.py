@@ -194,9 +194,9 @@ def find_contact(alias, app):
     """(display name, handle) for someone in the book, or NeedContact with what to ask for."""
     key, book = alias_key(alias), read_contacts()
     entry = book.get(key)
-    if entry is None:  # "mum" vs "my mum", and nicknames inside a longer name
-        hits = [v for k, v in book.items() if k and (k in key.split() or key in k.split() or
-                                                     (len(key) > 3 and key in k) or (len(k) > 3 and k in key))]
+    if entry is None:  # "mum" vs "my mum", and nicknames inside a longer name, by whole words only: "ravi" inside
+        # "ravindra" would send Ravindra's message to Ravi, and Supriya's to Priya
+        hits = [v for k, v in book.items() if k and (f" {k} " in f" {key} " or f" {key} " in f" {k} ")]
         entry = hits[0] if len(hits) == 1 else None
     want = needs_of(app)
     if entry is None or not entry.get(app):

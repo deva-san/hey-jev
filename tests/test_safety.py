@@ -189,5 +189,26 @@ class AskedContact(unittest.TestCase):
         self.assertEqual(messaging.read_contacts(), {})
 
 
+class Contacts(unittest.TestCase):
+    """README: a misheard name can't reach the wrong person."""
+
+    def setUp(self):
+        book = {"ravi": {"name": "Ravi"}, "priya": {"name": "Priya"}, "anna": {"name": "Anna"}, "mum": {"name": "Mum"},
+                "sunil sharma": {"name": "Sunil Sharma"}}
+        messaging._write_json(messaging.CONTACTS_PATH, {k: {**v, "whatsapp": f"9198765{i:05}"}
+                                                         for i, (k, v) in enumerate(book.items())})
+        self.addCleanup(messaging._write_json, messaging.CONTACTS_PATH, {})
+
+    def test_a_name_inside_another_name_is_someone_else(self):
+        for said in ("Ravindra", "Gravity", "Supriya", "Priyanka", "Joanna", "Hannah"):
+            with self.assertRaises(messaging.NeedContact, msg=said):
+                messaging.find_contact(said, "whatsapp")
+
+    def test_the_same_person_said_another_way(self):
+        for said, name in (("Mum", "Mum"), ("my mum", "Mum"), ("Mom", "Mum"), ("Sunil", "Sunil Sharma"),
+                           ("sunil sharma", "Sunil Sharma")):
+            self.assertEqual(messaging.find_contact(said, "whatsapp")[0], name, said)
+
+
 if __name__ == "__main__":
     unittest.main()
