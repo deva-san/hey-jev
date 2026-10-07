@@ -286,10 +286,11 @@ class YesOrNo(Turn):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def ask(self, plan=SEND):
-        """She's just asked about plan, "'hi' to Mum on WhatsApp. Send it?" by default."""
-        siri.STAGED.update(ready={"app": "whatsapp", "contact": "Mum", "text": "hi"}, until=time.time() + 90)
-        siri.PENDING.update(plan=plan, until=time.time() + 16)
+    def ask(self, plan=SEND, ago=0.0):
+        """She asked about plan ago seconds back, "'hi' to Mum on WhatsApp. Send it?" by default."""
+        asked = time.time() - ago
+        siri.STAGED.update(ready={"app": "whatsapp", "contact": "Mum", "text": "hi"}, until=asked + 90)
+        siri.PENDING.update(plan=plan, soon=asked + 16, until=asked + (90 if plan is SEND else 16))
 
     def test_natural_yeses(self):
         for words, plan in (("Yes, send it.", SEND), ("Okay, send it.", SEND), ("Sure, send it", SEND),
@@ -345,6 +346,19 @@ class YesOrNo(Turn):
             self.assertEqual(self.cleared, ["Mum"], words)
             self.assertIsNone(siri.PENDING["plan"])
         self.assertEqual(self.sent, [])
+
+    def test_a_command_once_the_first_seconds_are_gone_is_no_no(self):
+        """"Jev, stop the music" 40 s after "Send it?" was taken as a no to the message, and the music played on."""
+        paused = []
+        with mock.patch.object(siri, "media", paused.append):
+            self.ask(ago=40)
+            siri.handle("stop the music")
+            self.assertEqual((paused, self.cleared, self.sent), (["pause"], [], []))
+            self.ask(ago=40)
+            siri.handle("Not now.")  # still a no, with her name
+            self.ask()
+            siri.handle("Stop.", gate=True)  # and straight after she asked
+        self.assertEqual((paused, self.cleared, self.sent), (["pause"], ["Mum", "Mum"], []))
 
     def test_a_laugh_never_shuts_down(self):
         shut = []

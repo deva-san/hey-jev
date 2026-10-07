@@ -3271,7 +3271,7 @@ def tab_not_browser(plan, words):
     return {**plan, "say": confirm_question(risky), "confirm": mended} if risky else mended
 
 
-PENDING = {"plan": None, "until": 0.0}  # a plan waiting on a yes or no, see think
+PENDING = {"plan": None, "until": 0.0, "soon": 0.0}  # a plan waiting on a yes or no, see think. soon: see handle
 YES = re.compile(r"(?:yes|yeah|yep|yup|ya|sure|ok|okay|do it|go ahead|go on|please|please do|correct|right|haan|ha|"
                  r"avunu|of course)(?: (?:yes|please|do it|go ahead|sure|thanks|thank you))*")  # after plain()
 NO = re.compile(r"(?:no|nope|nah|not|don't|dont|do not|cancel|stop|never ?mind|forget (?:it|about it|that)|leave it|"
@@ -3327,7 +3327,9 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         plan = pending
         if any(s.get("do") in POWER_STEPS for s in plan.get("steps") or []):
             POWER_OK["until"] = time.time() + 20  # this yes, and only this one, lets the shutdown or restart run
-    elif pending and NO.fullmatch(answer):
+    # any no in the first few seconds; after that a message stays waiting, and "Jev, stop the music" or "cancel the
+    # timer" is that, where it was taken as a no to the message and the music played on
+    elif pending and NO.fullmatch(answer) and (time.time() < PENDING["soon"] or not COMMAND.search(answer)):
         drop_staged()
         plan = make_plan(say=say_line("confirm_no"))
     elif gate and sure < UNSURE:  # mumbling, another language or talk across the room, and no name
@@ -3401,7 +3403,8 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         # it's typed in or looked up (90 s), said with her name once the follow-up window has shut
         waits = [STAGED["until"] if s.get("do") == "message_send" else STAGED_INSTALL["until"]
                  for s in plan["confirm"].get("steps") or [] if s.get("do") in ("message_send", "install_run")]
-        PENDING.update(plan=plan["confirm"], until=max([time.time() + FOLLOW_UP + 8] + waits))
+        soon = time.time() + FOLLOW_UP + 8
+        PENDING.update(plan=plan["confirm"], soon=soon, until=max([soon] + waits))
     # what she said, also when it came from the screen: the next turn's "play the third one" needs what she saw
     kept = {"steps": plan.get("steps") or [],
             "say": (tidy(plan.get("say"), not plan.get("confirm")) if not failed else "") or " ".join(spoken)}
