@@ -186,7 +186,9 @@ class UnnamedMessages(Routing):
         self.assertEqual(plan["steps"], [])
         self.assertIn("not later", plan["say"])
         self.quick("Message Mum on WhatsApp: tomorrow I'm coming home")
-        self.assertEqual(self.messages, [("WhatsApp", "Mum", "tomorrow I'm coming home")])
+        self.quick("Message Mum on WhatsApp, tonight that's fine")
+        self.assertEqual(self.messages, [("WhatsApp", "Mum", "tomorrow I'm coming home"),
+                                         ("WhatsApp", "Mum", "tonight that's fine")])
 
 
 class HeardAs(Routing):

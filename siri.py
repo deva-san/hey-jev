@@ -917,9 +917,9 @@ def _teach_search(m):
 def _message(m):
     g = m.groupdict()
     # "text Mum on WhatsApp tomorrow at 9 saying hi" staged "tomorrow at 9 saying hi" to send now: messages are
-    # never sent later (README), so say so rather than send it now
+    # never sent later (README), so say so rather than send it now. Not "that's": "tonight that's fine" is the message
     later = rf"(?:{WHEN}|tomorrow|tonight|later|on \w+day|every \w+|in (?:an?|\d+|\w+) (?:minutes?|hours?))"
-    if re.match(rf"{later}(?:,? {later})*,? (?:saying|that|to say)\b", g["text"], re.I):
+    if re.match(rf"{later}(?:,? {later})*,? (?:saying|that(?!')|to say)\b", g["text"], re.I):
         return make_plan(say="I can only send a message now, with your yes, not later.")
     return stage_message(g["app"], g["who"], g["text"])
 
