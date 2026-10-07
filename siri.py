@@ -7,7 +7,7 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows without
 import subprocess
 import numpy as np, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
-import fast_intent, hermes_memory, history, installer, messaging, opencode, pocket, settings, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
+import decider, fast_intent, hermes_memory, history, installer, messaging, opencode, pocket, settings, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
 from hermes_memory import skills
 from hermes_memory.threat_patterns import INVISIBLE_CHARS, first_threat_message
 from secrets_store import get_secret, missing_secrets
@@ -4349,6 +4349,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
 
     if voiceid.mode() != "off":
         threading.Thread(target=load_speaker, daemon=True).start()  # beside the rest, so starting isn't slower
+    if decider.mode() != "off" and decider.available():  # its model, ready before the first turn without her name
+        threading.Thread(target=lambda: decider.get().encode("hello"), daemon=True).start()
 
     def voice_print(audio):
         if speaker[0] is None or (voiceid.mode() == "off" and enrolling[0] is None):
@@ -4400,6 +4402,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 if gate and result is False:  # someone else's conversation: the model sees it with what comes next
                     ROOM.append((time.time(), str(words)))
                 show_sentence()  # "learn my voice": the first sentence to read, once she's said how it goes
+        return result
 
     def show_sentence():
         e = enrolling[0]
@@ -4460,6 +4463,21 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             settings.put("voice_id", "off")
             say("Okay, I'll answer everyone again.", notify)
         return True
+
+    def for_me(words, gate):
+        """(chance it was said to her, "yes" / "no" / None) from the decider, for words said without her name; None
+        when it's off, not trained, or failed."""
+        if decider.mode() == "off" or not decider.available():
+            return None
+        try:
+            p, verdict = decider.get().for_me(str(words), "follow_up" if gate is True else "cold")
+        except Exception as exc:
+            print(f"  decider failed: {exc!r}")
+            return None
+        if p is None:
+            return None
+        print(f"  (decider: for her {p:.2f}{', sure ' + verdict if verdict else ''})")
+        return p, verdict
 
     def owner_ok(text, kind):
         """False if voice ID is on and this isn't your voice (voiceid.judge). Logs the score while learning."""
@@ -4537,8 +4555,20 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             listener.arm(WAKE_WINDOW)
             threading.Thread(target=win.chime, args=("wake",), daemon=True).start()
         else:
+            judged = for_me(what[1], what[2]) if what[2] else None  # said without her name: the decider's view
+            if judged and judged[1] == "no" and decider.mode() == "on":
+                print(f"  (the decider is sure that wasn't for her, {judged[0]:.2f}: staying quiet)")
+                decider.log({"when": round(time.time()), "said": str(what[1]), "kind": str(what[2]),
+                             "for_me": round(judged[0], 3), "verdict": "no", "mode": "on", "result": "let go"})
+                if was_named:
+                    emit(notify, "Ready", None)
+                return
             before = rec.blocks.qsize()
-            run_turn(what[0], what[1], ms, gate=what[2])
+            result = run_turn(what[0], what[1], ms, gate=what[2])
+            if judged:  # what it said and what happened, to train it again later
+                decider.log({"when": round(time.time()), "said": str(what[1]), "kind": str(what[2]),
+                             "for_me": round(judged[0], 3), "verdict": judged[1], "mode": decider.mode(),
+                             "result": str(result)})
             # what was said while she thought and acted comes next, caught up on rather than skipped (see LAG). Only
             # that: excusing the whole queue after any slow moment left her 771 s behind, answering 13 minute old talk
             allow[0] += max(0, rec.blocks.qsize() - before)
