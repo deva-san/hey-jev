@@ -1575,7 +1575,7 @@ POWER_OK = {"until": 0.0}
 # Shortcuts that only move around, play or open things, fine whoever asked
 SAFE_KEYS = {"ctrl+t", "ctrl+w", "ctrl+shift+t", "alt+left", "alt+right", "f5", "ctrl+r", "f", "k", "space", "esc",
              "page_down", "page_up", "home", "end", "ctrl+tab", "ctrl+shift+tab", "f11", "m", "j", "l", "shift+n",
-             "shift+p", "up", "down", "left", "right", "ctrl+shift+esc", "ctrl+plus", "ctrl+minus", "ctrl+0"}
+             "shift+p", "up", "down", "left", "right", "ctrl+shift+esc", "ctrl+=", "ctrl+-", "ctrl+0"}  # zoom, see KEY_NAMES
 INFO = ("lookup", "recall", "web", "read", "weather", "news", "skill_view")  # their results go back to the model
 ROUNDS = 4  # how many times it can look things up before it has to answer: search, read a page, answer
 LOOKING = {"web": "Searching the web\u2026", "read": "Reading it\u2026", "weather": "Checking the weather\u2026",
@@ -2662,9 +2662,15 @@ SHELLS = {"cmd.exe", "powershell.exe", "pwsh.exe", "windowsterminal.exe", "wt.ex
           "wsl.exe", "bash.exe", "mintty.exe"}
 KEY_NAMES = {"control": "ctrl", "escape": "esc", "return": "enter", "pgup": "page_up", "pageup": "page_up",
              "pgdn": "page_down", "pagedown": "page_down", "del": "delete", "arrowleft": "left", "arrowright": "right",
-             "arrowup": "up", "arrowdown": "down", "spacebar": "space"}
+             "arrowup": "up", "arrowdown": "down", "spacebar": "space",
+             # zoom: pynput has no plus or minus key, and "+" needs Shift, which Ctrl+"+" doesn't reach. "=" and "-"
+             # are the same keys unshifted, so ctrl+plus zooms in where it said "There's no plus key"
+             "plus": "=", "minus": "-", "equals": "="}
 WAIT_AFTER = {"open": 0.8, "new_tab": 0.5, "website": 3.0, "youtube": 3.0, "google": 2.5}  # before the next step
 SPEAK_FIRST = ("lock", "sleep")  # and muting: she says it first, or she'd cut herself off
+# and these she says once they're done, never while they run: she said "Closed Messages." with Messages not running,
+# and "Sent to Mum." for a message to Ravi before it was sent, or refused. All quick, closing an app takes longest
+SAY_AFTER = {"close", "minimise", "message_send", "install_run", "contact", "task_control", "memory", "skill", "note"}
 
 
 def find_app(name):
@@ -2837,12 +2843,37 @@ def spotify_play(tries=12):
     raise RuntimeError("Spotify never started playing")
 
 
+VLC = win.App("VLC media player", "vlc.exe")
+VLC_KEYS = {"play": ("space",), "pause": ("space",), "next": ("n",), "previous": ("p",)}  # its own shortcuts
+
+
 def media(action):
-    """Play, pause, next or previous on what Windows shows in its media controls: YouTube in a browser, Spotify, VLC."""
+    """Play, pause, next or previous on what Windows shows in its media controls: YouTube in a browser, Spotify. VLC 3
+    (3.0.16 here) isn't in them, so pause acted on some other app or said nothing was playing: when nothing there is
+    playing and VLC is open, it's brought to the front and gets its own keys, the way YouTube does below. Play only
+    with nothing there at all, the rest only while VLC makes sound: with Spotify paused, "previous" went to an idle
+    VLC, and "pause" started it playing."""
     session = win.media_session()
+    quiet = not (session and win.media_playing(session))  # nothing in the media controls is playing
+    vlc = win.app_windows(VLC) if (not session if action == "play" else quiet and win.app_sounding(VLC)) else []
+    if vlc:
+        win.bring_to_front(vlc[0])
+        time.sleep(0.3)
+        if VLC.matches(win.foreground_exe()):
+            win.press(*VLC_KEYS[action])
+            return
     if session:
+        # Spotify takes "previous" a few seconds into a song as back to its start, so it gets it twice, as on the Mac
+        try:
+            twice = action == "previous" and "spotify" in str(session.source_app_user_model_id or "").lower() \
+                and win.media_position(session) > 3
+        except Exception:
+            twice = False
         if not win.media_command(session, action) and action in ("next", "previous"):
             raise RuntimeError("That player can't skip")
+        if twice:
+            time.sleep(0.3)
+            win.media_command(session, "previous")
         return
     found = youtube_window() if action != "pause" else None
     if found:  # a YouTube page that hasn't played yet isn't in the media controls, its own keys still work
@@ -2967,6 +2998,10 @@ def do_step(step):
             open_page(SITES[page][1], browser, profile)
             note_focus(page)
             return name
+        folder = win.SHELL_NAMES.get(re.sub(r"^the | folder$", "", key_of(name)))
+        if do == "open" and folder:  # "Recycle Bin" isn't an app, she searched Google for one
+            win.open_folder(folder)
+            return name
         app = find_app(name)
         if do == "open" and APP_LOOKUP.get(key_of(name)) in BROWSERS:  # in a profile, if they named one
             note_focus(APP_LOOKUP.get(key_of(name)))
@@ -2984,6 +3019,11 @@ def do_step(step):
         return app.name
     if do == "website":
         url = str(step.get("url") or "").strip()
+        if re.match(r"(?:\w+:/*)?[a-z]:[\\/]", url, re.I):  # a path on this PC: "C:/$Recycle.Bin" went to the browser
+            if "$recycle.bin" not in url.lower():
+                raise RuntimeError("That's a folder on this PC, not a website")
+            win.open_folder("shell:RecycleBinFolder")
+            return "recycle bin"
         if not re.match(r"https?://", url, re.I):  # web addresses only, never a file or a program
             url = "https://" + re.sub(r"^[a-z][\w+.-]*:/*", "", url, flags=re.I)
         open_page(url, browser, profile)
@@ -3078,6 +3118,7 @@ def do_step(step):
         win.open_snipping_tool()
         return "screenshot"
     if do == "message_send":  # only ever reached through a yes to the question stage_message asked
+        SENT_LINE[0] = ""  # never the last one's: she said "Sent to Mum." for a message to Ravi
         ready = STAGED["ready"] if time.time() < STAGED["until"] else None
         STAGED.update(ready=None, until=0.0)
         if not ready:
@@ -3089,6 +3130,7 @@ def do_step(step):
     if do == "message":
         raise RuntimeError("I ask before sending a message")
     if do == "install_run":  # only ever reached through a yes to the question stage_install asked
+        SENT_LINE[0] = ""
         ready = STAGED_INSTALL["ready"] if time.time() < STAGED_INSTALL["until"] else None
         STAGED_INSTALL.update(ready=None, until=0.0)
         if not ready:
@@ -3221,16 +3263,19 @@ def playing_after(steps):
 
 
 def run_plan(plan, notify):
-    """Do the steps while she says her line. A screen step looks at the screen and acts on it (see), and she says
-    what it found once it's done. Returns (what failed, whether to start dictating, voice error, the lines she
-    said)."""
+    """Do the steps while she says her line, or once the ones it reports are done (SAY_AFTER), and only if they
+    worked. A screen step looks at the screen and acts on it (see), and she says what it found once it's done.
+    Returns (what failed, whether to start dictating, voice error, the lines she said)."""
     steps = [s for s in (plan.get("steps") or []) if isinstance(s, dict) and s.get("do")]
     dictate = any(s["do"] == "dictate" for s in steps)
     steps = [s for s in steps if s["do"] != "dictate"]
     looks = next((str(s.get("task") or "") for s in steps if s["do"] == "screen"), None)
-    line = tidy(plan.get("say")) or (say_line("looking") if looks is not None else default_line(steps))
     first = any(s["do"] in SPEAK_FIRST or (s["do"] == "volume" and str(s.get("to")).lower() in ("mute", "0")) for s in steps)
+    last = max((i for i, s in enumerate(steps) if s["do"] in SAY_AFTER and looks is None and not first), default=-1)
+    line = tidy(plan.get("say"), not plan.get("confirm")) or \
+        (say_line("looking") if looks is not None else "" if last >= 0 else default_line(steps))
     failed, voice_error, spoken, seen = [], None, [], []
+    reported = threading.Event()  # the steps her line reports on are done
 
     def talk(text):
         spoken.append(text)
@@ -3251,6 +3296,8 @@ def run_plan(plan, notify):
             except Exception as exc:
                 failed.append("Something went wrong")
                 print(f"  action failed: {step['do']} {exc!r}")
+            if i == last:
+                reported.set()
             if i + 1 < len(steps):
                 time.sleep(WAIT_AFTER.get(step["do"], 0.1))
 
@@ -3260,7 +3307,9 @@ def run_plan(plan, notify):
         voice_error, line = talk(line), ""
     worker = threading.Thread(target=work, daemon=True)
     worker.start()
-    if line:  # while the steps run, so she answers as soon as she can
+    if last >= 0:  # "Sent to Ravi." is what the send managed, worked out once it has: a failure gets only its own line
+        line = (line or default_line(steps)) if reported.wait(60) and not failed else ""
+    if line:  # while the (other) steps run, so she answers as soon as she can
         voice_error = talk(line)
     if looks is not None and worker.is_alive():
         emit(notify, "Looking", looks)  # her line's said, the popup goes back to what she's doing
@@ -3276,6 +3325,10 @@ def run_plan(plan, notify):
 CACHE_DIR = os.path.join(HERE, "cache", "tts")
 PCM_RATE = 44100
 PREBUFFER = PCM_RATE * 2 * 6 // 10  # 0.6 s of her voice in hand before playing, so the stream doesn't run dry
+# A line she's saying now: seconds to connect, then to wait for Fish's audio to start or carry on, before Windows' own
+# voice says it instead. It was 60, and the mic is paused while she talks, so a slow free tier left her silent and
+# deaf: 283 lines here started after 1.1 s at the median and 1.7 s at p90, but 6 took over 5 s and one 17 s
+FISH_WAIT = (3.05, 5.0)
 
 
 def tts_path(text, voice=None):
@@ -3284,11 +3337,11 @@ def tts_path(text, voice=None):
 
 def fish(text, fmt, stream=False, voice=None):
     """Fish's free voice model. Lines kept in the cache are made in its "normal" mode, the steadiest, since there's no
-    hurry; new lines stream in "balanced", which starts talking in about 0.6 s where "normal" took 4 s here."""
+    hurry; new lines stream in "balanced", which starts talking in about a second where "normal" took 4 s here."""
     extra = {"sample_rate": PCM_RATE, "latency": "balanced"} if fmt == "pcm" else {"latency": "normal"}
     r = FISH.post(FISH_URL, headers={"Authorization": f"Bearer {FISH_KEY}", "model": FISH_MODEL},
-                  json={"text": text, "reference_id": voice_id(voice), "format": fmt, **extra}, timeout=60,
-                  stream=stream)
+                  json={"text": text, "reference_id": voice_id(voice), "format": fmt, **extra},
+                  timeout=FISH_WAIT if stream else 60, stream=stream)
     if not r.ok:
         raise RuntimeError(f"Fish Audio {opencode.error_text(r)}")
     return r
@@ -3321,7 +3374,8 @@ def fetch_tts(text, voice=None):
 
 def speak(text, voice=None):
     """Say a line. Scripted ones play from the cache, new ones play while Fish is still making them, which starts
-    her talking about 0.6 s after asking. voice: another Fish or Windows native voice.
+    her talking about a second after asking, or in Windows' own voice if Fish is slow (FISH_WAIT). voice: another
+    Fish or Windows native voice.
     Returns ms until she started, 0 from the cache."""
     v = voice_id(voice)
     # 1. Native Windows OneCore / SAPI voice (0 MB RAM, < 15ms latency, fully offline)
@@ -3487,10 +3541,12 @@ def fix_names(text):
     return text
 
 
-def tidy(line):
-    """Her line, ready to say: no markdown, and at most three sentences, since a chatty model can run on."""
+def tidy(line, cut=True):
+    """Her line, ready to say: no markdown, and at most three sentences, since a chatty model can run on. Not cut
+    (cut False) when she asks before doing something: a long message read back stopped before who it was to and
+    "Send it?", and a yes still sent it."""
     line = re.sub(r"[*_#`]+", "", str(line or "")).strip()
-    return " ".join(re.split(r"(?<=[.!?])\s+", line)[:3]) if len(line) > 400 else line
+    return " ".join(re.split(r"(?<=[.!?])\s+", line)[:3]) if cut and len(line) > 400 else line
 
 
 # --------------------------------------------------------------------------- Is it for her?
@@ -3558,10 +3614,61 @@ def let_go(plan):
     return None
 
 
-PENDING = {"plan": None, "until": 0.0}  # a plan waiting on a yes or no, see think
+def tab_not_browser(plan, words):
+    """"Close this tab" is Ctrl+W, never quitting the browser. A model planned closing Google Chrome for "okay, close
+    this tab", asked "Should I close Google Chrome?" and on a yes closed it all, saying "Closed the tab for you", and
+    for "Okay close the" said "Tab closed." as all of Chrome went. A plan she'd ask about first is put right inside,
+    and asked about again only if something else in it still needs it."""
+    inner = plan.get("confirm") or plan
+    t, said = plain(words), plain(str(inner.get("say") or ""))
+    tab = re.search(r"\btabs?\b", t) or (re.search(r"\btabs?\b", said) and not re.search(rf"\b(?:{BROWSER_WORDS})\b", t))
+    if not tab or re.search(r"\b(?:all|every|whole|browser|window)\b", f"{t} {said}"):
+        return plan
+    steps = [{"do": "keys", "keys": "ctrl+w"} if isinstance(s, dict) and s.get("do") == "close"
+             and APP_LOOKUP.get(key_of(s.get("app") or "")) in BROWSERS else s for s in inner.get("steps") or []]
+    if steps == (inner.get("steps") or []):
+        return plan
+    print("  (a tab, not the whole browser: ctrl+w)")
+    mended, risky = {**inner, "steps": steps}, plan.get("confirm") and needs_asking(steps, words)
+    return {**plan, "say": confirm_question(risky), "confirm": mended} if risky else mended
+
+
+PENDING = {"plan": None, "until": 0.0, "soon": 0.0}  # a plan waiting on a yes or no, see think. soon: see handle
 YES = re.compile(r"(?:yes|yeah|yep|yup|ya|sure|ok|okay|do it|go ahead|go on|please|please do|correct|right|haan|ha|"
                  r"avunu|of course)(?: (?:yes|please|do it|go ahead|sure|thanks|thank you))*")  # after plain()
-NO = re.compile(r"(?:no|nope|nah|don't|dont|do not|cancel|stop|never ?mind|leave it|wait)\b.*")
+NO = re.compile(r"(?:no|nope|nah|not|don't|dont|do not|cancel|stop|never ?mind|forget (?:it|about it|that)|leave it|"
+                r"wait|hold on)\b.*")  # after plain(), which makes "not now" "not"
+# A yes to her question, said the way people say one: "Yes, send it", "Sure, sure, you can", "Okay, go for it". Read
+# from the words as said: plain() takes a leading "yes" or "okay" off as filler, so "Yes, send it." was "send it",
+# no yes at all, and the message stayed unsent. In a week 6 clear yeses to "Should I look at your screen?" didn't count
+SAYS_YES = (r"yes|yeah|yep|yup|ya|yah|sure|ok|okay|alright|all right|fine|correct|right|haan|han|ha|ji|avunu|of course|"
+            r"absolutely|definitely|please|please do|do it|do that|go ahead|go on|go for it|carry on|why not|"
+            r"(?:if )?you (?:can|may|want|should)|that's (?:right|fine)")
+# said around a yes, never one alone: "Um, yes" and "Go ahead and send it" were yeses once plain() took the "um" or
+# "go ahead and" off, and "Thank you." to "Should I close Google Chrome?" may be said to someone else
+YES_AROUND = rf"u+m+|u+h+|h+m+|e+r+|a+h+|o+h+|so|and|then|just|kindly|thanks|thank you|now|{NAMES}"
+CLEAR_YES = (r"yes|yeah|yep|yup|sure|ok|okay|alright|all right|haan|avunu|of course|absolutely|definitely|do it|"
+             r"do that|please do|go ahead|go on|go for it|correct|that's right|you can|why not")
+YES_VERBS = {"message_send": "send", "install_run": "install|update|upgrade|download",  # the question's own verb
+             "shutdown": "shut(?: it| the (?:computer|pc|laptop))? down|turn (?:it )?off|power (?:it )?off",
+             "restart": "restart|reboot", "close": "close|quit|exit", "minimise": "minimi[sz]e|hide", "lock": "lock",
+             "sleep": "sleep", "type": "type|write", "keys": "press|hit", "screen": "look|check|see|have a look|take a look"}
+# a laugh, "right" or a bare "please" never send a message, install an app or shut down: those need a clear yes or the verb
+STRICT_YES = {"message_send", "install_run"} | POWER_STEPS
+
+
+def said_yes(words, plan):
+    """True if words are a yes to her question about doing plan: "Yes, install it", "Okay, shut it down"."""
+    t = " ".join(re.sub(r"[^\w\s']", " ", str(words).lower().replace("\u2019", "'")).split())
+    steps = [s for s in plan.get("steps") or [] if isinstance(s, dict)]
+    verbs = "|".join(YES_VERBS[s["do"]] for s in steps if s.get("do") in YES_VERBS)
+    names = "".join(f"|{re.escape(w)}" for s in steps for w in key_of(s.get("app") or "").split())  # "close Chrome"
+    said = SAYS_YES + (rf"|(?:{verbs})(?: (?:it|that|this|them|the (?:message|app|update|computer|pc|laptop|tab|"
+                       rf"window){names}))*" if verbs else "")
+    if not re.fullmatch(rf"(?:(?:{YES_AROUND}) )*(?:{said})(?: (?:{said}|{YES_AROUND}))*", t):
+        return False
+    return not any(s.get("do") in STRICT_YES for s in steps) or \
+        bool(re.search(rf"\b(?:{CLEAR_YES}{'|' + verbs if verbs else ''})\b", t))
 
 
 def handle(text, words=None, stt_ms=None, notify=None, gate=False):
@@ -3574,14 +3681,17 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     text, words = fix_vocab(text), fix_vocab(words)  # their dictionary, as for dictation
     MEMORY.reset_consolidation_failures()
     note = None  # shown in the window instead of her line, when something needs fixing
-    pending, PENDING["plan"] = (PENDING["plan"] if time.time() < PENDING["until"] else None), None
+    # kept through talk she lets go ("Hmm", a mumble, someone else), so the yes can still follow; gone once she acts
+    pending = PENDING["plan"] if time.time() < PENDING["until"] else None
     answer = plain(words) if pending else ""
-    if pending and YES.fullmatch(answer):
+    if pending and said_yes(words, pending) and not (gate and sure < UNSURE):  # a mumbled yes isn't one
         print("  (yes, doing what she asked about)")
         plan = pending
         if any(s.get("do") in POWER_STEPS for s in plan.get("steps") or []):
             POWER_OK["until"] = time.time() + 20  # this yes, and only this one, lets the shutdown or restart run
-    elif pending and NO.fullmatch(answer):
+    # any no in the first few seconds; after that a message stays waiting, and "Jev, stop the music" or "cancel the
+    # timer" is that, where it was taken as a no to the message and the music played on
+    elif pending and NO.fullmatch(answer) and (time.time() < PENDING["soon"] or not COMMAND.search(answer)):
         drop_staged()
         plan = make_plan(say=say_line("confirm_no"))
     elif gate and sure < UNSURE:  # mumbling, another language or talk across the room, and no name
@@ -3589,7 +3699,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         emit(notify, "Ready", None)
         return False
     elif gate and side_talk(words):  # "Mm-hmm", "Hello?", "Okay": you talking to someone, or on the phone
-        if not (YES.fullmatch(plain(words)) and asked_last()):
+        if pending or not (YES.fullmatch(plain(words)) and asked_last()):  # "Ha." to "Send it?" is no yes
             print("  (no name and just talk, staying quiet)")
             emit(notify, "Ready", None)
             return False
@@ -3629,6 +3739,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
                 print("  (not for me, staying quiet)")
                 emit(notify, "Ready", "That didn't sound like it was for me")
                 return False
+        plan = tab_not_browser(plan, words or text)
         why = let_go(plan) if gate else None
         if why:  # never "sorry, say that again" to someone else's conversation
             print(f"  (no name {why}, staying quiet: {json.dumps(plan, ensure_ascii=False)[:200]})")
@@ -3637,26 +3748,30 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         power = next((s for s in plan.get("steps") or [] if s.get("do") in POWER_STEPS), None)
         if power and not plan.get("confirm"):  # shutting down or restarting always gets a yes or no first
             plan = {"steps": [], "say": confirm_question(power), "confirm": plan}
-    if plan.get("confirm"):  # a yes or no in the next few seconds decides
-        PENDING.update(plan=plan["confirm"], until=time.time() + FOLLOW_UP + 8)
-    else:
+    if not plan.get("confirm"):  # else a yes or no decides, once she's asked (below)
         plan = prepare_task_steps(plan)  # command/schedule steps become durable rows before anything runs
         first = next((s for s in plan.get("steps") or [] if s.get("do") == "message"), None)
         if first:  # the model planned a message: open the chat with it typed in and ask, never send
             plan = stage_message(first.get("app"), first.get("contact") or first.get("to"), first.get("text"))
-            if plan.get("confirm"):
-                PENDING.update(plan=plan["confirm"], until=time.time() + FOLLOW_UP + 8)
         wanted = next((s for s in plan.get("steps") or [] if s.get("do") == "install"), None)
         if wanted:  # the model planned an install: look it up and ask, never install straight away
             plan = stage_install(wanted.get("app") or wanted.get("name")) or \
                 make_plan(say="I didn't catch which app to install.")
-            if plan.get("confirm"):
-                PENDING.update(plan=plan["confirm"], until=time.time() + FOLLOW_UP + 8)
     if not plan.get("steps") and not tidy(plan.get("say")):
         plan = make_plan(say=say_line("not_caught"))
+    PENDING["plan"] = None  # answered, or something else asked for instead
     failed, dictate, voice_error, spoken = run_plan(plan, notify)
+    if plan.get("confirm"):
+        # the yes or no window opens once she's finished asking: it was 16 s from before she started, so a long
+        # message read back used it up and the yes came too late. A message or install waits for its yes as long as
+        # it's typed in or looked up (90 s), said with her name once the follow-up window has shut
+        waits = [STAGED["until"] if s.get("do") == "message_send" else STAGED_INSTALL["until"]
+                 for s in plan["confirm"].get("steps") or [] if s.get("do") in ("message_send", "install_run")]
+        soon = time.time() + FOLLOW_UP + 8
+        PENDING.update(plan=plan["confirm"], soon=soon, until=max([soon] + waits))
     # what she said, also when it came from the screen: the next turn's "play the third one" needs what she saw
-    kept = {"steps": plan.get("steps") or [], "say": tidy(plan.get("say")) or " ".join(spoken)}
+    kept = {"steps": plan.get("steps") or [],
+            "say": (tidy(plan.get("say"), not plan.get("confirm")) if not failed else "") or " ".join(spoken)}
     try:  # kept on this PC, so she can recall it, and in the day's file
         history.add(words or text, describe(kept["steps"]) + (f" (failed: {'; '.join(failed)})" if failed else ""),
                     " ".join(spoken), json.dumps({**kept, "failed": failed} if failed else kept, ensure_ascii=False))
@@ -3669,8 +3784,11 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         return "dictate"
     if playing_after([s for s in kept["steps"] if isinstance(s, dict) and s.get("do")]):
         return "playing"
-    # only an answer to words without her name, and she didn't ask anything back: don't keep the conversation going
-    return "chat" if gate and not kept["steps"] and not kept["say"].rstrip().endswith("?") else True
+    # only an answer to words without her name, and she didn't ask anything back: don't keep the conversation going.
+    # A yes or no she's waiting on counts, though her line ends "... Send it? I can't read Signal, so check that's the
+    # right chat before I do.": the window stayed shut, and the yes without her name was let go
+    return "chat" if gate and not kept["steps"] and not plan.get("confirm") and \
+        not kept["say"].rstrip().endswith("?") else True
 
 
 MIC = [None]  # the Recorder, so the mic pauses only while she talks, see say

@@ -224,6 +224,15 @@ def set_app_volume(app, level):
         session.SimpleAudioVolume.SetMasterVolume(max(0, min(100, level)) / 100, None)
 
 
+def app_sounding(app):
+    """True if the app is playing sound now: its session in the volume mixer runs while it plays and stops when it's
+    paused. VLC 3 isn't in Windows' media controls, so this is how to tell it's the one playing."""
+    try:
+        return any(s.State == 1 for s in _app_audio(app))  # AudioSessionStateActive
+    except Exception:
+        return False
+
+
 # --------------------------------------------------------------------------- media (Spotify), via Windows media controls
 def media_session(app_hint=None):
     """The media session of the app whose id contains app_hint ("spotify"). With no hint, the one Windows shows in
@@ -1295,6 +1304,10 @@ def show_desktop():
 
 SHELL_FOLDERS = {"shell:MyComputerFolder", "shell:RecycleBinFolder", "shell:Downloads", "shell:Personal",
                  "shell:My Pictures", "shell:My Music", "shell:My Video", "shell:Desktop"}
+# What they're called, for an "open" step: a model planned "open recycle bin" as an app, which no Start menu has
+SHELL_NAMES = {"recycle bin": "shell:RecycleBinFolder", "this pc": "shell:MyComputerFolder",
+               "my computer": "shell:MyComputerFolder", "downloads": "shell:Downloads", "documents": "shell:Personal",
+               "my documents": "shell:Personal", "pictures": "shell:My Pictures"}
 
 
 def open_folder(path_or_uri):
