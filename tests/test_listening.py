@@ -181,7 +181,6 @@ class Assistant:
                     (siri.threading, "Thread", Thread)):
                 stack.enter_context(mock.patch.object(target, name, value))
             stack.enter_context(contextlib.redirect_stdout(self.out))
-            self.open_stream = open_stream
             try:
                 siri.run_voice_assistant(controls=Controls(commands), mode=mode)
             except Stop:
