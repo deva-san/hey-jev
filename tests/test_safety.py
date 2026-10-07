@@ -210,5 +210,37 @@ class Contacts(unittest.TestCase):
             self.assertEqual(messaging.find_contact(said, "whatsapp")[0], name, said)
 
 
+WHATSAPP = r"C:\Program Files\WindowsApps\5319275A.WhatsAppDesktop\WhatsApp.Root.exe"
+
+
+class ChatApps(unittest.TestCase):
+    """README: messages are never sent without a spoken yes. Enter in a chat box sends."""
+
+    def keys(self, exe, keys):
+        with mock.patch.object(siri.win, "foreground_exe", return_value=exe), \
+                mock.patch.object(siri.win, "press") as press:
+            try:
+                siri.do_step({"do": "keys", "keys": keys})
+            except RuntimeError as exc:
+                return str(exc), press.called
+            return "", press.called
+
+    def test_enter_isnt_pressed_in_a_chat_app(self):
+        for exe in (WHATSAPP, r"C:\Users\x\AppData\Roaming\Telegram Desktop\Telegram.exe", r"C:\x\slack.exe"):
+            for keys in ("enter", "Return", "ctrl+enter"):
+                said, pressed = self.keys(exe, keys)
+                self.assertFalse(pressed, (exe, keys))
+                self.assertIn("message", said)
+
+    def test_other_keys_and_other_apps_still_work(self):
+        self.assertEqual(self.keys(WHATSAPP, "ctrl+f"), ("", True))
+        self.assertEqual(self.keys(r"C:\Windows\notepad.exe", "enter"), ("", True))
+
+    def test_command_windows_are_still_refused(self):
+        said, pressed = self.keys(r"C:\Windows\System32\cmd.exe", "enter")
+        self.assertFalse(pressed)
+        self.assertIn("command windows", said)
+
+
 if __name__ == "__main__":
     unittest.main()

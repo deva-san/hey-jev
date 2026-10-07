@@ -2648,9 +2648,19 @@ def set_volume(to, app=None):
     return f"{app or 'system'} {to}"
 
 
-def not_into_shell():
-    if os.path.basename(win.foreground_exe()).lower() in SHELLS:
+# Enter sends in these, so it's never pressed there: "type on my way and press enter" sent it to whichever chat was
+# open, with no read-back and no yes. A message goes only through message_send
+CHATS = {"whatsapp.exe", "whatsapp.root.exe", "telegram.exe", "signal.exe", "slack.exe", "discord.exe", "ms-teams.exe",
+         "teams.exe", "skype.exe", "element.exe", "viber.exe", "wechat.exe", "messenger.exe", "zulip.exe",
+         "mattermost.exe"}
+
+
+def not_into_shell(keys=()):
+    front = os.path.basename(win.foreground_exe()).lower()
+    if front in SHELLS:
         raise RuntimeError("I don't type into command windows")
+    if keys and keys[-1] == "enter" and front in CHATS:
+        raise RuntimeError("I only send a message after reading it back to you, so say message and who it's to")
 
 
 def press_keys(combo):
@@ -2663,7 +2673,7 @@ def press_keys(combo):
         if not part or (len(part) > 1 and not hasattr(Key, part)):
             raise RuntimeError(f"There's no {part or 'such'} key")
         names.append(part)
-    not_into_shell()
+    not_into_shell(names)
     win.press(*names)
 
 
