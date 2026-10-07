@@ -1,11 +1,13 @@
 """Safety gates: what needs a yes after reading the web or messages, what a routine may hold, who a message goes to,
 how a browser is started, what keys reach a chat app and which commands may run by themselves."""
+import importlib.util
 import json
+import os
 import shutil
 import unittest
 from unittest import mock
 
-from tests.support import messaging, siri
+from tests.support import ROOT, messaging, siri
 from hermes_memory import skills
 
 
@@ -240,6 +242,48 @@ class ChatApps(unittest.TestCase):
         said, pressed = self.keys(r"C:\Windows\System32\cmd.exe", "enter")
         self.assertFalse(pressed)
         self.assertIn("command windows", said)
+
+
+def untripped_winplatform():
+    """A second copy of winplatform, without the harness's tripwires, for a test that stubs what it calls itself."""
+    spec = importlib.util.spec_from_file_location("winplatform_untripped", os.path.join(ROOT, "winplatform.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class BrowserLaunch(unittest.TestCase):
+    """A quote in a planned address ended the browser's quoted argument, and the rest came in as browser switches."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.win = untripped_winplatform()
+
+    def launch(self, url, running=False):
+        with mock.patch.object(self.win, "app_windows", return_value=[1] if running else []), \
+                mock.patch.object(self.win, "window_exe", return_value=r"C:\Edge\msedge.exe"), \
+                mock.patch.object(self.win.os, "startfile") as startfile, \
+                mock.patch.object(self.win.subprocess, "Popen") as popen:
+            self.win.open_url(url, self.win.App("Microsoft Edge", "msedge.exe"))
+        return startfile, popen
+
+    def test_a_quote_cant_add_browser_switches(self):
+        startfile, _ = self.launch('https://x.example/" --no-sandbox --gpu-launcher="cmd /c calc')
+        argument = startfile.call_args.kwargs["arguments"]
+        self.assertEqual(argument.count('"'), 2)
+        self.assertNotIn(" ", argument)
+        _, popen = self.launch('https://x.example/" --no-sandbox', running=True)
+        self.assertNotIn(" ", popen.call_args.args[0][1])
+
+    def test_ordinary_addresses_are_unchanged(self):
+        for url in ("https://www.google.com/search?q=biryani+recipe&hl=en", "https://x.example/a%20b#top"):
+            startfile, _ = self.launch(url)
+            self.assertEqual(startfile.call_args.kwargs["arguments"], f'"{url}"')
+
+    def test_only_web_addresses(self):
+        for url in (r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe"):
+            with self.assertRaises(RuntimeError):
+                self.launch(url)
 
 
 if __name__ == "__main__":
