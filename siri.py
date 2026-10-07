@@ -1856,27 +1856,29 @@ def parse_plan(raw):
             pairs = TOOL_ARG.findall(args)  # a value can be JSON too: <arg_key>task</arg_key><arg_value>{"kind": ...
             step = {"do": do, **({k.strip(): _arg(v) for k, v in pairs} if pairs else
                                  {k: _attr(v) for k, v in TOOL_ATTR.findall(args)})}
-            text = re.sub(r"</?\w+>", "", args).strip()
-            if isinstance(step.get("steps"), list):  # <arg_key>steps</arg_key><arg_value>[...]: the plan itself
+            text, known = re.sub(r"</?\w+>", "", args).strip(), _mend({"do": do})["do"] in KNOWN_STEPS
+            # <arg_key>steps</arg_key><arg_value>[...]: the plan itself. But a skill's steps are its own: "when I say
+            # work mode, ..." opened Gmail and set the volume on 7 October instead of saving the routine
+            if isinstance(step.get("steps"), list) and do != "skill":
                 steps += step["steps"]
                 said = said or str(step.get("say") or "")
+            elif do == "say":  # <tool_call>say Opening Chrome now.</invoke>, or text="...": what to say, not a step
+                said = said or " ".join(str(v) for k, v in step.items() if k != "do").strip() or text
             elif len(step) > 1:
                 steps.append(step)
-            elif do == "say":  # <tool_call>say Opening Chrome now.</invoke>: what to say, not a step
-                said = said or text
             elif "{" in args and "}" in args:
                 body = args[args.index("{"):args.rindex("}") + 1]
                 try:
                     inner = json.loads(body)
                 except ValueError:
                     inner = None
-                if isinstance(inner, dict) and not inner.keys() & {"do", "steps"}:  # <tool_call>schedule {"when": ...
-                    steps.append({"do": do, **inner})  # ... its arguments, not a plan
+                if isinstance(inner, dict) and known and "do" not in inner and (do == "skill" or "steps" not in inner):
+                    steps.append({"do": do, **inner})  # <tool_call>schedule {"when": ...: its arguments, not a plan
                     continue
                 inner = parse_plan(body)  # <tool_call>do {"do": "memory", ...}</tool_call>: the plan itself
                 steps += inner.get("steps") or []
                 said = said or str(inner.get("say") or "")
-            elif _mend(step)["do"] in KNOWN_STEPS or not text:
+            elif known or not text:
                 steps.append(step)  # <tool_call>recall</tool_call>
             else:  # prose wrapped in a tool call: <tool_call>Here are the top stories...</tool_call>
                 said = said or re.sub(r"</?\w+>", "", do + args).strip()
