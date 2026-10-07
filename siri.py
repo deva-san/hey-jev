@@ -3281,8 +3281,12 @@ NO = re.compile(r"(?:no|nope|nah|not|don't|dont|do not|cancel|stop|never ?mind|f
 # no yes at all, and the message stayed unsent. In a week 6 clear yeses to "Should I look at your screen?" didn't count
 SAYS_YES = (r"yes|yeah|yep|yup|ya|yah|sure|ok|okay|alright|all right|fine|correct|right|haan|han|ha|ji|avunu|of course|"
             r"absolutely|definitely|please|please do|do it|do that|go ahead|go on|go for it|carry on|why not|"
-            rf"(?:if )?you (?:can|may|want|should)|that's (?:right|fine)|thanks|thank you|now|{NAMES}")
-CLEAR_YES = r"yes|yeah|yep|yup|sure|ok|okay|alright|all right|haan|avunu|of course|absolutely|definitely|do it|go ahead|go for it"
+            r"(?:if )?you (?:can|may|want|should)|that's (?:right|fine)")
+# said around a yes, never one alone: "Um, yes" and "Go ahead and send it" were yeses once plain() took the "um" or
+# "go ahead and" off, and "Thank you." to "Should I close Google Chrome?" may be said to someone else
+YES_AROUND = rf"u+m+|u+h+|h+m+|e+r+|a+h+|o+h+|so|and|then|just|kindly|thanks|thank you|now|{NAMES}"
+CLEAR_YES = (r"yes|yeah|yep|yup|sure|ok|okay|alright|all right|haan|avunu|of course|absolutely|definitely|do it|"
+             r"do that|please do|go ahead|go on|go for it|correct|that's right|you can|why not")
 YES_VERBS = {"message_send": "send", "install_run": "install|update|upgrade|download",  # the question's own verb
              "shutdown": "shut(?: it| the (?:computer|pc|laptop))? down|turn (?:it )?off|power (?:it )?off",
              "restart": "restart|reboot", "close": "close|quit|exit", "minimise": "minimi[sz]e|hide", "lock": "lock",
@@ -3299,7 +3303,7 @@ def said_yes(words, plan):
     names = "".join(f"|{re.escape(w)}" for s in steps for w in key_of(s.get("app") or "").split())  # "close Chrome"
     said = SAYS_YES + (rf"|(?:{verbs})(?: (?:it|that|this|them|the (?:message|app|update|computer|pc|laptop|tab|"
                        rf"window){names}))*" if verbs else "")
-    if not re.fullmatch(rf"(?:{said})(?: (?:{said}))*", t):
+    if not re.fullmatch(rf"(?:(?:{YES_AROUND}) )*(?:{said})(?: (?:{said}|{YES_AROUND}))*", t):
         return False
     return not any(s.get("do") in STRICT_YES for s in steps) or \
         bool(re.search(rf"\b(?:{CLEAR_YES}{'|' + verbs if verbs else ''})\b", t))

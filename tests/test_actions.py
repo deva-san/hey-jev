@@ -307,6 +307,20 @@ class YesOrNo(Turn):
                             ("Yes, send it to Ravi instead", SEND), ("Okay, open Notepad", SCREEN), ("", SEND)):
             self.assertFalse(siri.said_yes(words, plan), words)
 
+    def test_um_yes_and_go_ahead_and_send_it(self):
+        """Speech-to-text often starts "Uh," or "Um,". plain() took that off, so "Um, yes." was a yes, and read as said
+        it wasn't, nor "Go ahead and send it", "Go on" or "Correct". "Thank you." alone is no yes to anything."""
+        for words, plan in (("Um, yes.", SEND), ("Uh, yeah.", SHUTDOWN), ("Hmm, okay.", CLOSE), ("So yes", SEND),
+                            ("Go ahead and send it.", SEND), ("Yeah, just send it", SEND), ("Go on.", SEND),
+                            ("Correct.", SEND), ("Uh, close it", CLOSE), ("Yes, thank you.", SEND), ("Yes now", SEND)):
+            self.assertTrue(siri.said_yes(words, plan), words)
+        for words, plan in (("Um.", SEND), ("Thank you.", CLOSE), ("Thanks.", SCREEN), ("Now.", CLOSE),
+                            ("So, no.", SEND), ("Uh-huh.", SEND)):
+            self.assertFalse(siri.said_yes(words, plan), words)
+        self.ask()
+        siri.handle("Um, yes.", gate=True)
+        self.assertEqual(self.sent, ["Mum"])
+
     def test_yes_send_it_sends(self):
         """"Yes, send it." became "send it" after plain(), was no yes, and the message was never sent."""
         self.ask()
