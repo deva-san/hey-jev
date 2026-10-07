@@ -304,3 +304,14 @@ class PcQuestions(Routing):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HeardNames(unittest.TestCase):
+    def test_jet_and_jeth_are_her_name_after_hey(self):
+        """README Troubleshooting's own miss, "Hey Jet, open Spotify", and Parakeet's "Hey Jeth" in test_listen."""
+        self.assertEqual(siri.find_name("Hey Jet open Spotify"), (True, "open Spotify"))
+        self.assertEqual(siri.find_name("Hey Jeth, check the space of the C drive")[0], True)
+
+    def test_a_jet_in_a_sentence_isnt_her(self):
+        for t in ("Jet lag is terrible", "I took a jet to Delhi", "The jet engine is loud"):
+            self.assertIsNone(siri.find_name(t), t)

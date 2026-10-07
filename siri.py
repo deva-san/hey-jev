@@ -134,7 +134,7 @@ def reload_keys():
 # Those count after "hey", "hello" and so on, or at the start the way you'd call someone: "Jeff, open Chrome".
 # Jarvis is a real second name for her (picked from Alfred): uncommon enough to count anywhere, like Jev.
 STRONG = "jev|jevs|jeve|jeev|jeeve|jeevs|gev|chev|jiv|jav|jarvis|jervis"
-WEAK = "jeff|jeffs|jef|jeb|jill|jil|joe|jo|jim|ju|jive|doo"
+WEAK = "jeff|jeffs|jef|jeb|jet|jeth|jill|jil|joe|jo|jim|ju|jive|doo"
 NAMES = f"{STRONG}|{WEAK}"
 SOCIAL = r"hello|hallo|hullo|hi|hiya|heya|thanks|thank you|good ?bye|bye|good (?:morning|afternoon|evening|night)"
 SOFT = r"a|ah|oh|o|eh|he|ha|hay|hei"  # what a soft "hey" can come out as, only counted at the start
