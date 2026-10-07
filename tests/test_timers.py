@@ -282,12 +282,13 @@ class Worker(unittest.TestCase):
 
     def test_long_tasks_still_go_one_at_a_time(self):
         store = StopsWorker(os.path.join(tempfile.mkdtemp(prefix="heyjev-worker-"), "tasks.db"))
-        said, release, running = queue.Queue(), threading.Event(), []
+        said, release, started, running = queue.Queue(), threading.Event(), threading.Event(), []
         overlap = []
 
         def slow_install(payload, cancelled):
             running.append(payload["id"])
             overlap.append(len(running))
+            started.set()
             release.wait(10)
             running.remove(payload["id"])
             return True, f"{payload['id']} is installed.", ""
@@ -299,7 +300,8 @@ class Worker(unittest.TestCase):
             worker = threading.Thread(target=siri.task_worker, daemon=True)
             worker.start()
             try:
-                time.sleep(0.5)
+                self.assertTrue(started.wait(5))
+                time.sleep(0.5)  # time enough for the worker to start Git too, if it would
                 self.assertEqual(running, ["VLC"])
                 release.set()
                 self.assertEqual({said.get(timeout=5), said.get(timeout=5)}, {"VLC is installed.", "Git is installed."})
