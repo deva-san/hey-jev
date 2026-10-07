@@ -1780,8 +1780,22 @@ def one_window(steps):
     return out
 
 
-TOOL_CALL = re.compile(r"<tool_call>\s*([\w.-]+)(.*?)(?:</tool_call>|\Z)", re.S)  # the end tag is left off now and then
-TOOL_ARG = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.S)
+# The end tag is left off now and then, or is </invoke>, so a call also ends where the next one starts: a "say" call
+# after the steps once went into them
+TOOL_CALL = re.compile(r"<tool_call>\s*([\w.-]+)(.*?)(?:</tool_call>|</invoke>|(?=<tool_call>)|\Z)", re.S)
+TOOL_ARG = re.compile(r"<arg_key>([^<]*)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.S)
+# Ling also writes them a line each: task="click the second video"</arg_value>, at times without the closing quote, or
+# task={"kind": "reminder", "text": "call Mum"}
+TOOL_ATTR = re.compile(r"^[ \t]*(\w+)[ \t]*=[ \t]*(.*?)[ \t]*(?:</arg_value>)?[ \t]*$", re.M)
+# Every step she can take: the ones PROMPT, RESEARCH and VISION_PROMPT list, and the rest do_step knows. Any other name
+# is a misreading, left out so she doesn't say "I can't Here yet": prose in a tool call once came out as {"do": "Here"},
+# and a broken one as {"do": "do"}
+KNOWN_STEPS = {"open", "close", "minimise", "website", "youtube", "google", "media", "volume", "scroll", "keys", "type",
+               "new_tab", "timer", "cancel_timers", "dark_mode", "lock", "sleep", "shutdown", "restart", "abort_shutdown",
+               "dictate", "screen", "memory", "lookup", "recall", "web", "read", "weather", "news", "skill_view",
+               "skill", "research", "note", "open_notes", "command", "schedule", "install", "message", "contact",
+               "task_control", "window", "open_folder", "screenshot", "message_send", "install_run", "task_queued",
+               "click", "wait"}
 
 
 def _arg(value):
@@ -1793,6 +1807,27 @@ def _arg(value):
         return value
 
 
+def _attr(value):
+    """A value written task="...": the text inside the quotes, even without the closing one. Else as _arg."""
+    value = value.strip()
+    if not value.startswith('"'):
+        return _arg(value)
+    value = value if len(value) > 1 and value.endswith('"') else value + '"'
+    try:
+        return json.loads(value)
+    except ValueError:
+        return value[1:-1]
+
+
+def _known(steps):
+    """The well-formed steps, mended (see _mend), without names there are no steps for."""
+    steps = [_mend(s) for s in steps if isinstance(s, dict) and isinstance(s.get("do"), str) and s["do"]]
+    unknown = [s["do"] for s in steps if s["do"] not in KNOWN_STEPS]
+    if unknown:
+        print(f"  no such steps, left out: {', '.join(unknown)}")
+    return one_window([s for s in steps if s["do"] in KNOWN_STEPS])
+
+
 def parse_plan(raw):
     """The model's JSON plan, with only well-formed steps. Plain words become something to say. JSON it got a bit
     wrong is mended ("x":73", once), else it's marked broken, so she never reads code out loud."""
@@ -1802,16 +1837,34 @@ def parse_plan(raw):
         steps = []  # (a single step's JSON parses to a dict with "do" and no "steps", see below)
         said = TOOL_CALL.sub("", raw).strip()
         for do, args in calls:
-            if "{" in args and "}" in args:  # <tool_call>do {"do": "memory", ...}</tool_call>: the plan itself
-                inner = parse_plan(args[args.index("{"):args.rindex("}") + 1])
+            pairs = TOOL_ARG.findall(args)  # a value can be JSON too: <arg_key>task</arg_key><arg_value>{"kind": ...
+            step = {"do": do, **({k.strip(): _arg(v) for k, v in pairs} if pairs else
+                                 {k: _attr(v) for k, v in TOOL_ATTR.findall(args)})}
+            text = re.sub(r"</?\w+>", "", args).strip()
+            if isinstance(step.get("steps"), list):  # <arg_key>steps</arg_key><arg_value>[...]: the plan itself
+                steps += step["steps"]
+                said = said or str(step.get("say") or "")
+            elif len(step) > 1:
+                steps.append(step)
+            elif do == "say":  # <tool_call>say Opening Chrome now.</invoke>: what to say, not a step
+                said = said or text
+            elif "{" in args and "}" in args:
+                body = args[args.index("{"):args.rindex("}") + 1]
+                try:
+                    inner = json.loads(body)
+                except ValueError:
+                    inner = None
+                if isinstance(inner, dict) and not inner.keys() & {"do", "steps"}:  # <tool_call>schedule {"when": ...
+                    steps.append({"do": do, **inner})  # ... its arguments, not a plan
+                    continue
+                inner = parse_plan(body)  # <tool_call>do {"do": "memory", ...}</tool_call>: the plan itself
                 steps += inner.get("steps") or []
                 said = said or str(inner.get("say") or "")
-                continue
-            step = {"do": do.strip()}
-            step.update({k.strip(): _arg(v) for k, v in TOOL_ARG.findall(args)})
-            steps.append(step)
-        return {"steps": one_window([_mend(s) for s in steps if isinstance(s, dict) and s.get("do")]),
-                "say": said if "{" not in said else ""}
+            elif _mend(step)["do"] in KNOWN_STEPS or not text:
+                steps.append(step)  # <tool_call>recall</tool_call>
+            else:  # prose wrapped in a tool call: <tool_call>Here are the top stories...</tool_call>
+                said = said or re.sub(r"</?\w+>", "", do + args).strip()
+        return {"steps": _known(steps), "say": said if "{" not in said else ""}
     if "{" in raw and "}" in raw:
         body = raw[raw.index("{"):raw.rindex("}") + 1]
         mended = re.sub(r",\s*([}\]])", r"\1", re.sub(r'(:\s*-?\d+(?:\.\d+)?)"(?=\s*[,}\]])', r"\1", body))
@@ -1847,7 +1900,7 @@ def parse_plan(raw):
     if plan.get("do") and "steps" not in plan:  # one step on its own: {"do": "skill_view", "name": "..."}
         plan = {"steps": [{k: v for k, v in plan.items() if k != "say"}], "say": plan.get("say") or ""}
     steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
-    plan["steps"] = one_window([_mend(s) for s in steps if isinstance(s, dict) and s.get("do")])
+    plan["steps"] = _known(steps)
     return plan
 
 
