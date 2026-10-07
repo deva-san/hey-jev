@@ -474,12 +474,34 @@ def add_timer(secs, label=None):
     return t
 
 
+REMINDER_SOON = 12 * 3600  # a one-off reminder due within this counts down with the timers
+_reminders_read = [0.0, []]  # when they were last read, and (text, due) for each
+
+
+def reminders_soon():
+    """(text, due) for one-off reminders due within REMINDER_SOON. Read again at most once a second, the window asks
+    twice a second, and never raises: a broken tasks.db mustn't stop the window's clock."""
+    if time.time() - _reminders_read[0] >= 1:
+        try:
+            soon = [(r["payload"].get("text") or r["description"], r["due"]) for r in TASK_STORE.list(active=True)
+                    if r["kind"] == "reminder" and r["status"] == "queued" and not r["repeat"]
+                    and r["due"] < time.time() + REMINDER_SOON]
+        except Exception as exc:
+            print(f"  couldn't read the reminders: {exc!r}")
+            soon = []
+        _reminders_read[:] = [time.time(), soon]
+    return _reminders_read[1]
+
+
 def timer_snapshot():
-    """(name, seconds left) for each running timer, soonest first."""
+    """(name, seconds left) for each running timer and each reminder due soon, soonest first. Reminders are in the
+    task queue now, so "how long is left?" and the window didn't see a reminder due in 10 minutes."""
     now = time.time()
     with TIMERS_LOCK:
-        return [((t["label"] or "").capitalize() or short_duration(t["secs"]) + " timer", max(0, t["end"] - now))
+        left = [((t["label"] or "").capitalize() or short_duration(t["secs"]) + " timer", max(0, t["end"] - now))
                 for t in TIMERS]
+    return sorted(left + [(text.capitalize(), max(0, due - now)) for text, due in reminders_soon()],
+                  key=lambda x: x[1])
 
 
 def short_duration(secs):

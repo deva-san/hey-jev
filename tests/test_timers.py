@@ -216,5 +216,29 @@ class CancelTimer(WithStore):
         self.assertNotIn("confirm", plan)
 
 
+class RemindersCountDown(WithStore):
+    """A42: a reminder due in 10 minutes was invisible to 'how long is left?' and the window."""
+
+    def test_reminder_due_soon_shows_with_the_timers(self):
+        self.reminder("call mum", time.time() + 600)
+        self.reminder("call the bank", time.time() + 3 * 86400)  # days away: a schedule, not a countdown
+        self.reminder("drink water", time.time() + 1800, {"kind": "interval", "seconds": 3600})  # repeats
+        siri.add_timer(60, "Tea")
+        names = [name for name, _ in siri.timer_snapshot()]
+        self.assertEqual(names, ["Tea", "Call mum"])
+        self.assertAlmostEqual(siri.timer_snapshot()[1][1], 600, delta=5)
+
+    def test_how_long_is_left_sees_a_reminder(self):
+        self.reminder("call mum", time.time() + 600)
+        plan = siri.quick("how long is left")
+        self.assertNotIn(plan["say"], siri.REPLIES["timer_none"])
+        self.assertRegex(plan["say"], r"(?:9|10) minutes")
+
+    def test_broken_store_never_breaks_the_window(self):
+        with mock.patch.object(self.store, "list", side_effect=OSError("disk gone")):
+            siri.add_timer(60)
+            self.assertEqual(len(siri.timer_snapshot()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
