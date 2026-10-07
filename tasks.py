@@ -249,8 +249,8 @@ def _spoken(text):
     t = re.sub(r"\bat (\d{1,2}) ([0-5]\d)\b", r"at \1:\2", t)  # "at ten thirty" was 10:00
     t = re.sub(r"\ban? (second|minute|hour|day)\b", r"1 \1", t)
     t = re.sub(r"\bevery (second|minute|hour)\b", r"every 1 \1", t)  # "every day" stays: daily, at a time
-    return re.sub(r"\b(\d+)(?: and a half)? (second|minute|hour|day)s?(?: and a half)?\b",
-                  lambda m: f"{m[1]}.5 {m[2]}s" if "half" in m[0] else m[0], t)
+    return re.sub(r"\b(\d+)(?: and (?:a )?half)? (second|minute|hour|day)s?(?: and (?:a )?half)?\b",
+                  lambda m: f"{m[1]}.5 {m[2]}s" if "half" in m[0] else m[0], t)  # "one and half hour" too
 
 
 def _clock(text):

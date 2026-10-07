@@ -45,6 +45,12 @@ class Durations(unittest.TestCase):
             step = siri.quick(said)["steps"][0]
             self.assertEqual((step["when"], step["task"]["text"]), ("in 300 seconds", "call mum"), said)
 
+    def test_one_and_half_without_a(self):
+        """Said in India without the "a": "one and half hour" was refused."""
+        for said, secs in (("set a timer for one and half hour", 5400), ("set a timer for one hour and half", 5400),
+                           ("two and half minutes", 150)):
+            self.assertEqual(siri.parse_duration(said), secs, said)
+        self.assertEqual(tasks.normalize_schedule("in one and half hour", None, WED_7PM)[0], WED_7PM + 5400)
 
 
 class Schedules(unittest.TestCase):

@@ -399,7 +399,7 @@ NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "fiv
                 "couple": 2, "few": 3}
 UNITS = {"s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1, "m": 60, "min": 60, "mins": 60,
          "minute": 60, "minutes": 60, "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600}
-DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b(\s+and\s+a\s+(?:half|quarter))?")
+DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b(\s+and\s+(?:a\s+)?(?:half|quarter))?")
 IN_DURATION = re.compile(r"\b(?:in|after)\s+(?:" + DURATION.pattern + r"(?:\s+and)?\s*)+")  # when a reminder is due
 
 
@@ -424,7 +424,7 @@ def _digits(text):
         else:
             out.append(words[i])
         i += 1
-    t = re.sub(r"\b(\d+) and a half (hours?|minutes?|seconds?)\b", r"\1.5 \2", " ".join(out))
+    t = re.sub(r"\b(\d+) and (?:a )?half (hours?|minutes?|seconds?)\b", r"\1.5 \2", " ".join(out))  # "one and half hour"
     # "1 minute 30": the bare number is the next unit down, it used to be dropped
     return re.sub(r"\b(\d+ (hours?|hrs?|minutes?|mins?))(?: and)? (\d+)\b(?! ?(?:\.\d|hours?|hrs?|h|minutes?|mins?|m|"
                   r"seconds?|secs?|s)\b)", lambda m: f"{m[1]} {m[3]} {'minutes' if m[2][0] == 'h' else 'seconds'}", t)
