@@ -1065,6 +1065,11 @@ def routines():
         except Exception as exc:
             print(f"  couldn't read her skills: {exc!r}")
             found = []
+        # only steps that act, whatever is in the file: learn_skill checks a new skill, but a patch or a hand edit
+        # could put a command line or a new number for Mum there, and a routine runs with no model and no question
+        for s in found:
+            steps = [x for x in (s["plan"] or {}).get("steps") or [] if x["do"] in ROUTINE_STEPS]
+            s["plan"] = {**s["plan"], "steps": steps} if steps else None
         _skill_cache[:] = [time.time(), found]
     return [(plain(t), s) for s in _skill_cache[1] if s["plan"] for t in s["triggers"]]
 

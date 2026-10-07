@@ -188,12 +188,13 @@ def skill_view(name: str) -> Dict[str, Any]:
 # --- Hey Jev: routines, and SKILL.md from what the model sends -----------------
 
 def plan_of(body: str) -> Optional[Dict[str, Any]]:
-    """The ```json plan in a skill's body, {"steps": [...], "say": "..."}, or None."""
-    m = _PLAN_RE.search(body or "")
-    if not m:
+    """The ```json plan in a skill's body, {"steps": [...], "say": "..."}, or None. The last one: build_content puts
+    it after the notes, and an example in the notes once came first and ran as the routine."""
+    found = _PLAN_RE.findall(body or "")
+    if not found:
         return None
     try:
-        plan = json.loads(m[1])
+        plan = json.loads(found[-1])
     except ValueError:
         return None
     steps = plan.get("steps") if isinstance(plan, dict) else None

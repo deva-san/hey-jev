@@ -1,10 +1,12 @@
 """Safety gates: what needs a yes after reading the web or messages, what a routine may hold, who a message goes to,
 how a browser is started, what keys reach a chat app and which commands may run by themselves."""
 import json
+import shutil
 import unittest
 from unittest import mock
 
 from tests.support import siri
+from hermes_memory import skills
 
 
 def planned_after(text, steps, looked=({"do": "web", "query": "x"},), gate=False):
@@ -96,6 +98,53 @@ class UntrustedText(unittest.TestCase):
         with mock.patch.object(siri.sysinfo, "lookup", return_value="40 GB free"):
             self.assertEqual(json.loads(siri.run_info([{"do": "lookup", "what": "disk"}])),
                              [{"lookup": "disk", "result": "40 GB free"}])
+
+
+MUM = {"do": "contact", "action": "save", "alias": "Mum", "app": "whatsapp", "number": "+447700900123"}
+VOLUME = {"do": "volume", "to": 30}
+
+
+class Routines(unittest.TestCase):
+    """README: routines can only hold steps that act, the same list the model plans from, never a command line."""
+
+    def setUp(self):
+        self.addCleanup(self.forget)
+
+    def forget(self):
+        shutil.rmtree(skills.SKILLS_DIR, ignore_errors=True)
+        siri._skill_cache[0] = 0.0
+
+    def routine(self, said):
+        return [s["do"] for s in (siri.quick(said) or {}).get("steps") or []]
+
+    def test_a_routine_runs_only_steps_that_act(self):
+        plan = {"steps": [{"do": "command", "command": "git status", "cwd": "C:\\"}, MUM, VOLUME], "say": "Movie time."}
+        folder = skills.SKILLS_DIR / "movie-time"
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text("---\nname: movie-time\ndescription: Movies\ntriggers: movie time\n---\nDim it."
+                                         "\n\n```json\n" + json.dumps(plan) + "\n```\n", encoding="utf-8")
+        self.assertEqual(self.routine("movie time"), ["volume"])
+
+    def test_an_example_in_the_notes_isnt_the_plan(self):
+        notes = "Like this:\n```json\n" + json.dumps({"steps": [{"do": "command", "command": "git push"}]}) + "\n```"
+        siri.learn_skill({"action": "create", "name": "work-mode", "description": "Work", "triggers": ["work mode"],
+                          "steps": [VOLUME], "notes": notes})
+        self.assertEqual(self.routine("work mode"), ["volume"])
+
+    def test_a_patch_cant_add_a_step_that_doesnt_act(self):
+        siri.learn_skill({"action": "create", "name": "work-mode", "description": "Work", "triggers": ["work mode"],
+                          "steps": [VOLUME]})
+        old = json.dumps(VOLUME)
+        siri.learn_skill({"action": "patch", "name": "work-mode", "old": old,
+                          "new": json.dumps(MUM) + ", " + json.dumps({"do": "task_control", "action": "approve", "id": 1})
+                          + ", " + old})
+        self.assertEqual(self.routine("work mode"), ["volume"])
+
+    def test_a_routine_with_nothing_left_to_do_doesnt_run(self):
+        siri.learn_skill({"action": "create", "name": "deploy", "description": "Deploy", "triggers": ["ship it now"],
+                          "steps": [VOLUME]})
+        siri.learn_skill({"action": "patch", "name": "deploy", "old": json.dumps(VOLUME), "new": json.dumps(MUM)})
+        self.assertNotIn("contact", self.routine("ship it now"))
 
 
 if __name__ == "__main__":
