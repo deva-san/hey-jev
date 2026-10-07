@@ -256,6 +256,51 @@ class RoomTalk(unittest.TestCase):
             self.assertIsNone(siri.let_go(plan), plan)
 
 
+class Learning(Turn):
+    """M7: overheard room talk isn't learned from, and doesn't put facts in her memory."""
+
+    def test_overheard_i_remember_is_not_saved(self):
+        memory = {"do": "memory", "action": "add", "target": "user", "content": "Nine to Kerawal"}
+        plan = self.think("I remember nine to Kerawal", "cold",
+                          json.dumps({"to": "you", "steps": [memory], "say": "Okay, I'll remember that."}))
+        self.assertIsNone(plan)  # not "Okay, I'll remember that" with nothing remembered
+        plan = self.think("I remember Kerawal, open Notepad", "cold",
+                          json.dumps({"to": "you", "steps": [memory, {"do": "open", "app": "Notepad"}], "say": ""}))
+        self.assertEqual(plan["steps"], [{"do": "open", "app": "Notepad"}])
+
+    def test_remember_said_without_her_name_is_saved(self):
+        step = {"do": "memory", "action": "add", "target": "user", "content": "Their website is careerid.in"}
+        plan = self.think("remember that my website is careerid.in", "cold",
+                          json.dumps({"to": "you", "steps": [step], "say": ""}))
+        self.assertEqual(plan["steps"], [step])
+        plan = self.think("my website is careerid.in", False, json.dumps({"steps": [step], "say": ""}))
+        self.assertEqual(plan["steps"], [step])  # with her name, as before
+
+    def test_an_overheard_chat_does_not_start_a_review(self):
+        started = []
+        with patch.object(siri, "review", lambda *a, **k: started.append(1)), \
+                patch.dict(siri._learning, turns=10, last=0.0):
+            siri.learn_later("What did he say to you", [], [], "cold")
+            time.sleep(0.05)
+            self.assertEqual(started, [])
+            siri.learn_later("open notepad and type hi then save it", [{"do": "open"}] * 3, [], False)
+            time.sleep(0.05)
+        self.assertEqual(started, [1])
+
+    def test_a_review_leaves_out_overheard_chat(self):
+        siri.learn_later("Who was that on the phone", [], [], "cold")
+        turns = [(time.time() - 30, "Who was that on the phone", '{"steps": [], "say": "Sounds like Ravi."}'),
+                 (time.time() - 20, "no, I said Zostel", '{"steps": [], "say": "Got it, Zostel."}'),
+                 (time.time() - 10, "open Zostel", '{"steps": [{"do": "website", "url": "https://zostel.com"}]}')]
+        model = FakeModel('{"memory": [], "skills": [], "words": {}}')
+        with patch.object(siri.history, "recent", lambda *a, **k: turns), patch.object(siri, "ask_model", model), \
+                patch.object(siri, "skills_block", lambda: ""):
+            siri.review(wait=0)
+        said = model.calls[0][0][-1]["content"]
+        self.assertIn("Zostel", said)
+        self.assertNotIn("on the phone", said)
+
+
 class WebSearch(unittest.TestCase):
     """M5: the sources share one deadline, and what's there by then is the answer."""
 

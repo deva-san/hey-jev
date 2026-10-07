@@ -1412,6 +1412,9 @@ LOOKING = {"web": "Searching the web\u2026", "read": "Reading it\u2026", "weathe
 # the PowerShell command to list files?", "I will schedule the call with Ravi", and forced a second request on them
 TASK_ASKED = re.compile(r"(?:run|check|schedule|remind|research|set|start|queue|create|add|make|execute|do (?:that|it)|"
                         r"every|daily|weekly|tomorrow|at)\b")
+# Overheard words that ask her to remember or forget something, not "I remember ...": room talk put "Nine to Kerawal"
+# in her memory on 6 October
+REMEMBER = re.compile(r"(?<!\bi )(?<!\bwe )\b(?:remember|forget)\b")
 HEDGE_AFTER = 2.5  # the free model usually answers in 1 to 3 s but now and then takes 8 or more, so then ask again
 # On her own prompt in October 2026: Ling 3.0 Flash Sante on Kilo 1.8 to 2.2 s (median of 5), space-bunny on
 # OpenCode 3.6 to 3.7 s. Cohere's North Mini Code, Step 3.7 Flash and Nemotron 3 Super were slower or timed out
@@ -1610,12 +1613,17 @@ words: speech-to-text mistakes they corrected, {"RightWord": ["what speech-to-te
 Signs there's something to learn: they corrected her ("no", "not that", "I said", "I meant"), were annoyed, said "remember", or a task took several steps. Most reviews find nothing: then reply {"memory": [], "skills": [], "words": {}}."""
 CORRECTION = re.compile(r"(?:no|nope|not that|wrong|that's wrong|i said|i meant|actually|i told you|you got it wrong|"
                         r"not this|that's not)\b")
-_learning = {"turns": 0, "last": 0.0, "lock": threading.Lock()}
+_learning = {"turns": 0, "last": 0.0, "lock": threading.Lock(), "overheard": collections.deque(maxlen=20)}
 
 
-def learn_later(words, steps, failed):
+def learn_later(words, steps, failed, gate=False):
     """Hermes Agent's learning loop, lightly: after a turn worth learning from (a correction, a task of several steps,
-    something that failed, or every 6 turns), a look back over the last few turns in the background."""
+    something that failed, or every 6 turns), a look back over the last few turns in the background. Words overheard
+    without her name that she only answered don't count, and the look back leaves them out: on 6 and 7 October room
+    talk she'd answered was put in her memory as facts about you."""
+    if gate == "cold" and not steps:
+        _learning["overheard"].append(words)
+        return
     _learning["turns"] += 1
     worth = CORRECTION.match(plain(words)) or failed or len(steps) >= 3 or \
         any(s.get("do") in ("screen", "skill") for s in steps) or _learning["turns"] >= 6
@@ -1632,7 +1640,7 @@ def review(wait=20):
     try:
         time.sleep(wait)  # after the next turn or two, so it sees how things went
         who = " ".join(str(settings.get("name") or "").split()) or "They"
-        lines, turns = [], history.recent(10, 1800)
+        lines, turns = [], [t for t in history.recent(10, 1800) if t[1] not in _learning["overheard"]]
         for _, said, plan_json in turns:
             try:
                 p = json.loads(plan_json or "{}")
@@ -2097,6 +2105,10 @@ def think(text, gate, notify=None, sure=1.0):
           f"{usage.get('completion_tokens', '?')} tokens  $0 (free)")
     if plan.get("ignore"):
         return None if gate else make_plan(say=say_line("not_caught"))
+    if gate == "cold" and any(s["do"] == "memory" for s in plan["steps"]) and not REMEMBER.search(plain(text)):
+        plan["steps"] = [s for s in plan["steps"] if s["do"] != "memory"]
+        if not plan["steps"]:  # and not "Okay, I'll remember that" without remembering it
+            return None
     if needs_task and not any(s.get("do") in ("command", "schedule", "task_control") for s in plan["steps"]) \
             and re.search(r"\b(?:done|scheduled|queued|running|started|i(?:'ll| will)|will run)\b", str(plan.get("say") or ""), re.I):
         return make_plan(say="I couldn't add that task. Say the folder and time again.")
@@ -3387,7 +3399,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
                     " ".join(spoken), json.dumps({**kept, "failed": failed} if failed else kept, ensure_ascii=False))
     except Exception as exc:
         print(f"  couldn't keep this turn: {exc!r}")
-    learn_later(words or text, [s for s in kept["steps"] if isinstance(s, dict)], failed)
+    learn_later(words or text, [s for s in kept["steps"] if isinstance(s, dict)], failed, gate)
     note = note or voice_error
     emit(notify, "Something went wrong" if note else "Ready", note or kept["say"] or describe(kept["steps"]) or "Done")
     if dictate:
