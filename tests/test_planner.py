@@ -162,6 +162,11 @@ class ToolCalls(unittest.TestCase):
             "steps": [{"do": "open", "app": "Google Chrome"}, {"do": "website", "url": "https://www.youtube.com"}],
             "say": "Opening Chrome and heading to YouTube now."})
 
+    def test_both_end_tags_are_not_said(self):
+        raw = ('<tool_call>open\n<arg_key>app</arg_key><arg_value>Notepad</arg_value>\n</invoke>\n</tool_call>\n'
+               '<tool_call>say\nOpening Notepad.\n</invoke>\n</tool_call>')
+        self.assertEqual(siri.parse_plan(raw), {"steps": [{"do": "open", "app": "Notepad"}], "say": "Opening Notepad."})
+
     def test_steps_and_say_as_arguments(self):
         raw = ('<tool_call>do\n<arg_key>steps</arg_key>\n<arg_value>[{"do": "open", "app": "Google Chrome"}, '
                '{"do": "keys", "keys": "ctrl+t"}]</arg_value><arg_key>say</arg_key>\n<arg_value>Opening Chrome, Hari.'

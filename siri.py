@@ -1854,7 +1854,7 @@ def parse_plan(raw):
     calls = TOOL_CALL.findall(raw)
     if calls:  # Ling's own way of asking for a step: <tool_call>skill_view<arg_key>name</arg_key>...</tool_call>
         steps = []  # (a single step's JSON parses to a dict with "do" and no "steps", see below)
-        said = TOOL_CALL.sub("", raw).strip()
+        said = re.sub(r"</?\w+>", "", TOOL_CALL.sub("", raw)).strip()  # and a </tool_call> left after </invoke>
         for do, args in calls:
             pairs = TOOL_ARG.findall(args)  # a value can be JSON too: <arg_key>task</arg_key><arg_value>{"kind": ...
             step = {"do": do, **({k.strip(): _arg(v) for k, v in pairs} if pairs else
