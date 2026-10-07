@@ -742,6 +742,8 @@ def _time_left(m):
 
 def _cancel_timers(m):
     secs = parse_duration(m["what"] or "")  # "cancel the 5 minute timer": that one, see do_step
+    if not secs and re.search(r"\b(?:and|reminders?)\b", m["what"] or ""):
+        return None  # "stop the music and the timer", "clear my reminders and timers": more than timers, the model
     return make_plan([{"do": "cancel_timers", **({"seconds": secs} if secs else {})}],
                      say_line("timers_cancel" if TIMERS else "timer_none"))
 
@@ -749,6 +751,8 @@ def _cancel_timers(m):
 def _cancel_reminders(m):
     """Reminders are durable and some repeat, so she names the ones she'd cancel and waits for a yes. "Cancel the
     timer" used to cancel them all, daily ones too, while she said there was no timer running."""
+    if re.search(r"\b(?:and|timers?|alarms?)\b", m["what"] or ""):
+        return None  # "cancel the timer and the reminder": more than reminders, the model
     rows = [r for r in TASK_STORE.list(active=True) if r["kind"] == "reminder"]
     about = " ".join(filter(None, (m["what"], m["about"])))
     rows = [r for r in rows if about and about in plain(r["payload"].get("text") or r["description"])] or rows
@@ -1082,8 +1086,9 @@ QUICK = [(re.compile(p), make) for p, make in (
      r"(?:(?P<what>.+?) )?timer)?|time left", _time_left),
     (r"(?:cancel|stop|delete|clear|remove)(?: all the| all my| the| all| my)? (?:(?P<what>.+?) )?(?:timers?|alarms?)",
      _cancel_timers),
-    (r"(?:cancel|stop|delete|clear|remove)(?: all the| all my| the| all| my| that)?(?: (?P<what>.+?))? reminders?"
-     r"(?: (?:to|about|for) (?P<about>.+))?", _cancel_reminders),
+    # "stop reminding me to drink water": the model's cancel_timers leaves reminders alone now
+    (r"(?:(?:cancel|stop|delete|clear|remove)(?: all the| all my| the| all| my| that)?(?: (?P<what>.+?))? reminders?|"
+     r"stop reminding me)(?: (?:to|about|for) (?P<about>.+?))?(?: any ?more)?", _cancel_reminders),
     # just a site or an app, "YouTube" after a new tab: open it. Last, so it never takes a phrase meant for the above
     (r"(?P<x>[a-z][a-z .]{1,24})", lambda m: _bare(m["x"])),
 )]
@@ -1222,7 +1227,7 @@ SCHEDULE_NUMBER = r"(?:\d+|one|two|three|four|five|ten|fifteen|thirty)"
 SCHEDULE_DAY = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
 REPEAT = (rf"(?:every (?:(?:{SCHEDULE_DAY}|day) at {SCHEDULE_TIME}|(?:{SCHEDULE_NUMBER} )?(?:minutes?|hours?)|"
           rf"{SCHEDULE_NUMBER} days?|half an hour)|daily at {SCHEDULE_TIME}|hourly)")  # "every hour" lost a reminder
-REPEAT_PREFIX = re.compile(rf"^(?P<repeat>{REPEAT}) (?P<action>.+)$", re.I)
+REPEAT_PREFIX = re.compile(rf"^(?P<repeat>{REPEAT}),? (?P<action>.+)$", re.I)  # Nemotron's "Every hour, remind me ..."
 WHEN = (rf"(?:(?:(?:tomorrow|today)(?: morning| afternoon| evening| night)?|tonight|this (?:morning|afternoon|evening))"
         rf" at {SCHEDULE_TIME}|(?:on )?{SCHEDULE_DAY} at {SCHEDULE_TIME}|at {SCHEDULE_TIME}(?: tonight| today| tomorrow)?)")
 

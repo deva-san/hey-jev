@@ -207,6 +207,20 @@ class CancelTimer(WithStore):
         self.assertRegex(plan["say"], r"(?:9|10) minutes")
         self.assertEqual(len(siri.TIMERS), 2)
 
+    def test_time_left_on_a_labelled_timer(self):
+        """The model's timers have a label: "on my tea timer" answered with the soonest timer instead."""
+        siri.add_timer(300)
+        siri.add_timer(600, "Tea")
+        self.assertRegex(siri.quick("how long is left on my tea timer")["say"], r"(?:9|10) minutes")
+
+    def test_more_than_a_timer_goes_to_the_model(self):
+        """The duration slot took any words, so these cancelled the timers only and said it was done."""
+        siri.add_timer(300)
+        self.reminder("call mum", time.time() + 600)
+        for said in ("stop the music and the timer", "clear my reminders and timers", "cancel the timer and the reminder"):
+            self.assertIsNone(siri.quick(said), said)
+        self.assertEqual(siri.quick("cancel the one and a half hour timer")["steps"][0]["seconds"], 5400)
+
     def test_plain_cancel_still_cancels_every_timer(self):
         siri.add_timer(300)
         siri.add_timer(600)
