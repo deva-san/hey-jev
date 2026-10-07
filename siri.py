@@ -2330,6 +2330,9 @@ KEY_NAMES = {"control": "ctrl", "escape": "esc", "return": "enter", "pgup": "pag
              "plus": "=", "minus": "-", "equals": "="}
 WAIT_AFTER = {"open": 0.8, "new_tab": 0.5, "website": 3.0, "youtube": 3.0, "google": 2.5}  # before the next step
 SPEAK_FIRST = ("lock", "sleep")  # and muting: she says it first, or she'd cut herself off
+# and these she says once they're done, never while they run: she said "Closed Messages." with Messages not running,
+# and "Sent to Mum." for a message to Ravi before it was sent, or refused. All quick, closing an app takes longest
+SAY_AFTER = {"close", "minimise", "message_send", "install_run", "contact", "task_control", "memory", "skill", "note"}
 
 
 def find_app(name):
@@ -2751,6 +2754,7 @@ def do_step(step):
         win.open_snipping_tool()
         return "screenshot"
     if do == "message_send":  # only ever reached through a yes to the question stage_message asked
+        SENT_LINE[0] = ""  # never the last one's: she said "Sent to Mum." for a message to Ravi
         ready = STAGED["ready"] if time.time() < STAGED["until"] else None
         STAGED.update(ready=None, until=0.0)
         if not ready:
@@ -2762,6 +2766,7 @@ def do_step(step):
     if do == "message":
         raise RuntimeError("I ask before sending a message")
     if do == "install_run":  # only ever reached through a yes to the question stage_install asked
+        SENT_LINE[0] = ""
         ready = STAGED_INSTALL["ready"] if time.time() < STAGED_INSTALL["until"] else None
         STAGED_INSTALL.update(ready=None, until=0.0)
         if not ready:
@@ -2894,16 +2899,18 @@ def playing_after(steps):
 
 
 def run_plan(plan, notify):
-    """Do the steps while she says her line. A screen step looks at the screen and acts on it (see), and she says
-    what it found once it's done. Returns (what failed, whether to start dictating, voice error, the lines she
-    said)."""
+    """Do the steps while she says her line, or once the ones it reports are done (SAY_AFTER), and only if they
+    worked. A screen step looks at the screen and acts on it (see), and she says what it found once it's done.
+    Returns (what failed, whether to start dictating, voice error, the lines she said)."""
     steps = [s for s in (plan.get("steps") or []) if isinstance(s, dict) and s.get("do")]
     dictate = any(s["do"] == "dictate" for s in steps)
     steps = [s for s in steps if s["do"] != "dictate"]
     looks = next((str(s.get("task") or "") for s in steps if s["do"] == "screen"), None)
-    line = tidy(plan.get("say")) or (say_line("looking") if looks is not None else default_line(steps))
     first = any(s["do"] in SPEAK_FIRST or (s["do"] == "volume" and str(s.get("to")).lower() in ("mute", "0")) for s in steps)
+    last = max((i for i, s in enumerate(steps) if s["do"] in SAY_AFTER and looks is None and not first), default=-1)
+    line = tidy(plan.get("say")) or (say_line("looking") if looks is not None else "" if last >= 0 else default_line(steps))
     failed, voice_error, spoken, seen = [], None, [], []
+    reported = threading.Event()  # the steps her line reports on are done
 
     def talk(text):
         spoken.append(text)
@@ -2924,6 +2931,8 @@ def run_plan(plan, notify):
             except Exception as exc:
                 failed.append("Something went wrong")
                 print(f"  action failed: {step['do']} {exc!r}")
+            if i == last:
+                reported.set()
             if i + 1 < len(steps):
                 time.sleep(WAIT_AFTER.get(step["do"], 0.1))
 
@@ -2933,7 +2942,9 @@ def run_plan(plan, notify):
         voice_error, line = talk(line), ""
     worker = threading.Thread(target=work, daemon=True)
     worker.start()
-    if line:  # while the steps run, so she answers as soon as she can
+    if last >= 0:  # "Sent to Ravi." is what the send managed, worked out once it has: a failure gets only its own line
+        line = (line or default_line(steps)) if reported.wait(60) and not failed else ""
+    if line:  # while the (other) steps run, so she answers as soon as she can
         voice_error = talk(line)
     if looks is not None and worker.is_alive():
         emit(notify, "Looking", looks)  # her line's said, the popup goes back to what she's doing
@@ -3321,7 +3332,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         plan = make_plan(say=say_line("not_caught"))
     failed, dictate, voice_error, spoken = run_plan(plan, notify)
     # what she said, also when it came from the screen: the next turn's "play the third one" needs what she saw
-    kept = {"steps": plan.get("steps") or [], "say": tidy(plan.get("say")) or " ".join(spoken)}
+    kept = {"steps": plan.get("steps") or [], "say": (tidy(plan.get("say")) if not failed else "") or " ".join(spoken)}
     try:  # kept on this PC, so she can recall it, and in the day's file
         history.add(words or text, describe(kept["steps"]) + (f" (failed: {'; '.join(failed)})" if failed else ""),
                     " ".join(spoken), json.dumps({**kept, "failed": failed} if failed else kept, ensure_ascii=False))

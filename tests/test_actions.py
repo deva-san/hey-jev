@@ -1,5 +1,6 @@
 """Carrying things out and confirming them: keys, media, the yes or no to her questions, what she says about what she
 did. Nothing here acts on the PC: tests.support turns that into tripwires, and each test patches what it needs."""
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -102,6 +103,70 @@ class Folders(unittest.TestCase):
     def test_an_app_is_still_an_app(self):
         with self.assertRaisesRegex(RuntimeError, "tripwire: win.open_app"):
             siri.do_step({"do": "open", "app": "Notepad"})
+
+
+class SaysWhatHappened(unittest.TestCase):
+    """She says a send, an install or closing an app worked once it has, and never when it didn't."""
+    def setUp(self):
+        patcher = mock.patch.object(siri, "say", lambda line, notify: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def send(self, send):
+        siri.STAGED.update(ready={"app": "whatsapp", "contact": "Ravi", "text": "hi"}, until=time.time() + 60)
+        with mock.patch.object(siri.messaging, "send", send):
+            return siri.run_plan({"steps": [{"do": "message_send"}], "say": ""}, None)
+
+    def test_a_send_says_what_this_send_did(self):
+        """She said "Sent to Mum." for a message to Ravi: the last send's line, said before this one ran."""
+        siri.SENT_LINE[0] = "Sent to Mum."
+        failed, _, _, spoken = self.send(lambda ready: (True, f"Sent to {ready['contact']}."))
+        self.assertEqual((failed, spoken), ([], ["Sent to Ravi."]))
+
+    def test_a_refused_send_is_never_said_to_have_gone(self):
+        def refuse(ready):
+            raise RuntimeError("WhatsApp isn't in front, so I've not sent it")
+        siri.SENT_LINE[0] = ""
+        failed, _, _, spoken = self.send(refuse)
+        self.assertEqual(failed, ["WhatsApp isn't in front, so I've not sent it"])
+        self.assertEqual(len(spoken), 1)
+        self.assertIn("so I've not sent it", spoken[0])
+
+    def test_an_install_after_a_message_says_the_install(self):
+        siri.SENT_LINE[0] = "Sent to Mum."
+        siri.STAGED_INSTALL.update(ready={"action": "install", "name": "VLC", "version": "3.0.24", "id": "VideoLAN.VLC"},
+                                   until=time.time() + 60)
+        with mock.patch.object(siri.TASK_STORE, "create", lambda *a, **kw: 12):
+            failed, _, _, spoken = siri.run_plan({"steps": [{"do": "install_run"}], "say": ""}, None)
+        self.assertEqual(failed, [])
+        self.assertEqual(len(spoken), 1)
+        self.assertTrue(spoken[0].startswith("Installing VLC in the background, as task 12."), spoken)
+
+    def close(self, quit_app):
+        with mock.patch.object(siri.win, "quit_app", quit_app):
+            return siri.run_plan({"steps": [{"do": "close", "app": "Messages"}], "say": "Closed Messages."}, None)
+
+    def test_closing_an_app_that_isnt_running_isnt_said_to_be_done(self):
+        """"Closed Messages.", then "Hmm, that didn't work. Messages isn't running." (log, 12:10)"""
+        def not_running(app):
+            raise RuntimeError(f"{app.name} isn't running")
+        failed, _, _, spoken = self.close(not_running)
+        self.assertEqual(failed, ["Messages isn't running"])
+        self.assertNotIn("Closed Messages.", spoken)
+        self.assertEqual(len(spoken), 1)
+
+    def test_closing_is_said_once_it_has_closed(self):
+        order = []
+        with mock.patch.object(siri, "say", lambda line, notify: order.append(line)):
+            failed, _, _, spoken = self.close(lambda app: time.sleep(0.2) or order.append("closed"))
+        self.assertEqual(order, ["closed", "Closed Messages."])
+
+    def test_opening_is_still_said_while_it_opens(self):
+        order = []
+        with mock.patch.object(siri, "say", lambda line, notify: order.append(line)), \
+                mock.patch.object(siri.win, "open_app", lambda app: time.sleep(0.2) or order.append("opened")):
+            siri.run_plan({"steps": [{"do": "open", "app": "Notepad"}], "say": "Opening it now."}, None)
+        self.assertEqual(order, ["Opening it now.", "opened"])
 
 
 class Voice(unittest.TestCase):
