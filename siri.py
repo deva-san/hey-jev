@@ -1701,7 +1701,10 @@ def json_string_so_far(s):
             continue
         out.append(_ESCAPES.get(s[i + 1], s[i + 1]))
         i += 2
-    return "".join(out)
+    text = "".join(out)
+    if text and "\ud800" <= text[-1] <= "\udbff":
+        text = text[:-1]  # the first half of an emoji: wait for the second
+    return text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")  # an emoji's two halves made one
 
 
 class LiveSay:
@@ -2145,24 +2148,24 @@ def apply_learning(plan, said=()):
 # first for a background replace or remove (tools/memory_tool.py); this is the other way round.
 UNDO_PATH = os.path.join(win.APPDATA_DIR, "memories", ".undo.jsonl")
 UNDO_KEEP = 20
-UNDO_ASKED = re.compile(r"(?:undo|forget|unlearn|take back) (?:what|everything) you (?:just )?(?:learned|learnt|"
-                        r"saved|remembered|kept)(?: just now)?|unlearn that")
+UNDO_ASKED = re.compile(r"(?:undo|forget|unlearn|take back) (?:what|everything) you (?:just )?(?:learned|learnt)"
+                        r"(?: (?:just now|by yourself|on your own))?|unlearn that")
 
 
 def _memory_files():
     return {name: os.path.join(str(hermes_memory.get_memory_dir()), name) for name in ("USER.md", "MEMORY.md")}
 
 
+def _entries():
+    """{target: [entries]} of her memory as it is on disk now."""
+    store = hermes_memory.MemoryStore()
+    store.load_from_disk()
+    return {t: list(store._entries_for(t)) for t in ("user", "memory")}
+
+
 def journal_start():
-    """How her memory files are now, before a review or the day's summary changes them."""
-    out = {"files": {}, "skills": {}}
-    for name, path in _memory_files().items():
-        try:
-            with open(path, encoding="utf-8") as f:
-                out["files"][name] = f.read()
-        except OSError:
-            out["files"][name] = None
-    return out
+    """Her memory's entries now, before a review or the day's summary changes them."""
+    return {"entries": _entries(), "skills": {}}
 
 
 def journal_skill(before, name):
@@ -2174,10 +2177,12 @@ def journal_skill(before, name):
 
 
 def journal_end(before, said):
-    """Keeps what changed, for undo."""
-    now = journal_start()["files"]
-    files = {n: t for n, t in before["files"].items() if now.get(n) != t}
-    if not files and not before["skills"]:
+    """Keeps what changed, entry by entry, for undo: what was added and what was taken out."""
+    now = _entries()
+    changes = {t: {"added": [e for e in now[t] if e not in before["entries"][t]],
+                   "removed": [e for e in before["entries"][t] if e not in now[t]]} for t in now}
+    changes = {t: c for t, c in changes.items() if c["added"] or c["removed"]}
+    if not changes and not before["skills"]:
         return
     os.makedirs(os.path.dirname(UNDO_PATH), exist_ok=True)
     try:
@@ -2185,7 +2190,7 @@ def journal_end(before, said):
             kept = f.readlines()[-(UNDO_KEEP - 1):]
     except OSError:
         kept = []
-    kept.append(json.dumps({"when": round(time.time()), "files": files, "skills": before["skills"],
+    kept.append(json.dumps({"when": round(time.time()), "memory": changes, "skills": before["skills"],
                             "learned": [str(x) for x in said][:6]}, ensure_ascii=False) + "\n")
     with open(UNDO_PATH, "w", encoding="utf-8") as f:
         f.writelines(kept)
@@ -2201,18 +2206,23 @@ def undo_learning():
     if not lines:
         return None
     last = json.loads(lines[-1])
-    for name, text in last["files"].items():
-        path = _memory_files()[name]
-        if text is None:
-            with contextlib.suppress(OSError):
-                os.remove(path)
-        else:
-            hermes_memory._compat.atomic_write_text(path, text)
+    store = hermes_memory.MemoryStore()
+    store.load_from_disk()
+    for target, change in (last.get("memory") or {}).items():  # only what that review changed: the rest stays
+        for entry in change["added"]:
+            if entry in store._entries_for(target):
+                hermes_memory.memory_tool(store, "remove", target, old_text=entry)
+        for entry in change["removed"]:
+            if entry not in store._entries_for(target):
+                hermes_memory.memory_tool(store, "add", target, entry)
     for name, text in last["skills"].items():
         if text is None:
-            skills.delete_skill(name, really=True)
+            if skills.find_skill(name):
+                skills.delete_skill(name, really=True)
         elif skills.find_skill(name):
             hermes_memory._compat.atomic_write_text(skills.find_skill(name), text)
+        else:  # it was archived since: back as it was
+            skills.create_skill(name, text, agent_created=True)
     with open(UNDO_PATH, "w", encoding="utf-8") as f:
         f.writelines(lines[:-1])
     _skill_cache[0] = 0.0
@@ -2341,7 +2351,7 @@ TOOL_ATTR = re.compile(r"^[ \t]*(\w+)[ \t]*=[ \t]*(.*?)[ \t]*(?:</arg_value>)?[ 
 KNOWN_STEPS = {"open", "close", "minimise", "website", "youtube", "google", "media", "volume", "scroll", "keys", "type",
                "new_tab", "timer", "cancel_timers", "dark_mode", "lock", "sleep", "shutdown", "restart", "abort_shutdown",
                "dictate", "screen", "memory", "lookup", "recall", "web", "read", "weather", "news", "skill_view",
-               "skill", "research", "note", "open_notes", "command", "schedule", "install", "message", "contact",
+               "skill", "research", "note", "open_notes", "command", "schedule", "install", "message", "contact", "code",
                "task_control", "window", "open_folder", "screenshot", "message_send", "install_run", "task_queued",
                "click", "wait"}
 
@@ -2888,8 +2898,8 @@ def tell_task(task, line):
     """A task's result, back where it was asked from: the phone's chat, or out loud (Hermes' cron delivers a job's
     output to its origin the same way)."""
     chat = (task.get("payload") or {}).get("origin", {}).get("phone")
-    if chat is not None and PHONE["send"] is not None and PHONE["send"](chat, line):
-        return
+    if chat is not None and chat == telegram_bot.owner() and PHONE["send"] is not None and PHONE["send"](chat, line):
+        return  # only to the account paired now: after pairing another, an old task's result is said instead
     ANNOUNCE.put(line)
 
 
@@ -2981,6 +2991,10 @@ def task_worker():
     TASK_STORE.recover()
     print("[tasks: ready]")
     slow = threading.Event()  # set while a command, install or research runs
+    # Hermes' late rule is for work that came due while the PC was off or asleep, never for a task that only waited
+    # behind a long one: anything due before missed[0] was missed. Moved on when a look round the loop took far
+    # longer than its 30 s wait, which is the PC having slept
+    missed, last_look = [time.time()], [time.time()]
 
     def run(task):
         try:
@@ -2991,7 +3005,7 @@ def task_worker():
                     raise RuntimeError(reason)
                 if level == "confirm" and not payload.get("approved"):
                     TASK_STORE.wait_for_approval(task["id"], reason)
-                    ANNOUNCE.put(f"Task {task['id']} is waiting for approval: {task['description']}. Say approve task {task['id']}.")
+                    tell_task(task, f"Task {task['id']} is waiting for approval: {task['description']}. Say approve task {task['id']}.")
                     return
                 result = tasking.run_command(payload["command"], payload["cwd"], bool(payload.get("approved")),
                                              payload.get("timeout", 120), lambda: TASK_STORE.is_cancelled(task["id"]))
@@ -3000,26 +3014,26 @@ def task_worker():
                     error = f"exit code {result['exit_code']}" + (f": {output[-1000:]}" if output else "")
                     TASK_STORE.finish(task["id"], error=error)
                     if not TASK_STORE.is_cancelled(task["id"]):
-                        ANNOUNCE.put(_task_result_line(task, f"It exited with code {result['exit_code']}.", False))
+                        tell_task(task, _task_result_line(task, f"It exited with code {result['exit_code']}.", False))
                     return
                 TASK_STORE.finish(task["id"], output)
                 if not TASK_STORE.is_cancelled(task["id"]):
-                    ANNOUNCE.put(_task_result_line(task, "It finished successfully."))
+                    tell_task(task, _task_result_line(task, "It finished successfully."))
             elif kind == "install":
                 if not payload.get("approved"):  # only after a yes, or "approve task N" after a restart
                     TASK_STORE.wait_for_approval(task["id"], "Installing changes this PC; approve it to go ahead")
-                    ANNOUNCE.put(f"Task {task['id']} is waiting for approval: {task['description']}. "
+                    tell_task(task, f"Task {task['id']} is waiting for approval: {task['description']}. "
                                  f"Say approve task {task['id']}.")
                     return
                 ok, line, output = installer.install(payload, lambda: TASK_STORE.is_cancelled(task["id"]))
                 TASK_STORE.finish(task["id"], tasking.redact(output[-4000:]), "" if ok else line)
                 if not TASK_STORE.is_cancelled(task["id"]):
-                    ANNOUNCE.put(line)
+                    tell_task(task, line)
             elif kind == "reminder":
                 text = payload["text"]
                 TASK_STORE.finish(task["id"], text)
                 if not TASK_STORE.is_cancelled(task["id"]):
-                    late = time.time() - task["due"] > tasking.LATE  # the PC was off or asleep: say when it was for
+                    late = task.get("missed")  # the PC was off or asleep: say when it was for
                     tell_task(task, f"Reminder{' from ' + tasking.describe_due(task['due']) if late else ''}: {text}.")
             elif kind == "lookup":
                 what = payload["what"]
@@ -3053,8 +3067,7 @@ def task_worker():
                                                           "refused": job.refused, "snapshot": snap}),
                                   "" if ok else "it stopped before it finished")
                 if not TASK_STORE.is_cancelled(task["id"]):
-                    tell_task(task, _task_result_line(task, done + (f" To undo it: git stash apply {snap[:10]} after "
-                                                                    f"git checkout ." if snap else ""), ok))
+                    tell_task(task, _task_result_line(task, done + " " + coder.undo_line(snap), ok))
         except Exception as exc:
             error = tasking.redact(str(exc))
             if TASK_STORE.is_cancelled(task["id"]):
@@ -3063,7 +3076,7 @@ def task_worker():
             print(f"  task {task['id']} failed: {error}")
             TASK_STORE.finish(task["id"], error=error)
             if not TASK_STORE.is_cancelled(task["id"]):
-                ANNOUNCE.put(_task_result_line(task, "Open Tasks for the details.", False))
+                tell_task(task, _task_result_line(task, "Open Tasks for the details.", False))
 
     def run_slow(task):
         try:
@@ -3074,11 +3087,15 @@ def task_worker():
 
     while True:
         skip = SLOW_TASKS if slow.is_set() else ()
+        if time.time() - last_look[0] > 90:
+            missed[0] = time.time()
+        last_look[0] = time.time()
         task = TASK_STORE.claim_due(skip=skip)
         if task is None:
             TASK_STORE.wait(30, skip)
             continue
-        if task["kind"] in tasking.CHANGES_PC and not task["repeat"] and time.time() - task["due"] > tasking.LATE:
+        task["missed"] = task["due"] < missed[0] and time.time() - task["due"] > tasking.LATE
+        if task["kind"] in tasking.CHANGES_PC and not task["repeat"] and task["missed"]:
             # due while the PC was off or asleep: it doesn't run late by itself, it asks again
             TASK_STORE.wait_for_approval(task["id"], f"It was due {tasking.describe_due(task['due'])} and didn't run "
                                                      f"late; approve it to run it now")
@@ -3575,7 +3592,7 @@ def do_step(step):
             raise RuntimeError("That install isn't waiting any more, so I've not started it")
         verb = "Update" if ready["action"] == "upgrade" else "Install"
         task_id = TASK_STORE.create(f"{verb} {installer.label(ready['name'], ready.get('version'))}", "install",
-                                    {**ready, "approved": True})
+                                    {**ready, "approved": True, "origin": asked_from()})
         SENT_LINE[0] = (f"{'Updating' if verb == 'Update' else 'Installing'} {ready['name']} in the background, as "
                         f"task {task_id}. If Windows asks whether to allow it, say yes there. I'll tell you when it's done.")
         return f"task {task_id}"
@@ -3745,7 +3762,7 @@ def run_plan(plan, notify):
         emit(notify, "Doing it", describe(steps))
     if first and line:
         voice_error, line = talk(line), ""
-    worker = threading.Thread(target=work, daemon=True)
+    worker = threading.Thread(target=contextvars.copy_context().run, args=(work,), daemon=True)  # a phone turn's too
     worker.start()
     if last >= 0:  # "Sent to Ravi." is what the send managed, worked out once it has: a failure gets only its own line
         line = (line or default_line(steps)) if reported.wait(60) and not failed else ""
@@ -4167,7 +4184,7 @@ def tab_not_browser(plan, words):
     return {**plan, "say": confirm_question(risky), "confirm": mended} if risky else mended
 
 
-PENDING = {"plan": None, "until": 0.0, "soon": 0.0, "origin": "voice", "id": 0}  # a plan waiting on a yes or no,
+PENDING = {"plan": None, "until": 0.0, "soon": 0.0, "origin": "voice", "id": ""}  # a plan waiting on a yes or no,
 # see think. soon: see handle. origin: where it was asked, voice or phone: a yes at the PC can't answer a question
 # asked on the phone, or the other way round. id: which question, for the phone's buttons
 REPLY_TO = contextvars.ContextVar("reply_to", default=None)  # a turn from your phone: her lines go here, not out loud
@@ -4195,11 +4212,12 @@ YES_AROUND = rf"u+m+|u+h+|h+m+|e+r+|a+h+|o+h+|so|and|then|just|kindly|thanks|tha
 CLEAR_YES = (r"yes|yeah|yep|yup|sure|ok|okay|alright|all right|haan|avunu|of course|absolutely|definitely|do it|"
              r"do that|please do|go ahead|go on|go for it|correct|that's right|you can|why not")
 YES_VERBS = {"message_send": "send", "install_run": "install|update|upgrade|download",  # the question's own verb
+             "task_control": "start|run|begin",
              "shutdown": "shut(?: it| the (?:computer|pc|laptop))? down|turn (?:it )?off|power (?:it )?off",
              "restart": "restart|reboot", "close": "close|quit|exit", "minimise": "minimi[sz]e|hide", "lock": "lock",
              "sleep": "sleep", "type": "type|write", "keys": "press|hit", "screen": "look|check|see|have a look|take a look"}
 # a laugh, "right" or a bare "please" never send a message, install an app or shut down: those need a clear yes or the verb
-STRICT_YES = {"message_send", "install_run"} | POWER_STEPS
+STRICT_YES = {"message_send", "install_run", "task_control"} | POWER_STEPS  # task_control: a coding job, a command
 
 
 def said_yes(words, plan):
@@ -4328,7 +4346,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
                  for s in plan["confirm"].get("steps") or [] if s.get("do") in ("message_send", "install_run")]
         soon = time.time() + (PHONE_WAITS if origin() == "phone" else FOLLOW_UP + 8)
         PENDING.update(plan=plan["confirm"], soon=soon, until=max([soon] + waits), origin=origin(),
-                       id=PENDING["id"] + 1)
+                       id=hashlib.sha1(os.urandom(16)).hexdigest()[:12])  # an old button can't match a new question
     # what she said, also when it came from the screen: the next turn's "play the third one" needs what she saw
     kept = {"steps": plan.get("steps") or [],
             "say": (tidy(plan.get("say"), not plan.get("confirm")) if not failed else "") or " ".join(spoken)}
@@ -4629,7 +4647,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 said = words.strip()
                 if not gate and VOICE_LEARN.fullmatch(said):
                     result = voice_setup("learn")
-                elif VOICE_ONLY.fullmatch(said) or VOICE_ALL.fullmatch(said):
+                elif not gate and (VOICE_ONLY.fullmatch(said) or VOICE_ALL.fullmatch(said)):
                     result = voice_setup("only" if VOICE_ONLY.fullmatch(said) else "all")
                 elif not gate and UNDO_ASKED.fullmatch(plain(said)):
                     undone = undo_learning()
@@ -4809,7 +4827,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             listener.arm(WAKE_WINDOW)
             threading.Thread(target=win.chime, args=("wake",), daemon=True).start()
         else:
-            judged = for_me(what[1], what[2]) if what[2] else None  # said without her name: the decider's view
+            waiting = (PENDING["plan"] is not None and time.time() < PENDING["until"]) or asked_last()
+            # said without her name: the decider's view, but never on what may be the answer to her own question
+            judged = for_me(what[1], what[2]) if what[2] and not waiting else None
             if judged and judged[1] == "no" and decider.mode() == "on":
                 print(f"  (the decider is sure that wasn't for her, {judged[0]:.2f}: staying quiet)")
                 decider.log({"when": round(time.time()), "said": str(what[1]), "kind": str(what[2]),

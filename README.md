@@ -62,7 +62,11 @@ Limits: screenshots go to the model only for these asks, never otherwise. Her po
 
 Settings > Voice picks her voice from six Fish voices that speak well on the free model: Hannah (the default, friendly and clear), Sarah, Laura, Miku (an Indian accent), Assistant and Ethan. Try it plays a line. To use any other voice, paste its link from fish.audio there.
 
-To sound natural, her lines are plain, without the acted `[sighing]` and `[chuckling]` tags, and her usual replies are made once in Fish's steadiest mode and kept. New sentences stream in its quicker mode, which starts talking in about a second (1.0 to 1.1 s at the median here, about 1.7 s at p90), where the steady one took 4. If Fish hasn't started within about 5 seconds, she says the line in Windows' own voice instead.
+To sound natural, her lines are plain, without the acted `[sighing]` and `[chuckling]` tags, and her usual replies are made once in Fish's steadiest mode and kept. New sentences stream in its quicker mode, which starts talking in about a second (1.0 to 1.1 s at the median here, about 1.7 s at p90), where the steady one took 4. If Fish hasn't started within about 5 seconds, she says the line in her voice on this PC, or Windows' own if that isn't there.
+
+**Her voice on this PC.** Fish's free model is free only until 30 November 2026. "Jev on this PC" in Settings > Voice is Kyutai's Pocket TTS (code MIT, weights CC-BY 4.0), run by the sherpa-onnx she already uses for speech-to-text, in an Indian English voice from the VCTK recordings (speakers p248 and p251, CC-BY 4.0). Nothing leaves the PC, not even the words. Here it starts in about 0.5 to 0.8 s and makes speech three times faster than real time on 2 cores. It takes about 600 MB while loaded, so it loads when first needed (0.7 s) and is let go after 5 minutes unused (`pocket.py`). From 1 December a Fish voice turns into this one by itself. It's a 98 MB download (`sherpa-onnx-pocket-tts-int8-2026-01-26` from sherpa-onnx's releases) plus two short voice clips, in the models folder.
+
+**Faster answers.** The answer model's reply now streams. A plain answer (nothing to do, only something to say) is said a sentence at a time while the rest is still coming, each sentence's voice made while the one before plays, so there are no gaps. Anything with steps, anything without her name, and a task still waits for the whole plan, so every check sees it first. If she's still thinking 0.9 s in, about 1.2 s after you stopped, she says a cached "On it." or "Let me check.": a natural spoken filler makes a wait feel shorter, where a beep doesn't (arXiv 2507.22352). A second request goes out only if the first hasn't started writing, which spends less of the free models' limits. In a test of 34 real requests on 7 October, "Tokyo." for "what's the capital of Japan?" started 1.7 s after the request. Turning Ling's thinking off was tried and left off: no quicker, and it made more mistakes.
 
 ### Listening
 
@@ -110,6 +114,24 @@ Without her name, what she hears may be you talking to someone, a phone call, a 
 
 With her name and words she isn't sure of (under 70%), the model is told they may be wrong, so it asks what you'd like rather than guessing.
 
+### Only your voice
+
+Say "Hey Jev, learn my voice" (or Settings > Your voice > Learn) and read the 10 short sentences that come up in the popup. From then on each turn's speech gets a voice print, 512 numbers from 3D-Speaker's CAM++ model (30 MB, Apache 2.0, run by sherpa-onnx, 15 to 60 ms beside speech-to-text, so commands are no slower), and it's compared with yours. The recordings and prints stay in `%LOCALAPPDATA%\Hey Jev\voice`.
+
+For the first days she only learns: every turn is scored and logged and nobody is turned away. After 30 of your turns with her name she sets the levels from them, so 95% of your named turns pass, and switches on by herself and tells you. Then a turn that isn't your voice is let go without a sound, and someone else's words aren't kept as room talk for the model either. Her picture of your voice grows from turns that were plainly you, up to 40.
+
+- With her name, or straight after a bare "Hey Jev", a lower level; without it a higher one.
+- Under a second of speech can't be told apart: on this PC, Windows' voices saying "Hey Jev" matched Hari's own. So a short turn counts with her name or just after she spoke, and a short one said cold, like "pause" across the room, is let go: say "Jev, pause".
+- Right Alt and dictation aren't checked: the key press is you.
+- A recording of your own voice on a phone or TV will usually pass. Family members of the same sex and accent are the likeliest to slip through.
+- "Answer everyone" turns it off, "only answer me" back on. `python test_voice_id.py` scores your recordings against Windows' voices with the real model.
+
+### The decider
+
+A small sentence model (all-MiniLM-L6-v2, int8, 23 MB, Apache 2.0, about 15 ms on this PC, `decider.py`) gives a chance that words said without her name were said to her, from heads trained on her own past turns (`train_decider.py`: the 487 hand-labelled turns of 4 to 7 October and 1,411 room phrases, in `%LOCALAPPDATA%\Hey Jev\decider`). It answers in the same shape as TypeSafe's Jev and Laya (`/v1/systemone`), so either can be swapped in. Laya itself was looked at first: it needs PyTorch and a 0.6 to 0.8 GB model and took 0.3 to 0.75 s a question on this CPU.
+
+On turns it hadn't seen, below 0.07 it was right 95% of the time: it would have let 63 of 431 unnamed turns go without asking the model, 3 of them meant for her, and stopped 11 of the 44 times she answered room talk. So it starts in shadow mode, asked and logged, changing nothing. With Settings `"decider": "on"` it only lets go what it's sure isn't for her: it never drops a question she'd ask first and never clears the checks for words said without her name. It also picks which of her skills fit a request.
+
 ### Without her name
 
 Settings > Without her name > Answer without her name: no "Hey Jev" needed at any time. She listens to everything, and works out whether you were talking to her or to someone else:
@@ -132,6 +154,12 @@ She uses [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s own memo
 
 Everything you say to her, and what she did, is kept as well: in `history.db`, which she searches when you ask about the past, and as one Markdown file a day in `memories\days`. Once a day she writes a short summary at the end of the day before's file and saves up to 3 lasting facts from it. Clear conversations in the Memory tab deletes them, her memory stays.
 
+Searching the past works the way Hermes' session_search does, with its query cleaner copied in: every word first, then any of them, then pieces of words ("reerid" finds "careerid.in"), each of the best hits with the turns before and after it, and "after" for the last few days ("what did we decide last week").
+
+Hermes' code is copied into `hermes_memory\` at a pinned commit, listed in `UPSTREAM.json`, with only its imports changed (`_compat.py`): the memory store, threat scanner, skill usage tracking and curator whole, and named pieces of the rest. `python sync_hermes.py <a hermes-agent checkout>` shows what changed upstream and copies it over; then run the tests.
+
+**Fresh start and backups.** `python backup.py` zips her data to `%LOCALAPPDATA%\Hey Jev\Backups` (SQLite files copied with SQLite's own backup, Hermes' way). `--fresh` backs up first, then clears her memory, skills and old chats, keeping settings, contacts, the app list, the Dictionary, keys and models, and she says "Hey, I'm Jev, what can I do for you?" when she next starts. `--restore <zip>` puts a backup back. Quit her first: it won't touch anything while she runs. Her memory was started fresh this way on 7 October 2026.
+
 ### Personality
 
 How she talks is in `%APPDATA%\Hey Jev\SOUL.md`, the way Hermes Agent keeps its personality: calm, quick, warm, a little dry, a step ahead, in the spirit of JARVIS in the Iron Man films, written in our own words. She's direct the way Hermes is: a one-line answer for a small ask, a short report when a job's done, and no "Great question". Memory tab > Edit personality opens it. Change it, save, and she talks that way from the next thing you ask. Delete it to go back to the default. Like Hermes, a file that tries to take over her instructions is set aside for the default.
@@ -144,6 +172,13 @@ Skills are [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s: one `
 - "Work mode." Gmail opens in the Work profile and the volume goes to 30, in about a second.
 
 Her learning loop is a light version of Hermes'. After a turn worth learning from (you corrected her, something failed, a task took three steps or more, or every sixth turn), she looks back over the last few turns in the background and keeps what she learned. Room talk she overheard without her name and only answered doesn't count and isn't looked back over, and overheard words only go into her memory when they ask her to remember, forget or note something ("remember that ...", "keep in mind ..."), not when someone says "I remember ...". What she keeps is a fact about you, a skill for a task that took a few goes, or a word speech-to-text got wrong ("no, I said Zostel"), which goes into your Dictionary. A word only goes in if what was written sounds like it and you said the right one after: a look back once made "I'm interpreting" then "it was accept" into interpreting -> Accept, which would have changed every "interpreting" from then on. Most looks back find nothing. The Memory tab lists her skills with what you say for them, and Forget this deletes one. Untick Learn as she goes in Settings to stop it.
+
+With Hermes' parts brought in:
+
+- A correction ("no, I said ...", "that's wrong") is looked at straight away, with what you said as the focus, so she has it right next time. The look back carries Hermes' own rules: one fact in one place, a skill is the procedure and its pitfalls, and never keep "X doesn't work" or a one-off task.
+- Skills are written in Hermes' format, the description cut to its 60 letters. The ones that fit a request are written out in full in what she's asked, so the model doesn't spend a round trip loading them.
+- Hermes' curator runs once a week, after 2 quiet hours. A skill she wrote herself and hasn't used in 14 days is marked stale; after 30 it's archived to `skills\.archive`, never deleted. Skills you taught her are never touched.
+- What a look back or a day's summary changed is kept as it was before. "Forget what you just learned" puts it back.
 
 ### The internet
 
@@ -236,6 +271,28 @@ Examples:
 Commands run through hidden, non-interactive PowerShell with an existing working folder, at most 120 seconds and 64 KB of stored output. Read-only diagnostics, `git status/diff/log`, and declared test/build/lint/typecheck commands run automatically. Anything that can install, write, delete, move, commit, push, stop a process or change the system waits in **waiting approval**; approve it by voice or in the Tasks tab. Disk formatting, broad forced deletion, registry/security/Defender/firewall changes, restart/shutdown, encoded or nested PowerShell, downloads, credentials/private keys, `.env`, forced Git operations, elevation and similar commands are blocked even if asked. Output is redacted, kept locally and shown in Tasks; Jev only speaks success, exit code or that details are there.
 
 Scheduled work is deliberately limited to reminders, PC lookups, research and guarded commands. It cannot send messages or email, type/click later, buy, pay, publish, delete, change accounts or security, because those need a person present to verify the target and result.
+
+Hermes' cron rules: a command, install or coding job that comes due more than 2 minutes late, as after the PC was off or asleep, doesn't run late by itself, it asks again. A late reminder says when it was for. "Every weekday at 9" works. A repeating check that finds the same as last time stays quiet. And a task's result goes back where it was asked from, your phone included.
+
+**Coding jobs.** "Add a dark mode toggle to the settings page in `C:\path\to\project`." She asks first, and on a yes the OpenCode CLI already on this PC does it in the background, driven over ACP the way Hermes drives a coding agent (`coder.py`), and she tells you when it's done. It's kept on a short leash, because OpenCode lets an agent edit and run commands without asking:
+
+- A setting that outranks the project's own turns every edit and command into a request to her, and turns off web fetching and other folders.
+- Only a git project folder, never a system or app-data one, snapshotted first so it can be undone (she says how).
+- Edits in the folder go ahead. Commands follow the rules above: blocked ones refused, read-only ones run, anything else asked on your phone with buttons when the job came from there, else refused and listed in her report.
+- Only a free model, or it doesn't start.
+
+### Your phone (Telegram)
+
+Talk to her from your phone. Make a bot with [@BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token), paste its token in Keys (it's kept in Credential Manager), press Settings > Phone > Pair, send `/start` to your bot, and type the code it sends back into that box on the PC. That proves you have both. It uses `python-telegram-bot` 22.8, the library Hermes Agent pins (`telegram_bot.py`), and Hermes' pairing rules: 8 letters, kept only hashed, an hour to use it, locked for an hour after 5 wrong codes.
+
+- Until you pair, it doesn't listen at all. After, only your account counts, and you're told once about anyone else who tries.
+- It asks Telegram for messages, so nothing on the PC is open to the internet. Only private chats, messages and button taps.
+- Anything sent while the PC was off or asleep, or over 2 minutes ago, is dropped, never run late.
+- A message goes through the same turn as voice, and her answer comes back to the chat.
+- A risky step comes back as a question with Yes and No buttons. Only a tap answers it, within 5 minutes. A typed yes, or a yes said at the PC, doesn't, and a question asked at the PC can't be answered from the phone.
+- Voice notes are written out by the speech-to-text on this PC. They do pass through Telegram's servers, as every Telegram voice note does.
+- The token never reaches the log, even inside the library's own errors. Her heads-ups skip the bot's own messages.
+- It only works while the PC is on.
 
 ### Heads-ups
 
@@ -389,7 +446,9 @@ $0. The answer model is a free Kilo or OpenCode Zen model, the voice is Fish's f
 - `opencode.py` OpenCode Zen and Kilo Gateway, free models only
 - `tasks.py` the SQLite task queue, local schedule parser, command policy, hidden PowerShell runner, timeout, output cap and redaction
 - `messaging.py` WhatsApp and Telegram: the contacts book, the app links that type without sending, and the checks before and after a yes
-- `hermes_memory\` Hermes Agent's memory store and threat scanner (MIT), and `skills.py`, its skills cut down to what Hey Jev needs, with routines added. `history.py` the conversations and day files
+- `hermes_memory\` Hermes Agent's code (MIT) at the commit in `UPSTREAM.json`: its memory store, threat scanner, skill usage and curator whole, and pieces in `hermes_bits.py`, `gateway_bits.py` and `acp_bits.py`, with `_compat.py` standing in for the rest of Hermes; `skills.py`, its skills cut down to what Hey Jev needs, with routines added. `sync_hermes.py` brings them up to a newer Hermes. `history.py` the conversations and day files
+- `voiceid.py` only your voice, `decider.py` and `train_decider.py` the decider, `pocket.py` her voice on this PC
+- `telegram_bot.py` your phone, `coder.py` coding jobs through OpenCode, `backup.py` backups and a fresh start
 - `web.py` the internet: Wikipedia, DuckDuckGo's instant answers, Google News, reading a page, the weather
 - `watch.py` heads-ups: the Windows notification list, battery, drive, CPU, RAM and the internet
 - `sysinfo.py` what the PC is doing, read only: drives, battery, CPU, RAM, network, uptime

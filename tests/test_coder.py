@@ -131,6 +131,40 @@ class Steps(unittest.TestCase):
             self.assertTrue(store.get(task_id)["payload"]["approved"])
 
 
+class ReviewFixes(unittest.TestCase):
+    def test_a_code_step_survives_parsing(self):
+        plan = siri.parse_plan(r'{"steps": [{"do": "code", "task": "add a test", "cwd": "C:\\p"}], "say": ""}')
+        self.assertEqual([s["do"] for s in plan["steps"]], ["code"])
+
+    def test_starting_a_job_needs_a_clear_yes(self):
+        plan = {"steps": [{"do": "task_control", "action": "approve", "id": 4}]}
+        for said, ok in (("yes", True), ("yes, start it", True), ("go ahead", True), ("right", False),
+                         ("fine", False)):
+            self.assertIs(siri.said_yes(said, plan), ok, said)
+
+    def test_never_her_own_folder_or_a_bare_one(self):
+        for folder in ("", ".", None, "projects\\x", coder.HERE):
+            with self.assertRaises(RuntimeError, msg=folder):
+                coder.check_folder(folder)
+
+    def test_the_undo_line_fits_the_snapshot(self):
+        self.assertIn("stash apply abc", coder.undo_line("stash:abcdef"))
+        self.assertNotIn("stash", coder.undo_line("head:abcdef"))
+        self.assertEqual(coder.undo_line(""), "")
+
+    def test_a_weekday_schedule_never_starts_on_a_weekend(self):
+        import datetime as dt
+        saturday_8am = dt.datetime(2026, 10, 10, 8, 0).timestamp()
+        due, spec = tasks.normalize_schedule("9 AM", "every weekday at 9", now=saturday_8am)
+        self.assertEqual(dt.datetime.fromtimestamp(due).weekday(), 0)
+
+    def test_results_only_go_to_the_account_paired_now(self):
+        said, sent = [], []
+        with mock.patch.object(siri, "ANNOUNCE", mock.Mock(put=said.append)),                 mock.patch.dict(siri.PHONE, {"send": lambda chat, line: sent.append(chat) or True}),                 mock.patch.dict(siri.settings._load(), {"telegram_owner": 8}):
+            siri.tell_task({"payload": {"origin": {"phone": 7}}}, "done")
+        self.assertEqual((said, sent), (["done"], []))
+
+
 class Late(unittest.TestCase):
     def run_worker(self, store, said, until):
         worker = threading.Thread(target=siri.task_worker, daemon=True)
@@ -159,7 +193,7 @@ class Late(unittest.TestCase):
         store = StopsWorker(os.path.join(tempfile.mkdtemp(prefix="heyjev-worker-"), "tasks.db"))
         said, sent = queue.Queue(), queue.Queue()
         with mock.patch.object(siri, "TASK_STORE", store), mock.patch.object(siri, "ANNOUNCE", said), \
-                mock.patch.dict(siri.PHONE, {"send": lambda chat, line: sent.put((chat, line)) or True}):
+                mock.patch.dict(siri.PHONE, {"send": lambda chat, line: sent.put((chat, line)) or True}),                 mock.patch.dict(siri.settings._load(), {"telegram_owner": 7}):
             store.create("Remind me", "reminder", {"text": "stretch", "origin": {"phone": 7}})
             got = self.run_worker(store, said, lambda: sent.get(timeout=5))
         self.assertEqual(got, (7, "Reminder: stretch."))

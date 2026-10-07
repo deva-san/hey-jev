@@ -113,7 +113,7 @@ def search(query="", day=None, limit=12, after=None, around=1):
             if words:
                 every = _sanitize_fts5_query(" ".join(words))  # each word stays a word, nothing read as FTS5 syntax
                 every = " ".join(f'"{w}"' for w in every.replace('"', " ").split())
-                prefix = lambda q: re.sub(r'"([^"]+)"', r'""*', q) if q else q  # "lof" finds "lofi"
+                prefix = lambda q: re.sub(r'"([^"]+)"', r'"\1"*', q) if q else q  # "lof" finds "lofi"
                 for table, match in (("turns", prefix(every)), ("turns", prefix(_or_relaxed_query(every))),
                                      ("turns_tri", " OR ".join(f'"{w}"' for w in words if len(w) >= 3))):
                     if not match:

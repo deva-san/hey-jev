@@ -46,14 +46,20 @@ def opencode_exe():
     return None
 
 
+HERE = os.path.dirname(os.path.abspath(__file__))  # her own code: never a coding job's folder
+
+
 def check_folder(folder):
     """The folder it may work in, as a full path, or RuntimeError saying why not."""
-    folder = os.path.abspath(os.path.expandvars(str(folder or "")))
+    raw = os.path.expandvars(str(folder or "")).strip()
+    if not raw or not os.path.isabs(raw):  # "" or "." would be wherever she runs from: her own code
+        raise RuntimeError("Say the project's full folder")
+    folder = os.path.abspath(raw)
     low = folder.lower()
     if not os.path.isdir(folder):
         raise RuntimeError("Say which project folder it's for")
     if folder.rstrip("\\") in (os.path.expanduser("~"), os.path.splitdrive(folder)[0]) or \
-            any(part in low + "\\" for part in NOT_HERE):
+            any(part in low + "\\" for part in NOT_HERE) or os.path.normcase(folder) == os.path.normcase(HERE):
         raise RuntimeError("That folder's off limits for a coding job")
     if not os.path.isdir(os.path.join(folder, ".git")):
         raise RuntimeError("Coding jobs only work in a git project, so whatever it does can be undone")
@@ -61,10 +67,22 @@ def check_folder(folder):
 
 
 def snapshot(folder):
-    """A git commit of the folder as it is now, changing nothing (git stash create), or HEAD if it's clean."""
+    """The folder as it is now, changing nothing: "stash:<commit>" of its uncommitted work (git stash create), or
+    "head:<commit>" if there's none."""
     run = lambda *args: subprocess.run(["git", "-C", folder, *args], capture_output=True, text=True, timeout=30,
                                        creationflags=CREATE_NO_WINDOW).stdout.strip()
-    return run("stash", "create") or run("rev-parse", "HEAD")
+    stash = run("stash", "create")
+    return f"stash:{stash}" if stash else f"head:{run('rev-parse', 'HEAD')}"
+
+
+def undo_line(snap):
+    """How to put the folder back as it was before the job."""
+    kind, _, commit = str(snap or "").partition(":")
+    if kind == "stash" and commit:
+        return f"To undo it: git checkout . then git stash apply {commit[:10]}, in that folder."
+    if kind == "head" and commit:
+        return "To undo it: git checkout . in that folder, and delete any files it added."
+    return ""
 
 
 def free_model(session):

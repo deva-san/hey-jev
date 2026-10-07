@@ -37,6 +37,8 @@ class JsonSoFar(unittest.TestCase):
         self.assertEqual(siri.json_string_so_far('caf\\u00e9 and'), "café and")
         self.assertEqual(siri.json_string_so_far('half an escape \\'), "half an escape ")
         self.assertEqual(siri.json_string_so_far('half a \\u00e'), "half a ")
+        self.assertEqual(siri.json_string_so_far('smile \\ud83d\\ude00 ok'), "smile \U0001f600 ok")
+        self.assertEqual(siri.json_string_so_far('smile \\ud83d'), "smile ")  # half an emoji waits for the rest
 
 
 class Live(unittest.TestCase):

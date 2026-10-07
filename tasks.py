@@ -351,6 +351,9 @@ def normalize_schedule(when=None, repeat=None, now=None):
             due = target.timestamp()
     if due is None and spec:
         due = next_due(now_dt.timestamp(), spec, now_dt.timestamp())
+    if spec and spec.get("kind") == "weekdays":
+        while dt.datetime.fromtimestamp(due).weekday() >= 5:  # "every weekday at 9" said on a Saturday
+            due += 86400
     if due is None:
         raise ValueError("I couldn't understand when")
     return float(due), spec

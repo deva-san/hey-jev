@@ -170,10 +170,27 @@ class Undo(Home):
         self.assertIsNone(skills.find_skill("tea"))
         self.assertIsNone(siri.undo_learning())  # nothing more
 
+    def test_undo_keeps_what_was_added_since(self):
+        store = hermes_memory.MemoryStore()
+        hermes_memory.memory_tool(store, "add", "user", "Lives in Hyderabad.")
+        with mock.patch.object(siri, "MEMORY", store), mock.patch.object(siri, "learn_words", lambda w, s: "words"):
+            siri.apply_learning({"memory": [{"action": "add", "target": "user", "content": "Likes chai."}]})
+        hermes_memory.memory_tool(hermes_memory.MemoryStore(), "add", "user", "Sister is Priya.")  # added since
+        self.assertTrue(siri.undo_learning())
+        store = hermes_memory.MemoryStore()
+        store.load_from_disk()
+        self.assertEqual(store._entries_for("user"), ["Lives in Hyderabad.", "Sister is Priya."])
+
+    def test_whole_words_are_found_first(self):
+        history.add("installing the new printer driver", "", "")
+        self.assertEqual([h["you"] for h in history.search("install printer")],
+                         ["installing the new printer driver"])  # stemmed, every word: the first pass
+
     def test_what_you_say_to_undo_it(self):
         for said in ("forget what you just learned", "undo what you learned", "unlearn that"):
             self.assertTrue(siri.UNDO_ASKED.fullmatch(siri.plain(said)), said)
         self.assertFalse(siri.UNDO_ASKED.fullmatch(siri.plain("undo that")))  # that's Ctrl+Z
+        self.assertFalse(siri.UNDO_ASKED.fullmatch(siri.plain("forget what you just remembered")))  # the model's job
 
 
 class Corrections(unittest.TestCase):
