@@ -3282,9 +3282,11 @@ def asked_last(within=FOLLOW_UP + 20):
 
 
 # How a model says out loud that the words weren't for her, instead of {"to": "others"}: 20 times on 6 and 7 October,
-# "That sounded like he was talking to someone else in the room", "That was to others, Hari, not to me"
-NOT_FOR_ME = re.compile(r"\b(?:someone else|to others|(?:not|wasn't|was not|isn't|is not) (?:meant |a request |said )?"
-                        r"(?:for|to) me|(?:talking|speaking) to (?:someone|a person|people|each other))\b", re.I)
+# "That sounded like he was talking to someone else in the room", "That was to others, Hari, not to me". Not an answer
+# that only mentions someone else's: "It's someone else's number", "That's not for me to judge, but ..."
+NOT_FOR_ME = re.compile(r"\b(?:(?:for|to|like) someone else\b(?!')|to others|(?:not|wasn't|was not|isn't|is not) "
+                        r"(?:meant |a request |said )?(?:for|to) me\b(?! to\b)|(?:talking|speaking) to (?:someone|a person|"
+                        r"people|each other))\b", re.I)
 
 
 def let_go(plan):

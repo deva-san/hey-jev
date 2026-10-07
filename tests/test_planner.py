@@ -285,7 +285,8 @@ class RoomTalk(unittest.TestCase):
                      "That was to others, Hari \u2014 people talking near the PC, not to me.",
                      "That sounded like someone talking to a person nearby, not a request for me.",
                      "It\u2019s probably to someone nearby, not to me. The sentence is too garbled to summarise.",
-                     "That's for someone else, Harish \u2014 not me."):
+                     "That's for someone else, Harish \u2014 not me.", "That sounded like someone else, not me.",
+                     "That sounded like someone speaking nearby, not a request for me."):
             self.assertTrue(siri.let_go({"steps": [], "say": said}), said)
 
     def test_an_answer_is_not_let_go(self):
@@ -295,6 +296,9 @@ class RoomTalk(unittest.TestCase):
                                           "stayed quiet. What's up?"},
                      {"steps": [], "say": "Because you hadn't called me by name first, and I wasn't sure whether you "
                                           "were speaking to me or talking to someone else."},
+                     {"steps": [], "say": "That's not for me to judge, but it got good reviews."},
+                     {"steps": [], "say": "It's someone else's number, not one I know."},
+                     {"steps": [], "say": "You can share it with someone else."},
                      {"steps": [{"do": "open", "app": "Notepad"}], "say": "Opening it for someone else? Sure."}):
             self.assertIsNone(siri.let_go(plan), plan)
 
