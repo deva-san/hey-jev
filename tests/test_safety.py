@@ -179,13 +179,13 @@ class AskedContact(unittest.TestCase):
 
     def test_talk_isnt_taken_for_a_username(self):
         for said in ("Cancel that", "Never mind", "I don't know", "Can you call Ramesh", "Okay", "Thank you",
-                     "It's done", "That is wrong"):
+                     "It's done", "That is wrong", "Pause", "Next.", "Louder"):
             self.assertIsNone(self.reply("telegram", said), said)
             self.assertEqual(messaging.read_contacts(), {}, said)
 
     def test_a_username_on_its_own_is_saved(self):
         for said, handle in (("@bittu_01", "bittu_01"), ("bittu_01.", "bittu_01"), ("It's @bittu_01", "bittu_01"),
-                             ("Their username is @bittu_01", "bittu_01")):
+                             ("Their username is @bittu_01", "bittu_01"), ("@Pause", "Pause")):
             self.assertEqual(self.reply("telegram", said)["say"], "staged", said)
             self.assertEqual(messaging.read_contacts()["bittu"]["telegram"], handle, said)
 

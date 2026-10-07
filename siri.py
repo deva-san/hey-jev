@@ -851,9 +851,9 @@ def finish_asked(words):
         # "98765 43210": WhatsApp would read it as +98. Under 7 digits isn't a number at all: "Two." or "10 30"
         elif len(digits) >= 7 and (len(digits) <= 10 or digits[0] == "0"):
             return make_plan(say="I need the country code too. Say the number again, starting with plus.")
-    else:
+    else:  # nor "Pause" or "Next" said to her while music plays, unless it comes with its @
         handle = said.lstrip("@") if re.fullmatch(r"@?\w+", said) and not side_talk(said) \
-            and not NO.fullmatch(plain(said)) else ""
+            and not NO.fullmatch(plain(said)) and not COMMAND.fullmatch(said) else ""
     try:
         saved = messaging.save_contact(alias, app, handle)
     except (ValueError, RuntimeError):
