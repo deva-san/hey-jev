@@ -3915,6 +3915,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         """What she noticed (see watch.Watcher): messages every few seconds, since WhatsApp takes its notification
         away again within moments, the rest every 20 seconds, and finished background work straight away."""
         next_look, next_message = time.time() + 20, time.time() + watch.MESSAGE_LOOK
+        later = []  # what came up during a dictation, told once it stops
         while True:
             time.sleep(2)
             lines = []
@@ -3937,9 +3938,11 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                         lines += watcher.check(False, win.front_app_name())
                     except Exception as exc:
                         print(f"  heads-up check failed: {exc!r}")
-            for line in lines:
-                if line and not rec.dictating:  # never over a dictation
-                    tell(line, "heads-up")
+            later += [line for line in lines if line]
+            # never over a dictation, but once it stops: a reminder or a finished task that came up during one was
+            # taken off the queue and lost, the reminder already marked done
+            while later and not rec.dictating:
+                tell(later.pop(0), "heads-up")
 
     start_timer_loop(timer_done)
     threading.Thread(target=task_worker, daemon=True).start()

@@ -502,7 +502,7 @@ class NotOverYou(Case):
         a.listener.session = object()  # you're half way through a sentence
         with mock.patch.object(siri, "say", lambda line, notify: said.append(line)), \
                 mock.patch.object(siri.history, "add", lambda *args: None), \
-                mock.patch.object(siri.win, "chime", lambda name: None):
+                mock.patch.object(siri.win, "chime", lambda name: None), contextlib.redirect_stdout(a.out):
             import threading
             t = threading.Thread(target=start, args=(a,), daemon=True)
             t.start()
@@ -537,6 +537,32 @@ class NotOverYou(Case):
             a.var("finish_dictation")()
         self.assertLess(time.time() - start, 1.0)
         self.assertEqual(said, ["Your pasta is ready."])
+
+
+# --------------------------------------------------------------------------- A8/A43: heads-ups during a dictation
+class DuringDictation(Case):
+    def test_reminders_that_come_up_while_dictating_are_told_after(self):
+        a = self.assistant()
+        told, sleeps = [], [0]
+
+        def sleep(secs):
+            sleeps[0] += 1
+            if sleeps[0] == 2:
+                a.rec.dictating = False  # "stop transcribing"
+            elif sleeps[0] > 2:
+                raise Stop
+        a.put("tell", lambda line, said_for: told.append(line))
+        fake_time = types.SimpleNamespace(time=time.time, sleep=sleep, strftime=time.strftime)
+        while not siri.ANNOUNCE.empty():
+            siri.ANNOUNCE.get()
+        siri.ANNOUNCE.put("Reminder: call Mum.")
+        a.rec.dictating = True
+        with mock.patch.object(siri, "time", fake_time):
+            try:
+                a.threads["heads_ups"]()
+            except Stop:
+                pass
+        self.assertEqual(told, ["Reminder: call Mum."])
 
 
 if __name__ == "__main__":
