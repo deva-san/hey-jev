@@ -391,6 +391,14 @@ class YesOrNo(Turn):
         self.assertAlmostEqual(siri.PENDING["until"], siri.STAGED["until"], delta=1)
         self.assertGreater(siri.PENDING["until"] - time.time(), 80)
 
+    def test_a_question_that_ends_with_a_note_keeps_the_window_open(self):
+        """"... Send it? I can't read Telegram back, so check it on screen." ends in a full stop, so a message asked for
+        without her name came back as just a chat: no window for the yes, and a yes without her name was let go."""
+        unread = lambda app, contact, text: {**staged(app, contact, text), "checked": False, "say": "Telegram"}
+        with mock.patch.object(siri.messaging, "prepare", unread):
+            self.assertIs(siri.handle("Message Mum on Telegram: hi", gate="cold"), True)
+        self.assertTrue(self.said[0].endswith("so check it on screen."), self.said)
+
 
 def tripwire_quit(app):
     raise AssertionError(f"quit {app.name}")

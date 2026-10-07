@@ -3420,8 +3420,11 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         return "dictate"
     if playing_after([s for s in kept["steps"] if isinstance(s, dict) and s.get("do")]):
         return "playing"
-    # only an answer to words without her name, and she didn't ask anything back: don't keep the conversation going
-    return "chat" if gate and not kept["steps"] and not kept["say"].rstrip().endswith("?") else True
+    # only an answer to words without her name, and she didn't ask anything back: don't keep the conversation going.
+    # A yes or no she's waiting on counts, though her line ends "... Send it? I can't read Signal, so check that's the
+    # right chat before I do.": the window stayed shut, and the yes without her name was let go
+    return "chat" if gate and not kept["steps"] and not plan.get("confirm") and \
+        not kept["say"].rstrip().endswith("?") else True
 
 
 MIC = [None]  # the Recorder, so the mic pauses only while she talks, see say
