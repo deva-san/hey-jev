@@ -640,7 +640,7 @@ def _play(m):
     refused here."""
     q = m["q"]
     if re.match(r"(?:(?:the|a|this|that) )?(?:first|next|previous|last|top|second|third|fourth|fifth|same|video|song|"
-                r"play|it)\b", q) or " and " in f" {q} " or \
+                r"play|it(?!'))\b", q) or " and " in f" {q} " or \
             re.search(r"\b(?:spotify|vlc|jiosaavn|saavn|gaana|wynk|apple music|amazon music|soundcloud)\b", q):
         return None  # "play the first video", "play X and open Y" and Spotify need the model
     if re.match(r"with\b|.* (?:tomorrow|tonight|today|later|this (?:morning|afternoon|evening|weekend)|after (?:school|"

@@ -97,6 +97,7 @@ class Play(Routing):
     def test_a_song_still_plays(self):
         self.assertEqual(self.steps("play Arijit Singh songs"),
                          [{"do": "youtube", "query": "arijit singh songs", "play": True}])
+        self.assertEqual(self.steps("play It's My Life"), [{"do": "youtube", "query": "it's my life", "play": True}])
 
 
 class RoomTalk(Routing):
