@@ -99,9 +99,14 @@ APPS = {k: v if isinstance(v, str) else v["app"] for k, v in _apps.items()}
 APP_SAY = {k: v if isinstance(v, str) else v.get("say", v["app"]) for k, v in _apps.items()}
 # "exe" in apps.json: the program its windows run as, for when the name alone doesn't find them (VS Code is Code.exe)
 APP_SPECS = {k: win.App(APPS[k], [] if isinstance(v, str) else v.get("exe", [])) for k, v in _apps.items()}
-# "heard_as" in apps.json: things speech-to-text writes instead of the app name, swapped back before anything else
-HEARD_AS = [(re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(v["heard_as"], key=len, reverse=True))) + r")\b", re.I), APP_SAY[k])
-            for k, v in _apps.items() if isinstance(v, dict) and v.get("heard_as")]
+# "heard_as" in apps.json: things speech-to-text writes instead of the app name, swapped back before anything else,
+# but only where an app is named: said on its own, or after open, close, switch to and the like. Anywhere else they
+# are someone's words: "Message Mum: starting keto from Monday" staged "starting Kiro", "type I'm prone to typos"
+# typed "I'm Google Chrome to typos" and "explain this code" reached the model as "explain VS Code"
+APP_SLOT = (r"(^\W*(?=(?:{0})\W*$)|\b(?:open|launch|switch to|go to|bring up|close|quit|exit|kill|minimi[sz]e|hide)\s+"
+            r"(?:the\s+|my\s+)?)(?:{0})\b")
+HEARD_AS = [(re.compile(APP_SLOT.format("|".join(map(re.escape, sorted(v["heard_as"], key=len, reverse=True)))), re.I),
+             APP_SAY[k]) for k, v in _apps.items() if isinstance(v, dict) and v.get("heard_as")]
 BROWSERS = tuple(k for k in ("chrome", "edge", "brave", "firefox") if k in APPS)
 BROWSER_PROGIDS = {"chrome": "chromehtml", "edge": "msedgehtm", "brave": "bravehtml", "firefox": "firefoxurl"}
 SPOTIFY = APP_SPECS.get("spotify") or win.App("Spotify", "Spotify.exe")
@@ -241,12 +246,16 @@ def route(text, kind, open_mic=None):
 
 # Without her name, a phrase only goes to the answer model if it could be a request: a word that asks for something,
 # a question, or an app or site. The rest of what's said in the room ("Okay, so it is gonna rain later", "pass the
-# salt", once plain() has taken "can you" off) is let go on this PC, and the model decides on the rest (COLD_NOTE)
+# salt", once plain() has taken "can you" off) is let go on this PC, and the model decides on the rest (COLD_NOTE).
+# The 7 October log let these go as room talk: "Shut down the computer", "Download and install VLC", "Okay, copy
+# that link", "Clear notification". The two lines from "shut ?down" are for those
 ASKING = (r"open|close|clone|quit|exit|play|pause|stop|resume|search|google|look up|find|check|scroll|turn|start|"
           r"launch|show|type|write|tell me|remind|remember|research|read|click|go to|go back|forward|refresh|reload|"
           r"run|do that|command|terminal|powershell|task|schedule|approve|cancel|every|daily|weekly|"
           r"lock|mute|unmute|volume|louder|quieter|softer|next|skip|previous|timer|alarm|note|tab|new term|new tap|"
           r"watch|song|music|video|full ?screen|dark mode|light mode|minimi[sz]e|summari[sz]e|transcrib\w*|dictat\w*|"
+          r"shut ?down|restart|reboot|install|uninstall|download|update|upgrade|copy|paste|undo|redo|maximi[sz]e|"
+          r"screenshot|notifications?|clear (?:it|that|this|all|everything|the|my)|online|"
           r"what|what's|whats|who|who's|how|where|when|why|which|weather|news|battery|ram|cpu|storage|drive|internet|"
           r"wi-?fi|screen|window|page")
 _asking = [None]
@@ -540,9 +549,12 @@ SITES = {  # "open youtube": what she calls it, and where it is
     "twitter": ("X", "https://x.com"),
 }
 DOMAIN = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|in|io|ai|dev|co|me|tv|app|gov|edu|uk)(?:/\S*)?")
+# "let's" stays before "play": "let's play cricket tomorrow" is talk in the room, so without her name it isn't taken
+# as a direct "play ..." (see handle), and with it fast_intent still plays "let's play some music"
 FILLER = re.compile(r"^(?:please|pls|kindly|can you|could you|would you|will you|can u|just|now|ok|okay|so|alright|"
                     r"yes|yeah|yep|"
-                    r"um+|uh+|hmm+|er+|and|then|also|hey|yo|go ahead and|i want you to|i'd like you to|let's|lets)\s+"
+                    r"um+|uh+|hmm+|er+|and|then|also|hey|yo|go ahead and|i want you to|i'd like you to|"
+                    r"let's(?! play\b)|lets(?! play\b))\s+"
                     r"|\s+(?:please|now|for me|thanks|thank you|okay|ok|right now|quickly)$")
 
 
@@ -624,10 +636,16 @@ def _bare(thing):
 
 
 def _play(m):
+    """A YouTube play for "play X", or None for the model. fast_intent asks this too, so it doesn't play what's
+    refused here."""
     q = m["q"]
-    if re.match(r"(?:(?:the|a|this|that) )?(?:first|next|previous|last|top|second|same|video|song|play)\b", q) \
-            or " and " in f" {q} " or "spotify" in q:
+    if re.match(r"(?:(?:the|a|this|that) )?(?:first|next|previous|last|top|second|third|fourth|fifth|same|video|song|"
+                r"play|it(?!'))\b", q) or " and " in f" {q} " or \
+            re.search(r"\b(?:spotify|vlc|jiosaavn|saavn|gaana|wynk|apple music|amazon music|soundcloud)\b", q):
         return None  # "play the first video", "play X and open Y" and Spotify need the model
+    if re.match(r"with\b|.* (?:tomorrow|tonight|today|later|this (?:morning|afternoon|evening|weekend)|after (?:school|"
+                r"work|lunch|dinner))$", q):
+        return None  # "play with the dog", "let's play cricket tomorrow": talk about playing, not a video
     return make_plan([{"do": "youtube", "query": q, "play": True}], say_line("youtube_play"))
 
 
@@ -659,8 +677,10 @@ def wants_spoken(query, said=""):
 def _search(where):
     def make(m):
         q = m["q"]
-        if " and " in f" {q} ":
-            return None
+        if " and " in f" {q} " or re.match(r"look up (?:at|there|there's|here|over|it's)\b", m.string):
+            return None  # "look up, there's a bird on the roof" was searched for
+        if m.string in BARE_APPS:
+            return None  # "Google Chrome" on its own, as heard_as makes "Prone." too, is the app: it searched "chrome"
         if where == "google" and wants_spoken(q, m.string):
             print("  a question: the model answers it out loud")
             return None
@@ -668,6 +688,12 @@ def _search(where):
         return make_plan([{"do": dest, "query": q, "play": False}],
                          say_line("youtube_results" if dest == "youtube" else "google"))
     return make
+
+
+def _volume(m):
+    """"volume 30", and in words, "set the volume to thirty", which went to the model."""
+    n = "100" if m["n"] in ("hundred", "a hundred", "one hundred") else _digits(m["n"])
+    return make_plan([{"do": "volume", "to": int(n)}]) if n.isdigit() else None
 
 
 def _scroll(m):
@@ -785,15 +811,18 @@ def stage_message(app, contact, text):
 STAGED_INSTALL = {"ready": None, "until": 0.0}
 INSTALL_WAIT = 90.0
 INSTALL_APP = r"(?P<app>[\w .+&'#-]{2,40}?)"
+# Only an install said in so many words: with "get me", "set up" and "download" too, "get me the latest news" was
+# looked up in winget for 12 s and offered NewsLeecher, and "get me the weather in Delhi" never got the weather.
+# The model plans an install for the rest ("get me Spotify"), and that's looked up and asked about the same way.
 INSTALL_PATTERNS = [re.compile(p, re.I) for p in (
     rf"(?:please\s+)?(?:can you\s+|could you\s+)?(?:download and install|download & install|download and set up|install|"
-    rf"reinstall|set up|get me|download)\s+(?:the\s+)?(?:latest\s+(?:version\s+of\s+)?|newest\s+(?:version\s+of\s+)?)?"
+    rf"reinstall)\s+(?:the\s+)?(?:latest\s+(?:version\s+of\s+)?|newest\s+(?:version\s+of\s+)?)?"
     rf"{INSTALL_APP}(?:\s+(?:app|application|software|program))?(?:\s+(?:on|for|to|in)\s+(?:this|my|the)\s+"
     rf"(?:pc|laptop|computer|system))?(?:\s+for me)?(?:\s+please)?",
     rf"(?:please\s+)?(?:update|upgrade)\s+(?:the\s+)?{INSTALL_APP}(?:\s+(?:app|application|software|program))?"
     rf"(?:\s+to the latest(?: version)?)?(?:\s+(?:on|for)\s+(?:this|my)\s+(?:pc|laptop|computer))?",
 )]
-# "download this video", "set up a meeting", "get me a coffee": not apps
+# "download and install this video", "update the meeting", "update me": not apps
 NOT_AN_APP = re.compile(r"^(?:this|that|it|these|those|a|an|the|my|some|all|every|everything|me|video|file|pdf|image|"
                         r"photo|song|music|meeting|reminder|timer|alarm|call|coffee|water|updates?|windows)\b", re.I)
 
@@ -889,6 +918,11 @@ def _teach_search(m):
 
 def _message(m):
     g = m.groupdict()
+    # "text Mum on WhatsApp tomorrow at 9 saying hi" staged "tomorrow at 9 saying hi" to send now: messages are
+    # never sent later (README), so say so rather than send it now. Not "that's": "tonight that's fine" is the message
+    later = rf"(?:{WHEN}|tomorrow|tonight|later|on \w+day|every \w+|in (?:an?|\d+|\w+) (?:minutes?|hours?))"
+    if re.match(rf"{later}(?:,? {later})*,? (?:saying|that(?!')|to say)\b", g["text"], re.I):
+        return make_plan(say="I can only send a message now, with your yes, not later.")
     return stage_message(g["app"], g["who"], g["text"])
 
 
@@ -950,10 +984,12 @@ QUICK = [(re.compile(p), make) for p, make in (
      lambda m: make_plan(say=task_summary(True))),
     (r"(?:cancel|stop) task (?P<id>\d+)", _task_control("cancel")),
     (r"approve task (?P<id>\d+)", _task_control("approve")),
-    # the weather, straight from Open-Meteo
-    (r"(?:(?:what(?:'s| is)|how(?:'s| is)|tell me|check|give me)(?: the)? )?(?:weather|temperature|forecast)"
-     r"(?: like| forecast| going to be like| gonna be like)?(?: (?:in|at|for) (?P<place>[a-z][a-z .'-]*?))?"
-     r"(?: (?P<day>today|tomorrow|tonight|now|right now|outside|(?:the )?day after tomorrow))?"
+    # the weather, straight from Open-Meteo. "for tomorrow" is a day, not a place: "get me the weather for tomorrow"
+    # looked up a town called tomorrow, and "for the day after tomorrow" one called "the"
+    (r"(?:(?:what(?:'s| is)|how(?:'s| is)|tell me|check|give me|get me)(?: the)? )?(?:weather|temperature|forecast)"
+     r"(?: like| forecast| going to be like| gonna be like)?(?: (?:in|at|for) "
+     r"(?!(?:the )?(?:today|tomorrow|tonight|day after)\b)(?P<place>[a-z][a-z .'-]*?))?"
+     r"(?: (?:for )?(?P<day>today|tomorrow|tonight|now|right now|outside|(?:the )?day after tomorrow))?"
      r"(?: (?:in|at|for) (?P<place2>[a-z][a-z .'-]*?))?(?: like)?", _weather),
     (r"(?:is it|will it|is it going to|is it gonna)(?: be)? (?:rain|raining|hot|cold|sunny)(?: (?P<day>today|tomorrow|"
      r"tonight|now|outside))?(?: (?:in|at) (?P<place>[a-z][a-z .'-]*?))?", _weather),
@@ -980,8 +1016,8 @@ QUICK = [(re.compile(p), make) for p, make in (
     (r"mute(?: it| sound| audio| everything| the (?:volume|sound|audio))?",
      lambda m: make_plan([{"do": "volume", "to": "mute"}], say_line("volume_mute"))),
     (r"unmute(?: it| the (?:volume|sound|audio))?", lambda m: make_plan([{"do": "volume", "to": "unmute"}], say_line("volume_unmute"))),
-    (r"(?:(?:set|turn|put|change) )?(?:the )?volume (?:to |at )?(?P<n>\d{1,3})(?: percent|%)?",
-     lambda m: make_plan([{"do": "volume", "to": int(m["n"])}])),
+    (r"(?:(?:set|turn|put|change) )?(?:the )?volume (?:to |at )?(?P<n>\d{1,3}|[a-z]+(?: (?!percent)[a-z]+)?)"
+     r"(?: percent|%)?", _volume),
     # scrolling and the browser
     (r"(?:scroll(?: (?:up|down))?(?: (?:a bit|a little|a lot|more|again|some))?(?: (?:up|down))? ?)+", _scroll),
     (r"(?:scroll|go|jump)(?: all the way)?(?: up| down)? to the (?:top|bottom)(?: of (?:the|this) page)?|page (?:up|down)", _scroll),
@@ -1024,7 +1060,12 @@ def sys_intent(t):
     those and can look the same things up itself."""
     if len(t.split()) > 14 or re.search(r"\b(?:open|remind|timer|alarm|turn|switch|enable|disable|settings?|saver)\b"
                                         r"|\b(?:and|then) (?:play|close|search|google|go|show|start|launch|set|type|"
-                                        r"write|tell|send)\b", t):
+                                        r"write|tell|send)\b"
+                                        # a schedule: "check my C drive space every Monday at 9 AM" was answered
+                                        # now and the schedule dropped. An hour, "at 10", not "at 5%" or "at 50"
+                                        r"|\b(?:every|daily|weekly|hourly|tomorrow|tonight|at (?:1[0-2]|\d)(?!\d| ?%| "
+                                        r"percent)|at (?:noon|midnight))\b"
+                                        r"|\d ?[ap]m\b", t):
         return None
     drive = re.search(r"\b([a-h]|see|sea)[ -](?:drive|disk)\b", t)
     usage = r"\b(?:usage|use|using|used|load|busy|percent|how much|check|status|free|left|available)\b"
@@ -1047,8 +1088,9 @@ def sys_intent(t):
                  r"(?:on|running|up)", t):
         found.append(("uptime", None))
     if re.search(r"\b(?:internet|wi-?fi|network|ip address|my ip)\b", t) and re.search(
-            r"\b(?:connected|connection|working|online|which|what|what's|check|status|name|am i|is)\b", t):
-        found.append(("network", None))
+            r"\b(?:connected|connection|working|online|which|what|what's|check|status|name|am i|is)\b", t) or \
+            re.fullmatch(r"(?:am i|are we|is (?:the |my |this )?(?:pc|computer|laptop)) (?:online|connected)", t):
+        found.append(("network", None))  # "am I online?" too, a README example that went to the model
     if re.search(r"\b(?:specs|specifications|system info\w*)\b", t):
         found.append(("system", None))
     return found[0] if len(found) == 1 else None
@@ -1069,12 +1111,27 @@ def routines():
     return [(plain(t), s) for s in _skill_cache[1] if s["plan"] for t in s["triggers"]]
 
 
+# After type/write/enter, words that ask for something to be written rather than being the text: the README's own
+# "write a short email saying I'll be late" and "open Notepad and write today's date" typed those words, so did
+# "type my email address" and "write down what I say", and "enter full screen" typed "full screen"
+NOT_LITERAL = re.compile(
+    r"(?:(?:me|us|him|her|them)\s+)?(?:(?:a|an|the|some|my|our|your|this|that|another)\s+(?:[\w'-]+\s+){0,3}?)?"
+    r"(?:e-?mails?|mails?|messages?|repl(?:y|ies)|responses?|poems?|letters?|notes?|posts?|tweets?|captions?|"
+    r"summary|drafts?|story|stories|essays?|paragraphs?|bio|reviews?|jokes?|haikus?|speech|articles?|blog|lists?|"
+    r"code|functions?|scripts?|programs?)\b"
+    r"|(?:today's|tomorrow's|yesterday's|the|my|our|your|current|this)\s+(?:[\w'-]+\s+){0,2}?(?:date|time|day|"
+    r"address|name|number|location|birthday|password|pin|username|details)\b"
+    r"|(?:(?:this|that|it)\s+)?down\b|what i(?:'m| am)? (?:say|said|saying)\b|everything i say\b|after me\b"
+    r"|full ?screen\b|.*\bmode$", re.I)
+
+
 def _literal(t):
     """A literal type/write command, optional Enter/Tab afterwards. No model changes the text. Requests to compose
-    something (a mail, poem, reply) go to the model instead."""
-    m = re.fullmatch(r"(?:type|write|enter)\s+(.+?)(?:\s+and\s+(?:press|hit)\s+(enter|tab))?", t, re.I)
-    if not m or re.match(r"(?:me\s+)?(?:a|an|the)\s+(?:mail|email|message|reply|poem|letter|note|post|summary|draft)\b",
-                         m[1], re.I):
+    something (a mail, poem, reply) or fill something in (today's date) go to the model instead."""
+    # "then press Enter" too: local_compound passes the joins on as said
+    m = re.fullmatch(r"(?:type|write|enter)\s+(.+?)(?:\s+(?:and then|then|and)\s+(?:press|hit)\s+(enter|tab))?",
+                     t, re.I)
+    if not m or NOT_LITERAL.match(m[1]):
         return None
     steps = [{"do": "type", "text": m[1]}]
     if m[2]:
@@ -1106,13 +1163,14 @@ def local_compound(t):
         app = known_app(new[1])
         return app and make_plan([{"do": "open", "app": app[0]}, {"do": "keys", "keys": "ctrl+n"},
                                   {"do": "type", "text": new[2]}])
-    parts = re.split(r"\s+(?:and then|then|and)\s+", t, flags=re.I)
+    bits = re.split(r"(\s+(?:and then|then|and)\s+)", t, flags=re.I)  # the joins kept, for the text to type
+    parts = bits[::2]
     if len(parts) < 2:
         return _literal(t)
     steps, i = [], 0
     while i < len(parts):
         if re.match(r"(?:type|write|enter)\b", parts[i], re.I):
-            clause = " and ".join(parts[i:])
+            clause = "".join(bits[2 * i:])  # as said: "type salt then pepper" typed "salt and pepper"
             got = _literal(clause)
             if not got:
                 return None
@@ -1128,8 +1186,11 @@ def local_compound(t):
 
 
 MESSAGE_PATTERNS = [(re.compile(p, re.I), make) for p, make in (
-    # who she is messaging, on which app, and the words: all three said out loud, none of them guessed
-    (rf"(?:message|text|send a message to)\s+(?P<who>{WHO})\s+on\s+(?P<app>{APP_WORDS})\s*[:,]?\s+(?P<text>.+)", _message),
+    # who she is messaging, on which app, and the words: all three said out loud, none of them guessed. "saying" or
+    # "that" before the words isn't part of them: "message Mum on WhatsApp saying I'm running late" typed "saying".
+    # Nor are the commas speech-to-text puts around "saying", and in "that that was fun" the second "that" is
+    (rf"(?:message|text|send a message to)\s+(?P<who>{WHO})\s+on\s+(?P<app>{APP_WORDS})(?:,?\s+(?:saying|to say|"
+     rf"and say|telling (?:him|her|them))(?:\s+that)?[:,]?\s+|\s*[:,]\s*|\s+that\s+|\s+)(?P<text>.+)", _message),
     (rf"(?:send|say)\s+(?P<text>.+?)\s+to\s+(?P<who>{WHO})\s+on\s+(?P<app>{APP_WORDS})", _message),
     (rf"on\s+(?P<app>{APP_WORDS})\s*,?\s+to\s+(?P<who>{WHO})\s+send\s+(?P<text>.+)", _message),
     (rf"(?P<app>{APP_WORDS})\s+(?P<who>{WHO})\s*[:,]\s*(?P<text>.+)", _message),
@@ -1244,24 +1305,34 @@ def as_said(lowered, words):
     return m.group(0).strip() if m else lowered
 
 
-def quick(words):
-    """A plan for a simple command without asking the model, so it happens straight away. None if it isn't one."""
-    plan = _quick(words)
+def quick(words, gate=False):
+    """A plan for a simple command without asking the model, so it happens straight away. None if it isn't one.
+    gate as in handle: "cold" for words said without her name, which may not be for her."""
+    plan = _quick(words, gate)
     for step in (plan or {}).get("steps") or []:
         if step.get("do") == "type" and step.get("text"):
             step["text"] = as_said(step["text"], words)
     return plan
 
 
-def _quick(words):
+def _quick(words, gate=False):
     answered = finish_asked(words)  # the number or username she just asked for
     if answered:
         return answered
-    message = direct_message(words)
+    t = plain(words)
+    # a routine she learned: runs as it was taught, before anything else, so no shortcut takes its words ("enter
+    # focus mode" typed "focus mode", "get me ready for work" looked up an app called "ready for work")
+    for phrase, skill in routines():
+        if phrase and t == phrase:
+            print(f"  routine: {skill['dir']}")
+            return make_plan(skill["plan"]["steps"], skill["plan"]["say"])
+    # Without her name the model decides it was for her first: staging opens the chat with the words typed in
+    # ("WhatsApp Mum: running late" from across the room), and an install sits through winget searches
+    message = direct_message(words) if gate != "cold" else None
     if message:
         print("  local message")
         return message
-    install = direct_install(words)
+    install = direct_install(words) if gate != "cold" else None
     if install:
         print("  local install")
         return install
@@ -1269,21 +1340,16 @@ def _quick(words):
     if background:
         print("  local background task")
         return background
-    t = plain(words)
     local = local_compound(t)
     if local:
         print("  local compound")
         return local
-    if SECOND_COMMAND.search(t) and not TYPED_WORDS.match(t) and not any(t == phrase for phrase, _ in routines()):
+    if SECOND_COMMAND.search(t) and not TYPED_WORDS.match(t):
         # two things asked for, and the compound above couldn't do both on this PC: the one-command shortcuts below
         # would do the first and drop the rest ("set a timer for five minutes and play music" set only the timer,
         # "play lo-fi music and open Notepad" searched YouTube for all of it), so the model plans both
         print("  two requests, for the model")
         return None
-    for phrase, skill in routines():  # a routine she learned: runs as it was taught, before anything else
-        if phrase and t == phrase:
-            print(f"  routine: {skill['dir']}")
-            return make_plan(skill["plan"]["steps"], skill["plan"]["say"])
     for rx, make in QUICK:
         m = rx.fullmatch(t)
         if m:
@@ -3135,7 +3201,7 @@ def snap_verbs(text):
 def fix_names(text):
     text = snap_verbs(text)
     for rx, name in HEARD_AS:
-        text = rx.sub(name, text)
+        text = rx.sub(lambda m: m[1] + name, text)  # the verb before it kept
     return text
 
 
@@ -3236,10 +3302,12 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
             return False
         plan = make_plan(say=say_line("go_ahead"))  # "yes" to her "Anything you'd like me to do?"
     else:
-        plan = quick(words)
+        plan = quick(words, gate)
         # Always-on mic: typing, Enter, closing apps and other consequential changes need the model to decide the
-        # words were for her first. Safe opens, sites, volume, media, scrolling and tab navigation stay instant.
-        if plan and gate == "cold" and any(s.get("do") in {"type", "close", "minimise", "lock", "sleep", "dark_mode", "screen"} | POWER_STEPS
+        # words were for her first. Safe opens, sites, volume, media, scrolling and tab navigation stay instant, and
+        # so do shutdown and restart, which always get a yes or no first (below): asked instead, the model said it
+        # couldn't shut the PC down
+        if plan and gate == "cold" and any(s.get("do") in {"type", "close", "minimise", "lock", "sleep", "dark_mode", "screen"}
                 or (s.get("do") == "keys" and combo(s.get("keys")) not in SAFE_KEYS) for s in plan["steps"]):
             plan = None
         if plan and gate and any(s["do"] in ("youtube", "google") for s in plan["steps"]) and not \

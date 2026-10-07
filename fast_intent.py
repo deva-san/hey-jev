@@ -198,17 +198,18 @@ class FastIntentMatcher:
         if re.fullmatch(r"reset zoom|normal zoom", t):
             return self.siri.make_plan([{"do": "keys", "keys": "ctrl+0"}])
 
-        if re.fullmatch(r"(?:make it |toggle |exit )?full ?screen|full ?screen mode", t):
+        if re.fullmatch(r"(?:make it |toggle |exit |enter |go )?full ?screen(?: mode)?", t):
             return self.siri.make_plan([{"do": "keys", "keys": "f" if self.siri.focused_on("youtube") else "f11"}])
 
         # -------------------------------------------------------------
         # 3. Scrolling
         # -------------------------------------------------------------
         m_scroll = re.fullmatch(r"(?:scroll|go|jump)(?: all the way)? (up|down|to the top|to the bottom|to top|to bottom)"
-                               r"(?: (?P<times>\d+)\s+times?)?(?: (?:a bit|a little|a lot|more|fast))?", t)
-        if m_scroll:
+                               r"(?: (?P<times>\w+(?: \w+)?)\s+times?| (?P<twice>twice))?(?: (?:a bit|a little|a lot|more|fast))?", t)
+        said = self.siri._digits(m_scroll["times"]) if m_scroll and m_scroll["times"] else ""  # "three times" too
+        if m_scroll and (said.isdigit() or not said):
             direction = "top" if "top" in m_scroll[1] else "bottom" if "bottom" in m_scroll[1] else m_scroll[1]
-            times = int(m_scroll.group("times")) if m_scroll.group("times") else (3 if "lot" in t else 1)
+            times = int(said) if said else 2 if m_scroll["twice"] else (3 if "lot" in t else 1)
             return self.siri.make_plan([{"do": "scroll", "direction": direction, "times": times}])
 
         # -------------------------------------------------------------
@@ -267,8 +268,8 @@ class FastIntentMatcher:
                 return self.siri.make_plan([{"do": "youtube", "query": query, "play": True, "rank": rank}], self.siri.say_line("youtube_play"))
 
         m_yt_play = re.fullmatch(r"play (?P<q>.+?)(?: on youtube)?", t)
-        if m_yt_play and not re.match(r"(?:first|second|third|next|previous|last|video|song|it|this)\b", m_yt_play["q"]):
-            return self.siri.make_plan([{"do": "youtube", "query": m_yt_play["q"], "play": True}], self.siri.say_line("youtube_play"))
+        if m_yt_play:  # siri's own rule, so what it leaves to the model isn't searched for word for word here:
+            return self.siri._play(m_yt_play)  # "play shape of you on Spotify", "play the second song"
 
         m_yt_search = re.fullmatch(r"(?:search|look up|find)(?: for)? (?P<q>.+?) on youtube|(?:search )?youtube for (?P<q2>.+)", t)
         if m_yt_search:
@@ -276,12 +277,8 @@ class FastIntentMatcher:
             return self.siri.make_plan([{"do": "youtube", "query": q, "play": False}], self.siri.say_line("youtube_results"))
 
         m_google = re.fullmatch(r"(?:google|search(?: google)?(?: for)?|look up) (?P<q>.+?)(?: on google)?", t)
-        if m_google and self.siri.wants_spoken(m_google["q"], spoken):
-            return None  # a question: the model looks it up and answers out loud
-        if m_google:
-            dest = "youtube" if self.siri.focused_on("youtube") else "google"
-            return self.siri.make_plan([{"do": dest, "query": m_google["q"], "play": False}],
-                                       self.siri.say_line("youtube_results" if dest == "youtube" else "google"))
+        if m_google:  # siri's own rule: a question is answered out loud, and "look up, there's a bird" isn't searched
+            return self.siri._search("google")(m_google)
 
         # -------------------------------------------------------------
         # 7. System Power, Lock, Themes
@@ -292,10 +289,13 @@ class FastIntentMatcher:
         if re.fullmatch(r"(?:put (?:(?:the|my) )?(?:pc|laptop|computer) to )?sleep(?: mode)?", t):
             return self.siri.make_plan([{"do": "sleep"}], self.siri.say_line("system_sleep"))
 
-        if re.fullmatch(r"(?:shut ?down|turn off|power off)(?: (?:the|my))?(?: computer| pc| laptop| it)?", t):
+        # handle asks before either. "Shut the laptop down" and "switch off the computer" too, but not a bare "turn
+        # off" or "restart it", which could be anything
+        if re.fullmatch(r"(?:shut ?down|turn off|switch off|power (?:off|down))(?: (?:the|my|this))? (?:computer|pc|laptop|"
+                        r"system)|shut ?down|power off|shut (?:the |my |this )?(?:computer|pc|laptop|system) down", t):
             return self.siri.make_plan([{"do": "shutdown"}], self.siri.say_line("system_shutdown"))
 
-        if re.fullmatch(r"(?:reboot|restart)(?: (?:the|my))?(?: computer| pc| laptop| it)?", t):
+        if re.fullmatch(r"reboot|(?:reboot|restart)(?: (?:the|my|this))? (?:computer|pc|laptop|system)", t):
             return self.siri.make_plan([{"do": "restart"}], self.siri.say_line("system_restart"))
 
         if re.fullmatch(r"(?:cancel|abort|stop|don'?t)(?: (?:the|my))? (?:shut ?down|restart)(?: (?:the|my))?(?: computer| pc| laptop)?", t):
@@ -350,16 +350,14 @@ class FastIntentMatcher:
             if app_raw in self.siri.SITES:
                 s_info = self.siri.SITES[app_raw]
                 return self.siri.make_plan([{"do": "website", "url": s_info[1]}], self.siri.say_line("site_open", site=s_info[0]))
-            # Special Windows folders and tools
+            # Special Windows folders and tools. Known folders by their shell: names, since they can be moved off the
+            # user folder: on this PC Downloads is on D:, so ~\Downloads didn't exist and ~\Pictures was an old one
             if re.fullmatch(r"downloads(?: folder)?", app_raw):
-                import os
-                return self.siri.make_plan([{"do": "open_folder", "path": os.path.expanduser(r"~\Downloads")}], self.siri.say_line("app_open"))
+                return self.siri.make_plan([{"do": "open_folder", "path": "shell:Downloads"}], self.siri.say_line("app_open"))
             if re.fullmatch(r"documents(?: folder)?", app_raw):
-                import os
-                return self.siri.make_plan([{"do": "open_folder", "path": os.path.expanduser(r"~\Documents")}], self.siri.say_line("app_open"))
+                return self.siri.make_plan([{"do": "open_folder", "path": "shell:Personal"}], self.siri.say_line("app_open"))
             if re.fullmatch(r"pictures(?: folder)?", app_raw):
-                import os
-                return self.siri.make_plan([{"do": "open_folder", "path": os.path.expanduser(r"~\Pictures")}], self.siri.say_line("app_open"))
+                return self.siri.make_plan([{"do": "open_folder", "path": "shell:My Pictures"}], self.siri.say_line("app_open"))
             if re.fullmatch(r"(?:the )?recycle bin", app_raw):
                 return self.siri.make_plan([{"do": "open_folder", "path": "shell:RecycleBinFolder"}], self.siri.say_line("app_open"))
             if re.fullmatch(r"(?:file )?explorer|my files", app_raw):
@@ -431,16 +429,13 @@ class FastIntentMatcher:
             return self.siri.make_plan([{"do": "open_folder", "path": "shell:MyComputerFolder"}])
 
         if re.fullmatch(r"(?:open|go to|show)(?: my)? downloads(?: folder)?", t):
-            import os
-            return self.siri.make_plan([{"do": "open_folder", "path": os.path.expanduser(r"~\Downloads")}], self.siri.say_line("app_open"))
+            return self.siri.make_plan([{"do": "open_folder", "path": "shell:Downloads"}], self.siri.say_line("app_open"))
 
         if re.fullmatch(r"(?:open|go to|show)(?: my)? documents(?: folder)?", t):
-            import os
-            return self.siri.make_plan([{"do": "open_folder", "path": os.path.expanduser(r"~\Documents")}], self.siri.say_line("app_open"))
+            return self.siri.make_plan([{"do": "open_folder", "path": "shell:Personal"}], self.siri.say_line("app_open"))
 
         if re.fullmatch(r"(?:open|go to|show)(?: my)? pictures(?: folder)?", t):
-            import os
-            return self.siri.make_plan([{"do": "open_folder", "path": os.path.expanduser(r"~\Pictures")}], self.siri.say_line("app_open"))
+            return self.siri.make_plan([{"do": "open_folder", "path": "shell:My Pictures"}], self.siri.say_line("app_open"))
 
         if re.fullmatch(r"(?:open|go to|show)(?: the)? recycle bin", t):
             return self.siri.make_plan([{"do": "open_folder", "path": "shell:RecycleBinFolder"}], self.siri.say_line("app_open"))
@@ -493,7 +488,7 @@ class FastIntentMatcher:
         # 16. Literal Typing
         # -------------------------------------------------------------
         m_type = re.fullmatch(r"(?:type|write|enter) (?P<txt>.+?)(?: and (?:press|hit) (?P<key>enter|tab))?", t)
-        if m_type and not re.match(r"(?:me\s+)?(?:a|an|the)\s+(?:mail|email|message|reply|poem|letter|note|post|summary|draft)\b", m_type["txt"], re.I):
+        if m_type and not self.siri.NOT_LITERAL.match(m_type["txt"]):  # "a short email ...": the model writes it
             # the words as you said them, capitals and punctuation kept: t is lowercased and stripped for matching
             said = re.search(r"\b(?:type|write|enter)\s+(?P<txt>.+?)(?:\s+and\s+(?:press|hit)\s+(?:enter|tab))?[\s.]*$",
                              spoken.strip(), re.I)
