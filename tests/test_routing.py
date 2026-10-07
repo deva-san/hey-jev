@@ -140,5 +140,16 @@ class Routines(Routing):
         self.assertEqual(self.installs, [])
 
 
+class Messages(Routing):
+    """A21: the message is the words after "saying" or "that"."""
+
+    def test_saying_and_that_arent_part_of_the_message(self):
+        self.quick("message Mum on WhatsApp saying I'm running late")
+        self.quick("text Dad on Telegram that I'll call later")
+        self.quick("Message Mum on WhatsApp: that was fun")
+        self.assertEqual(self.messages, [("WhatsApp", "Mum", "I'm running late"), ("Telegram", "Dad", "I'll call later"),
+                                         ("WhatsApp", "Mum", "that was fun")])
+
+
 if __name__ == "__main__":
     unittest.main()
