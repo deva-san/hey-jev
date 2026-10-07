@@ -431,6 +431,24 @@ def project_test_command(cwd):
     return None
 
 
+def declared(exe, args, cwd):
+    """True when the project in cwd declares exactly this test, build or lint command. They run the project's own
+    code, so "npm test" or pytest in any folder ran whatever was there, and could be scheduled to repeat."""
+    exe = re.sub(r"\.(?:exe|cmd)$", "", exe)
+    if exe == "npm":
+        try:
+            with open(os.path.join(cwd, "package.json"), encoding="utf-8") as f:
+                scripts = json.load(f).get("scripts") or {}
+        except (OSError, ValueError, AttributeError):
+            return False
+        return (args == ["test"] or len(args) == 2 and args[0] == "run" and
+                args[1] in {"test", "build", "lint", "typecheck", "check"}) and args[-1] in scripts
+    test = (project_test_command(cwd) or "").split()
+    if exe in ("python", "py", "pytest"):
+        return test[-2:] == ["-m", "pytest"] and args == ([] if exe == "pytest" else ["-m", "pytest"])
+    return test[:1] == [exe] and (args == test[1:] or args in (["build"], ["check"]))  # dotnet, go and cargo
+
+
 def command_policy(command, cwd=None):
     """('allow'|'confirm'|'block', reason). Conservative by design; an unknown simple command needs approval."""
     command = " ".join(str(command or "").split())
@@ -456,20 +474,17 @@ def command_policy(command, cwd=None):
     args = [w.lower() for w in words[1:]]
     if CONFIRM.search(command) or re.search(r"[;&|<>]", command):
         return "confirm", "it can change files, programs, or the system"
-    if exe in ("git", "git.exe") and args and args[0] in {"status", "diff", "log", "show", "rev-parse", "ls-files", "remote"}:
+    # --output writes a file, and "git remote add" or "set-url" change the repository
+    if exe in ("git", "git.exe") and (args[:1] == ["remote"] and args[1:] in ([], ["-v"]) or args and args[0] in
+            {"status", "diff", "log", "show", "rev-parse", "ls-files"} and not any(a.startswith("--ou") for a in args)):
         return "allow", "read-only Git"
-    if exe in ("npm", "npm.cmd") and (args[:1] == ["test"] or len(args) >= 2 and args[0] == "run" and args[1] in
-                                       {"test", "build", "lint", "typecheck", "check"} or args == ["--version"]):
-        return "allow", "project verification"
+    if exe in ("npm", "npm.cmd", "node", "node.exe") and args == ["--version"] or \
+            exe in ("dotnet", "dotnet.exe") and args[:1] in (["--info"], ["--version"]):
+        return "allow", "version check"
     if exe in ("python", "python.exe", "py", "py.exe") and (args and (args[0] in {"--version", "-v"} or
-            len(args) >= 2 and args[0] == "-m" and args[1] in {"pytest", "unittest", "compileall", "py_compile"})):
+            len(args) >= 2 and args[0] == "-m" and args[1] in {"compileall", "py_compile"})):
         return "allow", "Python verification"
-    if exe in ("pytest", "pytest.exe") or exe in ("node", "node.exe") and args == ["--version"]:
-        return "allow", "project verification"
-    if exe in ("dotnet", "dotnet.exe") and args and args[0] in {"test", "build", "--info", "--version"}:
-        return "allow", "project verification"
-    if (exe in ("go", "go.exe") and args[:1] == ["test"]) or \
-            (exe in ("cargo", "cargo.exe") and args[:1] in (["test"], ["check"])):
+    if cwd is not None and declared(exe, args, os.path.abspath(os.path.expandvars(str(cwd)))):
         return "allow", "project verification"
     if exe in READ_CMDLETS or exe in {"dir", "where", "where.exe", "systeminfo", "whoami", "hostname"}:
         return "allow", "read-only diagnostic"

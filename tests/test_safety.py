@@ -315,6 +315,13 @@ class CommandPolicy(unittest.TestCase):
         os.mkdir(os.path.join(self.folder, ".ssh"))
         self.assertEqual(self.level("Get-Content config", os.path.join(self.folder, ".ssh")), "block")
 
+    def test_git_that_writes_waits_for_approval(self):
+        for command in (r"git diff --output=C:\temp\x.txt", r"git log --output=C:\temp\x.txt", "git diff --out=x.txt",
+                        "git remote add origin https://x.example/r.git", "git remote set-url origin x"):
+            self.assertEqual(self.level(command), "confirm", command)
+        for command in ("git status", "git diff", "git log --oneline -5", "git remote -v", "git remote"):
+            self.assertEqual(self.level(command), "allow", command)
+
     def test_broad_deletion_and_system_changes_are_blocked(self):
         for command in ("ri -r x", "ri -Recurse -Force x", r"rm C:\x -Recurse -Force", "Remove-Item -Recu -Fo x",
                         "Remove-Item -r x", "del /q /s x", "rd /s /q x", "erase /s x", "gci -Recurse | ri",
@@ -326,6 +333,27 @@ class CommandPolicy(unittest.TestCase):
             self.assertEqual(self.level(command), "block", command)
         for command in ("Remove-Item x.txt", "del x.txt", "git rm -r --cached build"):  # one thing, with approval
             self.assertEqual(self.level(command), "confirm", command)
+
+    def test_project_commands_run_by_themselves_only_when_declared(self):
+        commands = ("npm test", "npm run build", "pytest", "python -m pytest", "dotnet test", "go test ./...",
+                    "cargo test", "python -m unittest")
+        for command in commands:
+            self.assertEqual(self.level(command), "confirm", command)  # an empty folder declares nothing
+        node, python = self.folder, tempfile.mkdtemp(dir=DATA)
+        with open(os.path.join(node, "package.json"), "w", encoding="utf-8") as f:
+            json.dump({"scripts": {"test": "jest", "build": "tsc"}}, f)
+        open(os.path.join(python, "conftest.py"), "w").close()
+        for folder, declared in ((node, ("npm test", "npm run build")), (python, ("pytest", "python -m pytest"))):
+            for command in declared + (tasks.project_test_command(folder),):
+                self.assertEqual(self.level(command, folder), "allow", command)
+        for folder, command in ((node, "npm run lint"), (node, "npm test -- --watch"), (node, "pytest"),
+                                (node, "dotnet test"), (python, "npm test"), (python, "pytest --basetemp=C:\\Windows")):
+            self.assertEqual(self.level(command, folder), "confirm", command)
+
+    def test_versions_and_compiling_still_run(self):
+        for command in ("npm --version", "node --version", "python --version", "dotnet --version",
+                        "python -m py_compile x.py"):
+            self.assertEqual(self.level(command), "allow", command)
 
     def test_harmless_commands_arent_blocked(self):
         self.assertEqual(self.level("git log --format=%h -5"), "allow")
