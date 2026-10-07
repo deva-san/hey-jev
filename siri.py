@@ -2908,7 +2908,8 @@ def run_plan(plan, notify):
     looks = next((str(s.get("task") or "") for s in steps if s["do"] == "screen"), None)
     first = any(s["do"] in SPEAK_FIRST or (s["do"] == "volume" and str(s.get("to")).lower() in ("mute", "0")) for s in steps)
     last = max((i for i, s in enumerate(steps) if s["do"] in SAY_AFTER and looks is None and not first), default=-1)
-    line = tidy(plan.get("say")) or (say_line("looking") if looks is not None else "" if last >= 0 else default_line(steps))
+    line = tidy(plan.get("say"), not plan.get("confirm")) or \
+        (say_line("looking") if looks is not None else "" if last >= 0 else default_line(steps))
     failed, voice_error, spoken, seen = [], None, [], []
     reported = threading.Event()  # the steps her line reports on are done
 
@@ -3176,10 +3177,12 @@ def fix_names(text):
     return text
 
 
-def tidy(line):
-    """Her line, ready to say: no markdown, and at most three sentences, since a chatty model can run on."""
+def tidy(line, cut=True):
+    """Her line, ready to say: no markdown, and at most three sentences, since a chatty model can run on. Not cut
+    (cut False) when she asks before doing something: a long message read back stopped before who it was to and
+    "Send it?", and a yes still sent it."""
     line = re.sub(r"[*_#`]+", "", str(line or "")).strip()
-    return " ".join(re.split(r"(?<=[.!?])\s+", line)[:3]) if len(line) > 400 else line
+    return " ".join(re.split(r"(?<=[.!?])\s+", line)[:3]) if cut and len(line) > 400 else line
 
 
 # --------------------------------------------------------------------------- Is it for her?
@@ -3352,7 +3355,8 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         plan = make_plan(say=say_line("not_caught"))
     failed, dictate, voice_error, spoken = run_plan(plan, notify)
     # what she said, also when it came from the screen: the next turn's "play the third one" needs what she saw
-    kept = {"steps": plan.get("steps") or [], "say": (tidy(plan.get("say")) if not failed else "") or " ".join(spoken)}
+    kept = {"steps": plan.get("steps") or [],
+            "say": (tidy(plan.get("say"), not plan.get("confirm")) if not failed else "") or " ".join(spoken)}
     try:  # kept on this PC, so she can recall it, and in the day's file
         history.add(words or text, describe(kept["steps"]) + (f" (failed: {'; '.join(failed)})" if failed else ""),
                     " ".join(spoken), json.dumps({**kept, "failed": failed} if failed else kept, ensure_ascii=False))

@@ -215,6 +215,33 @@ class CloseTab(Turn):
         self.assertEqual((closed, self.pressed), (["Google Chrome"], []))
 
 
+LONG = ("The train from Bengaluru is running very late again tonight because of the rain near Hosur. "
+        "I'll be home after ten, so please don't wait up for me or keep the gate locked. "
+        "Keep some dinner aside, the chapati and dal are fine, nothing fried please. "
+        "Tell Appa I've got the medicines from the shop near the station and the receipt too. "
+        "Put the inverter on charge if the power goes again. Call me if anything comes up.")  # 400 and more read back
+
+
+def staged(app, contact, text):
+    """What messaging.prepare hands back once the chat is open with the words typed in."""
+    return {"app": app, "contact": contact, "text": text, "checked": True, "say": "WhatsApp"}
+
+
+class Readback(Turn):
+    def test_a_long_message_is_read_back_whole_with_who_and_the_question(self):
+        """tidy kept three sentences of a line over 400 characters: she never said who it was to, or "Send it?"."""
+        with mock.patch.object(siri.messaging, "prepare", staged):
+            siri.handle(f"Message Mum on WhatsApp: {LONG}")
+        self.assertEqual(len(self.said), 1)
+        self.assertTrue(self.said[0].endswith("” to Mum on WhatsApp. Send it?"), self.said[0])
+        self.assertIn("Call me if anything comes up", self.said[0])
+
+    def test_a_chatty_model_is_still_cut_short(self):
+        with self.model({"steps": [], "say": LONG}):
+            siri.handle("tell me a story")
+        self.assertEqual(self.said, [LONG[:LONG.index(" Tell Appa")]])
+
+
 def tripwire_quit(app):
     raise AssertionError(f"quit {app.name}")
 
