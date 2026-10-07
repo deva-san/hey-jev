@@ -679,6 +679,8 @@ def _search(where):
         q = m["q"]
         if " and " in f" {q} " or re.match(r"look up (?:at|there|there's|here|over|it's)\b", m.string):
             return None  # "look up, there's a bird on the roof" was searched for
+        if m.string in BARE_APPS:
+            return None  # "Google Chrome" on its own, as heard_as makes "Prone." too, is the app: it searched "chrome"
         if where == "google" and wants_spoken(q, m.string):
             print("  a question: the model answers it out loud")
             return None

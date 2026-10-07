@@ -199,6 +199,8 @@ class HeardAs(Routing):
         self.assertEqual(siri.fix_names("Prone."), "Google Chrome.")
         self.assertEqual(siri.fix_names("Jeff, switch to this code"), "Jeff, switch to VS Code")
         self.assertEqual(siri.fix_names("open my files and close keto"), "open File Explorer and close Kiro")
+        self.assertEqual(self.steps(siri.fix_names("Prone.")), [{"do": "open", "app": "Google Chrome"}])
+        self.assertEqual(self.steps("google search"), [{"do": "google", "query": "search", "play": False}])
 
     def test_words_are_left_alone(self):
         for words in ("Message Mum on WhatsApp: starting keto from Monday", "Type I'm prone to typos",
