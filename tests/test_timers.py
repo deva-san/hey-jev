@@ -114,5 +114,107 @@ class Repeating(unittest.TestCase):
         self.assertEqual(step["repeat"], "every day at 9")
 
 
+class WithStore(unittest.TestCase):
+    """A fresh task database and no timers for each test."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="heyjev-timers-")
+        self.store = tasks.Store(os.path.join(self.dir, "tasks.db"))
+        patcher = mock.patch.object(siri, "TASK_STORE", self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        with siri.TIMERS_LOCK:
+            siri.TIMERS.clear()
+        self.addCleanup(siri.TIMERS.clear)
+        reminders = getattr(siri, "_reminders_read", None)
+        if reminders:
+            reminders[0] = 0.0  # read the reminders again, from this test's store
+
+    def reminder(self, text, due, repeat=None):
+        return self.store.create(f"Remind me to {text}", "reminder", {"text": text}, due=due, repeat=repeat)
+
+    def run_plan(self, plan):
+        plan = siri.prepare_task_steps(plan)
+        for step in plan["steps"]:
+            siri.do_step(step)
+        return plan
+
+
+class CancelTimer(WithStore):
+    """A13: 'cancel the 5 minute timer' set a new timer. A14, A26, A42: 'cancel the timer' also cancelled every
+    reminder, daily ones too, while she said there was no timer running."""
+
+    def test_named_timer_is_cancelled_not_set(self):
+        five, ten = siri.add_timer(300), siri.add_timer(600)
+        for said in ("cancel the 5 minute timer", "stop my 5 minute timer", "delete the five minute timer"):
+            plan = siri.quick(said)
+            self.assertEqual([s["do"] for s in plan["steps"]], ["cancel_timers"], said)
+        siri.do_step(siri.quick("cancel the 5 minute timer")["steps"][0])
+        self.assertEqual(siri.TIMERS, [ten])
+        self.assertNotIn(five, siri.TIMERS)
+
+    def test_time_left_on_a_named_timer(self):
+        siri.add_timer(300)
+        siri.add_timer(600)
+        plan = siri.quick("how much time is left on the 10 minute timer")
+        self.assertEqual(plan["steps"], [])
+        self.assertRegex(plan["say"], r"(?:9|10) minutes")
+        self.assertEqual(len(siri.TIMERS), 2)
+
+    def test_plain_cancel_still_cancels_every_timer(self):
+        siri.add_timer(300)
+        siri.add_timer(600)
+        plan = siri.quick("cancel the timer")
+        self.assertIn(plan["say"], siri.REPLIES["timers_cancel"])
+        siri.do_step(plan["steps"][0])
+        self.assertEqual(siri.TIMERS, [])
+
+    def test_cancel_timer_leaves_reminders(self):
+        daily = self.reminder("take my tablets", time.time() + 50000, {"kind": "daily", "hour": 9, "minute": 0})
+        tomorrow = self.reminder("call the bank", time.time() + 80000)
+        soon = self.reminder("check the oven", time.time() + 600)
+        siri.add_timer(300)
+        for said in ("cancel the timer", "stop the timer", "cancel the alarm"):
+            self.run_plan(siri.quick(said))
+            for task_id in (daily, tomorrow, soon):
+                self.assertEqual(self.store.get(task_id)["status"], "queued", said)
+        self.assertEqual(siri.TIMERS, [])
+        self.assertEqual(siri.quick("cancel the timer")["say"], "There's no timer running.")
+
+    def test_model_cancel_timers_leaves_reminders(self):
+        task_id = self.reminder("call mum", time.time() + 600)
+        siri.do_step({"do": "cancel_timers"})
+        self.assertEqual(self.store.get(task_id)["status"], "queued")
+
+    def test_cancel_reminders_asks_and_names_them(self):
+        daily = self.reminder("take my tablets", time.time() + 50000, {"kind": "daily", "hour": 9, "minute": 0})
+        once = self.reminder("call the bank", time.time() + 80000)
+        plan = siri.quick("cancel my reminders")
+        self.assertEqual(plan["steps"], [])
+        self.assertTrue(plan["say"].endswith("?"))
+        self.assertIn("take my tablets", plan["say"])
+        self.assertIn("call the bank", plan["say"])
+        self.assertEqual(self.store.get(daily)["status"], "queued")  # nothing yet, she asked
+        done = self.run_plan(plan["confirm"])  # the yes
+        self.assertEqual(self.store.get(daily)["status"], "cancelled")
+        self.assertEqual(self.store.get(once)["status"], "cancelled")
+        self.assertIn(f"Task {daily} cancelled", done["say"])
+
+    def test_cancel_a_named_reminder(self):
+        mum = self.reminder("call mum", time.time() + 600)
+        bank = self.reminder("call the bank", time.time() + 80000)
+        plan = siri.quick("cancel my reminder to call mum")
+        self.assertIn("call mum", plan["say"])
+        self.assertNotIn("bank", plan["say"])
+        self.run_plan(plan["confirm"])
+        self.assertEqual(self.store.get(mum)["status"], "cancelled")
+        self.assertEqual(self.store.get(bank)["status"], "queued")
+
+    def test_no_reminders(self):
+        plan = siri.quick("cancel my reminders")
+        self.assertEqual(plan["steps"], [])
+        self.assertNotIn("confirm", plan)
+
+
 if __name__ == "__main__":
     unittest.main()

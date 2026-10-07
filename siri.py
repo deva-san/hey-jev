@@ -689,6 +689,8 @@ def _scroll(m):
 
 def _timer(m):
     said = m[0]
+    if re.match(r"(?:cancel|stop|delete|clear|remove|how)\b", said):
+        return None  # "cancel the 5 minute timer" or "how long is left on the 10 minute timer" set a second timer
     if said.startswith("remind") and re.search(r"\b(?:every|hourly|daily)\b", said):
         return None  # it repeats, see direct_background: "remind me every one hour to ..." was a one-off in an hour
     when = said.startswith("remind") and IN_DURATION.search(_digits(said))
@@ -704,8 +706,33 @@ def _timer(m):
 
 
 def _time_left(m):
-    left = timer_snapshot()
-    return make_plan(say=say_line("timer_check", left=say_duration(left[0][1])) if left else say_line("timer_none"))
+    secs = parse_duration(m["what"] or "")  # "on the 10 minute timer": that one, else the soonest
+    with TIMERS_LOCK:
+        left = [t["end"] - time.time() for t in TIMERS if secs and t["secs"] == secs]
+    left = left or [s for _, s in timer_snapshot()]
+    return make_plan(say=say_line("timer_check", left=say_duration(left[0])) if left else say_line("timer_none"))
+
+
+def _cancel_timers(m):
+    secs = parse_duration(m["what"] or "")  # "cancel the 5 minute timer": that one, see do_step
+    return make_plan([{"do": "cancel_timers", **({"seconds": secs} if secs else {})}],
+                     say_line("timers_cancel" if TIMERS else "timer_none"))
+
+
+def _cancel_reminders(m):
+    """Reminders are durable and some repeat, so she names the ones she'd cancel and waits for a yes. "Cancel the
+    timer" used to cancel them all, daily ones too, while she said there was no timer running."""
+    rows = [r for r in TASK_STORE.list(active=True) if r["kind"] == "reminder"]
+    about = " ".join(filter(None, (m["what"], m["about"])))
+    rows = [r for r in rows if about and about in plain(r["payload"].get("text") or r["description"])] or rows
+    if not rows:
+        return make_plan(say="You don't have any reminders.")
+    bits = [f"to {r['payload'].get('text') or r['description']}, "
+            + ("which repeats" if r["repeat"] else tasking.describe_due(r["due"])) for r in rows]
+    ask = f"Should I cancel your reminder {bits[0]}?" if len(bits) == 1 else \
+        f"Should I cancel your {len(bits)} reminders, {'; '.join(bits[:3])}{'; and the rest' if len(bits) > 3 else ''}?"
+    return {"steps": [], "say": ask,
+            "confirm": make_plan([{"do": "task_control", "action": "cancel", "id": r["id"]} for r in rows])}
 
 
 def _step(**step):
@@ -1024,9 +1051,12 @@ QUICK = [(re.compile(p), make) for p, make in (
      lambda m: make_plan([{"do": "dark_mode", "on": False}], say_line("dark_off"))),
     # timers
     (r"(?:(?:set|start|make) )?(?:a |an |the )?(?:timer|alarm)(?: for| of)? .+|.+ timer|remind me .+", _timer),
-    (r"how (?:long|much time)(?: is| do i have| have i got)?(?: left| remaining)?(?: on (?:the|my) timer)?|time left", _time_left),
-    (r"(?:cancel|stop|delete|clear|remove)(?: the| all| my| all the| all my)? (?:timers?|alarms?|reminders?)",
-     lambda m: make_plan([{"do": "cancel_timers"}], say_line("timers_cancel" if TIMERS else "timer_none"))),
+    (r"how (?:long|much time)(?: is| do i have| have i got)?(?: left| remaining)?(?: (?:on|for) (?:the|my) "
+     r"(?:(?P<what>.+?) )?timer)?|time left", _time_left),
+    (r"(?:cancel|stop|delete|clear|remove)(?: all the| all my| the| all| my)? (?:(?P<what>.+?) )?(?:timers?|alarms?)",
+     _cancel_timers),
+    (r"(?:cancel|stop|delete|clear|remove)(?: all the| all my| the| all| my| that)?(?: (?P<what>.+?))? reminders?"
+     r"(?: (?:to|about|for) (?P<about>.+))?", _cancel_reminders),
     # just a site or an app, "YouTube" after a new tab: open it. Last, so it never takes a phrase meant for the above
     (r"(?P<x>[a-z][a-z .]{1,24})", lambda m: _bare(m["x"])),
 )]
@@ -2803,13 +2833,13 @@ def do_step(step):
             t["line"] = str(step["alert"])
             threading.Thread(target=fetch_tts, args=(t["line"],), daemon=True).start()  # ready before it's needed
         return f"{secs}s {step.get('label') or ''}".strip()
-    if do == "cancel_timers":
+    if do == "cancel_timers":  # timers only: reminders are durable and some repeat, see _cancel_reminders
+        secs = int(float(step.get("seconds") or 0))
         with TIMERS_LOCK:
-            TIMERS.clear()
-        for task in TASK_STORE.list(active=True):
-            if task["kind"] == "reminder":
-                TASK_STORE.cancel(task["id"])
-        return ""
+            gone = [t for t in TIMERS if t["secs"] == secs] or list(TIMERS)  # none that long: all, as before
+            for t in gone:
+                TIMERS.remove(t)
+        return str(len(gone))
     if do == "dark_mode":
         on = step.get("on")
         win.set_dark_mode(not win.dark_mode() if on in (None, "toggle") else bool(on))
