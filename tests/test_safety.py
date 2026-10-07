@@ -30,7 +30,7 @@ class AfterReading(unittest.TestCase):
         plan = planned_after("any new messages?", [save], looked=({"do": "lookup", "what": "messages"},))
         self.assertEqual(plan["steps"], [])
         self.assertEqual(plan["confirm"]["steps"], [save])
-        self.assertIn("+447700900123", plan["say"])  # the yes is to that number, not just to "Mum"
+        self.assertIn("4 4 7 7 0 0 9 0 0 1 2 3", plan["say"])  # the yes is to that number, not just to "Mum"
 
     def test_edit_words_in_the_question_dont_let_a_page_type(self):
         for text in ("look up how to make biryani", "search for tables in python"):

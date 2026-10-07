@@ -1987,7 +1987,9 @@ def confirm_question(step):
     if do == "contact":  # the number itself, so a yes can't save a stranger's as Mum's
         who = " ".join(str(step.get("alias") or "them").split())[:40]
         handle = str(step.get("number") or step.get("username") or step.get("id") or "").strip()[:40]
-        where = messaging.say_of(messaging.app_key(step.get("app")) or step.get("app"))
+        if re.fullmatch(r"[\d\s()+.-]+", handle):  # digit by digit: she read 914035072560 as one big number once
+            handle = " ".join(re.sub(r"\D", "", handle))
+        where =messaging.say_of(messaging.app_key(step.get("app")) or step.get("app"))
         return f"Should I forget {who}?" if action == "remove" else f"Should I save {handle} as {who} on {where}?"
     if do == "skill":
         name = str(step.get("name") or "that").replace("-", " ")
