@@ -1335,7 +1335,7 @@ Reply with one JSON object and nothing else: {"steps": [...], "say": "..."}
 {"do":"keys","keys":"ctrl+w"}  a shortcut in the app in front: ctrl+t new tab, ctrl+w close tab, alt+left back, f5 reload, f full screen on YouTube. Never the Windows key
 {"do":"type","text":"..."}  only when they ask you to write or type something: write the real text, it goes where the cursor is
 {"do":"new_tab"}  a new tab in their browser
-{"do":"timer","seconds":300,"label":"Tea","alert":"Hey, your tea's ready."}  a timer or a reminder, the alert is said when it ends
+{"do":"timer","seconds":300,"label":"Tea","alert":"Hey, your tea's ready."}  a timer or a reminder, the alert is said when it ends. Give it a label and alert only if they say what it's for
 {"do":"cancel_timers"}  {"do":"dark_mode","on":true}  {"do":"lock"}  {"do":"sleep"}  {"do":"shutdown"}  {"do":"restart"}  {"do":"abort_shutdown"}  {"do":"dictate"}  dictate writes down what they say next, until they say stop transcribing
 {"do":"screen","task":"click the second video on the page"}  look at their screen and do this, or answer it: what's on the screen, read or sum up this page, click, pick or fill in something you'd have to see. Write the task in full. It can come after steps that open something. Use it with "say" ""
 {"do":"memory","action":"add","target":"user","content":"Their website CareerID is careerid.in"}  save to your memory. action add, replace or remove. target user (who they are: names, sites, people, apps, likes, words) or memory (your own notes, like what works on this PC). replace and remove find the entry by "old_text", a few words from it
@@ -1737,7 +1737,10 @@ def learn_words(words, said=()):
 def context():
     """What's going on now, for the model: the time, the app in front, what's playing, timers, the browser profiles
     and their own dictionary words."""
-    lines = [f"Now: {time.strftime('%A %d %B %Y')}, {clock()}. In front: {win.front_app_name() or 'nothing'}.",
+    off = time.localtime().tm_gmtoff // 60  # the zone too: it got New York's time wrong 2 times in 3 without it
+    zone = f"UTC{'-' if off < 0 else '+'}{abs(off) // 60:02d}:{abs(off) % 60:02d}"
+    lines = [f"Now: {time.strftime('%A %d %B %Y')}, {clock()} ({zone}, work other places' times out from it). "
+             f"In front: {win.front_app_name() or 'nothing'}.",
              f"Their apps: {', '.join(sorted(set(APP_SAY.values())))}."]  # so "open prone" can be Chrome
     if settings.get("name"):
         lines.append(f"Their name is {settings.get('name')}. Use it now and then, the way a person would, not in every "

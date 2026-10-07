@@ -404,5 +404,20 @@ class WebRead(unittest.TestCase):
         self.assertEqual(page["url"], "https://example.com/wiki/Iron_Man_2")
         self.assertIn("words", page["text"])
 
+
+class PromptBits(unittest.TestCase):
+    """M8: the clock says which time zone it is, and a plain timer doesn't get the example's tea."""
+
+    def test_now_has_its_time_zone(self):
+        with patch.object(siri.win, "front_app_name", lambda: "Google Chrome"), \
+                patch.object(siri.win, "media_session", lambda: None), \
+                patch.object(siri, "profile_names", lambda key: []):
+            self.assertRegex(siri.context(), r"Now: .*UTC[+-]\d\d:\d\d")
+
+    def test_timer_label_only_when_named(self):
+        line = next(l for l in siri.PROMPT.splitlines() if l.startswith('{"do":"timer"'))
+        self.assertIn("label and alert only", line)
+
+
 if __name__ == "__main__":
     unittest.main()
