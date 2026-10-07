@@ -348,7 +348,7 @@ def describe_due(timestamp):
 
 # --------------------------------------------------------------------------- commands
 # Credentials and private keys, and the files browsers, password managers and developer tools keep them in: Chrome's
-# Login Data and Cookies, Firefox's logins.json, a .kdbx, gh's hosts.yml and a .ppk were all read with no approval
+# Login Data and Cookies, Firefox's logins.json, a .kdbx, gh's hosts.yml and a .ppk were allowed with no approval
 CREDENTIALS = (r"(?:\.env\b|credentials?\b|id_(?:rsa|dsa|ecdsa|ed25519)|\.(?:pem|pfx|p12|key|ppk|kdbx?)\b|\benv:|"
                r"\$env\b|\.ssh\b|\.gnupg\b|\.netrc\b|\.npmrc\b|\.pypirc\b|\.aws[\\/]|\.docker[\\/]+config\.json|"
                r"\bgh[\\/]+hosts\.ya?ml\b|\b(?:login|web)\s+data\b|\blocal\s+state\b|\bcookies(?:\.sqlite)?(?![\w.])|"
@@ -433,7 +433,7 @@ def project_test_command(cwd):
 
 def declared(exe, args, cwd):
     """True when the project in cwd declares exactly this test, build or lint command. They run the project's own
-    code, so "npm test" or pytest in any folder ran whatever was there, and could be scheduled to repeat."""
+    code, so "npm test" or pytest in any folder would run whatever was there, and could be scheduled to repeat."""
     exe = re.sub(r"\.(?:exe|cmd)$", "", exe)
     if exe == "npm":
         try:

@@ -838,9 +838,9 @@ def finish_asked(words):
     if time.time() > ASKED["until"] or not ASKED["alias"]:
         return None
     app, alias, text = ASKED["app"], ASKED["alias"], ASKED["text"]
-    # the whole reply is the number or username, never a word picked out of it: the last word of "Cancel that" was
-    # saved as bittu's Telegram username, for every message to bittu from then on. "It's" only before @, + or digits:
-    # "It's done" isn't one
+    # the whole reply is the number or username, never a word picked out of it: the last word of "Cancel that"
+    # would be saved as bittu's Telegram username, for every message to bittu from then on. "It's" only before @, +
+    # or digits: "It's done" isn't one
     said = re.sub(r"^(?:(?:it'?s|it is)\s+(?=[@+\d]|plus\b)|(?:(?:their|his|her|the) )?(?:phone |whatsapp |telegram )?"
                   r"(?:number|username) is\s+)", "", " ".join(str(words).split()).strip(" .!?"), flags=re.I)
     if messaging.needs_of(app) == "number":
@@ -1413,8 +1413,8 @@ ASKS_FOR = {"type": EDIT_WORDS, "keys": EDIT_WORDS, "close": re.compile(r"\b(?:c
             "sleep": re.compile(r"\bsleep", re.I)}
 # After reading the web or messages, only these go ahead without a yes, whatever the words: they show, play or look
 # things up, or ask for themselves later (a message, an install, a command's approval). Words can't count there:
-# "look up how to make biryani" let a page's typing through, "make" being an edit word, and nothing stopped a message
-# from having her save its own number as Mum's
+# "look up how to make biryani" would let a page's typing through, "make" being an edit word, and nothing would stop
+# a message from having her save its own number as Mum's
 READ_SAFE = {"open", "website", "youtube", "google", "media", "volume", "scroll", "new_tab", "timer", "note",
              "open_notes", "research", "window", "screenshot", "open_folder", "abort_shutdown", "dictate", "message",
              "install", "command"}
@@ -2009,7 +2009,7 @@ def needs_asking(steps, text, read=False):
     closing Kiro for "Yeah, do you open close?" in the middle of a phone call. Looking at the screen needs her name,
     or her to have looked in the last minute, as in "now click the second one". read: after reading the web or
     messages, every step outside READ_SAFE asks, whatever the words. A yes runs the whole plan, so with a shutdown or
-    restart in it that's the one asked about: a yes to "Should I type that?" once let one through unasked."""
+    restart in it that's the one asked about, or a yes to "Should I type that?" would let it through unasked."""
     t = plain(text)
     for s in steps:
         do = s["do"]
@@ -2649,8 +2649,8 @@ def set_volume(to, app=None):
     return f"{app or 'system'} {to}"
 
 
-# Enter sends in these, so it's never pressed there: "type on my way and press enter" sent it to whichever chat was
-# open, with no read-back and no yes. A message goes only through message_send
+# Enter sends in these, so it's never pressed there: "type on my way and press enter" would send it to whichever chat
+# was open, with no read-back and no yes. A message goes only through message_send
 CHATS = {"whatsapp.exe", "whatsapp.root.exe", "telegram.exe", "signal.exe", "slack.exe", "discord.exe", "ms-teams.exe",
          "teams.exe", "skype.exe", "element.exe", "viber.exe", "wechat.exe", "messenger.exe", "zulip.exe",
          "mattermost.exe"}
