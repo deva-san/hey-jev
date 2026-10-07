@@ -24,7 +24,7 @@ class Keys(unittest.TestCase):
         """"Zoom in" planned ctrl+plus and she said "There's no plus key": pynput has no such key."""
         pressed = []
         with mock.patch.object(siri.win, "press", lambda *keys: pressed.append(keys)), \
-                mock.patch.object(siri, "not_into_shell", lambda: None):
+                mock.patch.object(siri, "not_into_shell", lambda *a: None):
             siri.press_keys(siri.quick("zoom in")["steps"][0]["keys"])
             siri.press_keys(siri.quick("zoom out")["steps"][0]["keys"])
         self.assertEqual(pressed, [("ctrl", "="), ("ctrl", "-")])
@@ -215,7 +215,7 @@ class Turn(unittest.TestCase):
         self.said, self.pressed = [], []
         for target, name, value in ((siri, "say", lambda line, notify: self.said.append(line)),
                                     (siri, "learn_later", lambda *a: None), (siri, "media_playing", lambda: False),
-                                    (siri, "asked_last", lambda within=0: False), (siri, "not_into_shell", lambda: None),
+                                    (siri, "asked_last", lambda within=0: False), (siri, "not_into_shell", lambda *a: None),
                                     (siri.win, "press", lambda *keys: self.pressed.append(keys))):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
@@ -407,7 +407,10 @@ class YesOrNo(Turn):
         """"... Send it? I can't read Telegram back, so check it on screen." ends in a full stop, so a message asked for
         without her name came back as just a chat: no window for the yes, and a yes without her name was let go."""
         unread = lambda app, contact, text: {**staged(app, contact, text), "checked": False, "say": "Telegram"}
-        with mock.patch.object(siri.messaging, "prepare", unread):
+        # without her name the model decides it was for her and plans the message (quick no longer stages it cold)
+        planned = {"steps": [{"do": "message", "app": "telegram", "contact": "Mum", "text": "hi"}], "say": ""}
+        with mock.patch.object(siri.messaging, "prepare", unread), \
+                mock.patch.object(siri, "think", lambda *a, **k: planned):
             self.assertIs(siri.handle("Message Mum on Telegram: hi", gate="cold"), True)
         self.assertTrue(self.said[0].endswith("so check it on screen."), self.said)
 
