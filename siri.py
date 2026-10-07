@@ -3247,6 +3247,8 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         if plan and gate and any(s["do"] in ("youtube", "google") for s in plan["steps"]) and not \
                 (gate == "cold" and re.match(r"(?:play|search|google|look up|find)\b", plain(words))):
             plan = None  # an unnamed direct command counts; otherwise a video could be talking, so the model tells
+        if plan and gate == "cold" and any(s["do"] == "dictate" for s in plan["steps"]):
+            plan = None  # "Dictate." said in the room took it all down and pasted it: the model decides, see run_turn
         risky = needs_asking(plan["steps"], words) if plan and gate else None
         if risky:  # without her name, and the words didn't ask for it in so many words: ask first
             plan = {"steps": [], "say": confirm_question(risky), "confirm": plan}

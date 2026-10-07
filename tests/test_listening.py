@@ -628,6 +628,20 @@ class DictationStart(Case):
         started, handled = self.run_turn("Start dictating.", "Start dictating.", "cold", handled_as="dictate")
         self.assertEqual((started, handled), ([True], ["cold"]))
 
+    def test_the_quick_dictate_waits_for_the_model_too(self):
+        """'Dictate.', 'start transcribing', 'take dictation' in the room: fast_intent's own dictate started one."""
+        asked, ran = [], []
+        with mock.patch.object(siri, "think", lambda words, gate, notify=None, sure=1.0: asked.append(gate)), \
+                mock.patch.object(siri, "run_plan", lambda plan, notify: ran.append(plan) or ([], True, None, [])), \
+                mock.patch.object(siri, "learn_later", lambda *args: None), \
+                mock.patch.object(siri.history, "add", lambda *args: None), contextlib.redirect_stdout(io.StringIO()):
+            for words in ("Dictate.", "start transcribing", "take dictation"):
+                with self.subTest(words=words):
+                    self.assertFalse(siri.handle(words, words, 100, None, "cold"))  # the model said not for her
+                    self.assertEqual(siri.handle(words, words, 100, None, True), "dictate")  # just after she answered
+        self.assertEqual(asked, ["cold"] * 3)
+        self.assertEqual(len(ran), 3)
+
     def test_with_her_name_it_starts_straight_away(self):
         started, handled = self.run_turn("Hey Jev, transcribe.", "transcribe", False)
         self.assertEqual((started, handled), ([True], []))
