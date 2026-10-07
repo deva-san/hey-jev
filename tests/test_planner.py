@@ -229,6 +229,33 @@ class AskAgain(unittest.TestCase):
         self.assertIs(ask.call_args.kwargs["again"], False)
 
 
+class RoomTalk(unittest.TestCase):
+    """M6: a reply that only says the words weren't for her is let go, not said out loud."""
+
+    def setUp(self):
+        p = patch.object(siri, "media_playing", lambda: False)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_not_for_me_is_let_go(self):
+        for said in ("That sounded like he was talking to someone else in the room.",
+                     "That was to others, Hari \u2014 people talking near the PC, not to me.",
+                     "That sounded like someone talking to a person nearby, not a request for me.",
+                     "It\u2019s probably to someone nearby, not to me. The sentence is too garbled to summarise.",
+                     "That's for someone else, Harish \u2014 not me."):
+            self.assertTrue(siri.let_go({"steps": [], "say": said}), said)
+
+    def test_an_answer_is_not_let_go(self):
+        for plan in ({"steps": [], "say": "It's 5 PM."},
+                     {"steps": [], "say": "It was said to you, Hari. Your C drive is nearly full."},
+                     {"steps": [], "say": "I'm here now, Hari. I thought you were speaking to someone else, so I "
+                                          "stayed quiet. What's up?"},
+                     {"steps": [], "say": "Because you hadn't called me by name first, and I wasn't sure whether you "
+                                          "were speaking to me or talking to someone else."},
+                     {"steps": [{"do": "open", "app": "Notepad"}], "say": "Opening it for someone else? Sure."}):
+            self.assertIsNone(siri.let_go(plan), plan)
+
+
 class WebSearch(unittest.TestCase):
     """M5: the sources share one deadline, and what's there by then is the answer."""
 

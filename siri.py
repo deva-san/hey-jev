@@ -3260,6 +3260,12 @@ def asked_last(within=FOLLOW_UP + 20):
         return False
 
 
+# How a model says out loud that the words weren't for her, instead of {"to": "others"}: 20 times on 6 and 7 October,
+# "That sounded like he was talking to someone else in the room", "That was to others, Hari, not to me"
+NOT_FOR_ME = re.compile(r"\b(?:someone else|to others|(?:not|wasn't|was not|isn't|is not) (?:meant |a request |said )?"
+                        r"(?:for|to) me|(?:talking|speaking) to (?:someone|a person|people|each other))\b", re.I)
+
+
 def let_go(plan):
     """Why to stay quiet about a plan for words said without her name, or None to go ahead. A plan she'd ask about
     first counts by the steps it would take."""
@@ -3269,6 +3275,9 @@ def let_go(plan):
         return "and nothing to do"
     if not steps and REPEAT_ASK.search(said):
         return "and it wasn't clear"
+    # but not "I thought you were talking to someone else, so I stayed quiet. What's up?"
+    if not steps and NOT_FOR_ME.search(said) and not re.search(r"\?|\byou were\b", said):
+        return "and it wasn't for her"
     # unless the mic is in speech mode, which takes what the PC plays out of it, so a video can't be heard as you
     if not (steps and all(s.get("do") in PLAYBACK for s in steps)) and media_playing() \
             and not (MIC[0] is not None and MIC[0].echo_cancelled):
