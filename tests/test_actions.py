@@ -7,6 +7,17 @@ from unittest import mock
 from tests.support import TRIPPED, siri, winplatform
 
 
+def original(name):
+    """One of siri's functions as written, which tests.support swapped for a tripwire, run in siri's own globals so
+    what a test patches on siri still applies."""
+    import ast
+    with open(siri.__file__, encoding="utf-8") as f:
+        node = next(n for n in ast.parse(f.read()).body if isinstance(n, ast.FunctionDef) and n.name == name)
+    found = {}
+    exec(compile(ast.Module([node], []), siri.__file__, "exec"), vars(siri), found)
+    return found[name]
+
+
 class Keys(unittest.TestCase):
     def test_zoom_in_and_out_press_real_keys(self):
         """"Zoom in" planned ctrl+plus and she said "There's no plus key": pynput has no such key."""
@@ -60,6 +71,30 @@ class RamFigures(unittest.TestCase):
         mem = psutil.Process().memory_full_info()
         self.assertGreater(mem.rss - mem.uss, 4 * 2 ** 20)  # enough shared pages here to tell them apart
         self.assertLess(abs(ram - mem.uss), (mem.rss - mem.uss) / 2)
+
+
+class Voice(unittest.TestCase):
+    def test_a_line_she_says_now_waits_seconds_for_fish_not_a_minute(self):
+        """The mic is paused while she talks, and Fish once took 17 s to start: with 60 s she was silent and deaf."""
+        asked = {}
+        with mock.patch.object(siri, "FISH", SimpleNamespace(post=lambda url, **kw: asked.update(kw) or
+                                                             SimpleNamespace(ok=True))):
+            original("fish")("A new line.", "pcm", stream=True)
+        connect, read = asked["timeout"]
+        self.assertLessEqual(connect, 5)
+        self.assertLessEqual(read, 5)
+
+    def test_slow_fish_gets_windows_own_voice(self):
+        import requests
+        native = []
+
+        def post(url, **kw):
+            raise requests.ReadTimeout("read timed out")
+        with mock.patch.object(siri, "FISH", SimpleNamespace(post=post)), \
+                mock.patch.object(siri, "fish", original("fish")), \
+                mock.patch.object(siri.win, "speak_native", lambda text, **kw: native.append(text)):
+            original("speak")("A line nobody has cached, 1729.")
+        self.assertEqual(native, ["A line nobody has cached, 1729."])
 
 
 if __name__ == "__main__":

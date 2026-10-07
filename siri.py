@@ -2940,6 +2940,10 @@ def run_plan(plan, notify):
 CACHE_DIR = os.path.join(HERE, "cache", "tts")
 PCM_RATE = 44100
 PREBUFFER = PCM_RATE * 2 * 6 // 10  # 0.6 s of her voice in hand before playing, so the stream doesn't run dry
+# A line she's saying now: seconds to connect, then to wait for Fish's audio to start or carry on, before Windows' own
+# voice says it instead. It was 60, and the mic is paused while she talks, so a slow free tier left her silent and
+# deaf: 283 lines here started after 1.1 s at the median and 1.7 s at p90, but 6 took over 5 s and one 17 s
+FISH_WAIT = (3.05, 5.0)
 
 
 def tts_path(text, voice=None):
@@ -2948,11 +2952,11 @@ def tts_path(text, voice=None):
 
 def fish(text, fmt, stream=False, voice=None):
     """Fish's free voice model. Lines kept in the cache are made in its "normal" mode, the steadiest, since there's no
-    hurry; new lines stream in "balanced", which starts talking in about 0.6 s where "normal" took 4 s here."""
+    hurry; new lines stream in "balanced", which starts talking in about a second where "normal" took 4 s here."""
     extra = {"sample_rate": PCM_RATE, "latency": "balanced"} if fmt == "pcm" else {"latency": "normal"}
     r = FISH.post(FISH_URL, headers={"Authorization": f"Bearer {FISH_KEY}", "model": FISH_MODEL},
-                  json={"text": text, "reference_id": voice_id(voice), "format": fmt, **extra}, timeout=60,
-                  stream=stream)
+                  json={"text": text, "reference_id": voice_id(voice), "format": fmt, **extra},
+                  timeout=FISH_WAIT if stream else 60, stream=stream)
     if not r.ok:
         raise RuntimeError(f"Fish Audio {opencode.error_text(r)}")
     return r
@@ -2985,7 +2989,8 @@ def fetch_tts(text, voice=None):
 
 def speak(text, voice=None):
     """Say a line. Scripted ones play from the cache, new ones play while Fish is still making them, which starts
-    her talking about 0.6 s after asking. voice: another Fish or Windows native voice.
+    her talking about a second after asking, or in Windows' own voice if Fish is slow (FISH_WAIT). voice: another
+    Fish or Windows native voice.
     Returns ms until she started, 0 from the cache."""
     v = voice_id(voice)
     # 1. Native Windows OneCore / SAPI voice (0 MB RAM, < 15ms latency, fully offline)
