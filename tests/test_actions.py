@@ -48,5 +48,19 @@ class Media(unittest.TestCase):
         self.assertEqual(self.previous("Chrome", 40.0), ["previous"])
 
 
+class RamFigures(unittest.TestCase):
+    def test_an_apps_ram_is_its_private_working_set(self):
+        """"Chrome uses the most, 4.1 GB" against Task Manager's 2.65: shared pages were counted in every process.
+        Reads the process list only. This process's own figure should be its private set (psutil's USS), not all of
+        its working set (RSS), which counts the DLLs it shares."""
+        import os
+        import psutil
+        import sysinfo
+        ram = sysinfo._snapshot()[os.getpid()][2]
+        mem = psutil.Process().memory_full_info()
+        self.assertGreater(mem.rss - mem.uss, 4 * 2 ** 20)  # enough shared pages here to tell them apart
+        self.assertLess(abs(ram - mem.uss), (mem.rss - mem.uss) / 2)
+
+
 if __name__ == "__main__":
     unittest.main()

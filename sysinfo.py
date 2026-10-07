@@ -70,7 +70,8 @@ _ntdll.NtQuerySystemInformation.restype = ctypes.c_long
 def _snapshot():
     """{pid: (name, CPU time in 100 ns units, RAM in bytes)} for every process, in one call. psutil asks one process
     at a time, and for the 130 or so here it can't open itself it reads all of them again each time: a CPU check
-    took 9 seconds that way."""
+    took 9 seconds that way. RAM is the private working set, Task Manager's Memory column: the whole working set
+    counts shared pages in every process, which put Chrome at 4.1 GB where Task Manager said 2.65."""
     size = ctypes.c_ulong(0)
     for _ in range(5):
         buf = ctypes.create_string_buffer(size.value + 128 * 1024)
@@ -85,7 +86,7 @@ def _snapshot():
     while True:
         p = _Process.from_buffer(buf, offset)
         name = ctypes.wstring_at(p.name.buffer, p.name.length // 2) if p.name.buffer else ""
-        out[p.pid or 0] = (name, p.user_time + p.kernel_time, p.working_set)
+        out[p.pid or 0] = (name, p.user_time + p.kernel_time, p.private_working_set)
         if not p.next:
             return out
         offset += p.next
