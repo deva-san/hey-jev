@@ -3,7 +3,7 @@
 A voice assistant for your PC. Say "Hey Jev" (or "Hello Jev", or just "Jev") or hold right Alt, ask for something, and she does it and answers back. Everything runs on free models, with no billing anywhere.
 
 - Simple commands ("open Notepad", "pause", "scroll down", "louder", "set a timer for 5 minutes") are worked out on your PC, so they happen about half a second after you stop talking
-- Anything else goes to a free OpenCode Zen model (`space-bunny-free`) that plans the steps: "search career ID on YouTube and play the first video", "open Notepad and write a poem about rain", "who directed Iron Man 2?". That takes about 2 seconds more, often longer on the free model
+- Anything else goes to a free OpenCode Zen model (`space-bunny-free`) that plans the steps: "search career ID on YouTube and play the first video", "open Notepad and write a poem about rain", "who directed Iron Man 2?". That takes about 2.5 to 4 seconds more in real use, sometimes longer on the free models
 - She listens in small pieces while you talk, all on your PC: Silero hears speech 32 ms at a time, and Smart Turn, a small AI turn-taking model, decides at each pause whether you've finished, from your tone as well as the quiet. Finished, she answers straight away. Mid-sentence, she waits for the rest. Parakeet (NVIDIA) turns it into text. See Listening below
 - Fish Audio S2.1 Pro speaks every reply on its free model (`s2.1-pro-free`), in a voice you pick in Settings. New lines play while Fish is still making them
 - Vision: she can look at the screen when you ask, "what's on my screen?", "click the second video", and act on it
@@ -24,17 +24,17 @@ Free models are free for a limited time, and they can end without notice:
 
 OpenCode keeps most of its free models for its own coding app. From Hey Jev, `space-bunny-free` works, and the rest return "OpenCode's free tier can only be used from within OpenCode" (checked October 2026).
 
-With a Kilo key she also gets [Kilo Gateway](https://kilo.ai/docs/gateway/)'s free models (the ones ending in `:free`). On her own prompt, Ling 3.0 Flash Sante answered in about 2 s (median of 5 requests, worst 2.8 to 6.6 s), against 3.7 s for space-bunny. Cohere North Mini Code, Step 3.7 Flash and Nemotron 3 Super were slower or timed out, and Kilo's two auto routers didn't give her JSON. So Ling is her model, and when it's slow or busy (free models are rate limited) her second try goes to space-bunny on OpenCode, and the other way round. Screenshots always go to space-bunny, since Ling only reads text.
+With a Kilo key she also gets [Kilo Gateway](https://kilo.ai/docs/gateway/)'s free models (the ones ending in `:free`). On her own prompt, Ling 3.0 Flash Sante answered in about 2 s (median of 5 requests, worst 2.8 to 6.6 s), against 3.7 s for space-bunny. In real use, 1 to 7 October 2026, Ling's median was about 2.6 s a call (4 s at p90), and space-bunny's about 3 to 4 s. Cohere North Mini Code, Step 3.7 Flash and Nemotron 3 Super were slower or timed out, and Kilo's two auto routers didn't give her JSON. So Ling is her model, and when it's slow or busy (free models are rate limited) her second try goes to space-bunny on OpenCode, and the other way round. Screenshots always go to space-bunny, since Ling only reads text.
 
 ## What it can do
 
 - Apps: open, close, minimise or switch to anything in the Start menu. Close works the way clicking X does, so apps can still ask about unsaved work. Apps that only drop to the tray (Spotify, Slack, Discord) are then ended.
 - Websites and search: "open YouTube", "open github.com in Edge", "google the weather in Delhi", "search lofi music on YouTube".
-- Music and video: "play Arijit Singh songs" plays YouTube's top video for it. Play, pause, next and previous work on whatever is playing, YouTube in the browser, Spotify or VLC. Before a new video starts, the last one is paused, so two don't play at once. The browser is brought to the front, since Chrome holds a video back while its window is hidden behind others. She hears you over the video, see Echo cancelling below.
+- Music and video: "play Arijit Singh songs" plays YouTube's top video for it. Play, pause, next and previous work on whatever is playing, YouTube in the browser or Spotify. On Spotify, "previous" partway through a song goes back a song, not to its start. VLC 3 isn't in Windows' media controls, so when nothing there is playing and VLC is open, she brings it to the front and presses its own keys: pause, next and previous while VLC is playing, and play when nothing else is in the media controls. Before a new video starts, the last one is paused, so two don't play at once. The browser is brought to the front, since Chrome holds a video back while its window is hidden behind others. She hears you over the video, see Echo cancelling below.
 - The app in front: "scroll down", "scroll to the top", "new tab", "close this tab", "go back", "refresh", "make it full screen" on YouTube, and other shortcuts.
 - Writing: "open Notepad and write today's date", "write a short email saying I'll be late". The text goes where your cursor is.
-- Volume, mute, a volume level, an app's own volume, dark mode, lock or sleep the PC.
-- Timers and reminders: "set a timer for 5 minutes", "remind me in 20 minutes to call Mum", "how long is left?", "cancel the timer". Each one counts down live in the window, and she tells you when it's done.
+- Volume, mute, a volume level (in digits or words), an app's own volume, dark mode, lock or sleep the PC, or shut it down or restart it after a yes.
+- Timers and reminders: "set a timer for 5 minutes", "remind me in 20 minutes to call Mum", "remind me every hour to drink water", "how long is left?", "cancel the 5 minute timer". Timers, and one-off reminders due within 12 hours, count down live in the window, and she tells you when each is done. "Cancel the timer" cancels only timers; "cancel my reminders" or "stop reminding me to drink water" names the reminders and cancels them after a yes.
 - Questions and chat: "what's the capital of Japan?", "and Australia?", "hello", "thanks".
 - Several things in one go: "open Chrome and search for career ID".
 - Remembering: "remember that my website CareerID is careerid.in", then later "open CareerID". "What do you remember about me?", "forget that ...". See Memory below.
@@ -62,7 +62,7 @@ Limits: screenshots go to the model only for these asks, never otherwise. Her po
 
 Settings > Voice picks her voice from six Fish voices that speak well on the free model: Hannah (the default, friendly and clear), Sarah, Laura, Miku (an Indian accent), Assistant and Ethan. Try it plays a line. To use any other voice, paste its link from fish.audio there.
 
-To sound natural, her lines are plain, without the acted `[sighing]` and `[chuckling]` tags, and her usual replies are made once in Fish's steadiest mode and kept. New sentences stream in its quicker mode, which starts talking in about 0.6 seconds, where the steady one took 4.
+To sound natural, her lines are plain, without the acted `[sighing]` and `[chuckling]` tags, and her usual replies are made once in Fish's steadiest mode and kept. New sentences stream in its quicker mode, which starts talking in about a second (1.0 to 1.1 s at the median here, about 1.7 s at p90), where the steady one took 4. If Fish hasn't started within about 5 seconds, she says the line in Windows' own voice instead.
 
 ### Listening
 
@@ -74,12 +74,12 @@ The mic hands over 32 ms at a time, and each piece is worked on as it comes:
    - 15 to 50%: after 0.5 s of quiet.
    - Under 15%: she waits for more, up to 1.2 s.
    - Under a second of speech, like a bare "Hey Jev", always gets the 0.5 s, so a breath after her name doesn't split it.
-- With Nemotron, a turn that's only "Hello", "Hey" or "Hi" so far waits the full 1.2 s: ending at half a second cut "Hello [breath] Jev" off before her name, every time one evening. A bare "Hello Jev" is answered about 0.6 s later because of it.
+- A turn that's only "Hello", "Hey" or "Hi" so far waits the full 1.2 s: ending at half a second cut "Hello [breath] Jev" off before her name, every time one evening. With Nemotron a bare "Hello Jev" is answered about 0.6 s later because of it. Parakeet and Whisper only write once you stop, so a short turn is written at that pause instead, and only a bare greeting waits.
 - A phrase that stops on "open", "search", "type" and the like ("Open [pause] recycle bin") waits up to 1.8 s for the rest and joins it on, like one that stops on "and" (`DANGLING` in `siri.py`).
 3. Parakeet writes the words, in about 0.2 s, and she acts on them. Her name at the start of a longer phrase brings the popup up while you're still talking.
 4. Every 45 seconds a moment of quiet goes through Parakeet and Smart Turn, so Windows keeps them in memory. With little memory free, it had moved them out, and the first phrases of a test then took 3 to 9 seconds.
 
-From the end of a command to its words took about 0.65 s in `test_listen.py`, against 0.88 s before, when half a second of quiet was the only sign you'd finished. A pause to think, as in "open Gmail in my Work profile and... set the volume to thirty", stays one request. Smart Turn takes about 20 ms, and only runs at pauses.
+From the end of a command to its words took about 0.65 s in `test_listen.py` on a quiet machine, against 0.88 s before, when half a second of quiet was the only sign you'd finished. With the PC busy it's more like 1 to 2 s. A pause to think, as in "open Gmail in my Work profile and... set the volume to thirty", stays one request. Smart Turn only runs at pauses, and took 64 to 367 ms a call on this PC under load. `test_listen.py` passes 12 of 12 with both Nemotron and Parakeet.
 
 Settings > Speech to text also has Nemotron ASR Streaming, which writes the words while you talk, about half a second at a time, and shows them in the popup. On 36 test lines in Windows' two voices it got fewer words wrong than Parakeet, 3.5% against 4.8%, but in Hari's own voice it kept losing her name: "Hey Jev" and "Hello Jev" came out as "Hello", 3 of 7 calls one evening. With Nemotron, a "Hello", "Hey" or "Hi" with nothing else now gets the chime, and for 8 seconds what you say next counts without her name, the way it does after she answers. Parakeet's bare greetings were nearly all room talk, so it only does that with Nemotron. The last 10 of those greetings are kept as clips in `%LOCALAPPDATA%\Hey Jev\Logs\missed`, to try fixes on a real voice (`MISSED_KEEP` in `siri.py`). Delete the folder any time. It's there to try, not the default.
 
@@ -94,7 +94,7 @@ Hey Jev borrows the best applicable ideas from [zisshh/computer-use](https://git
 - **Call-aware:** while WhatsApp, Teams, Zoom, Discord or a browser has the mic for a call, unnamed speech is held back. Say **Jev** or **Jarvis** and she still acts. Windows' microphone privacy registry is checked in about 1 ms and cached for 2 seconds (`winplatform.call_apps`).
 - **The app owns the next sentence:** after opening YouTube, "search for Sam Sulek" searches YouTube, not Google. The app asked for wins for 10 seconds while its window comes forward (`FOCUS`).
 - **Local page choices where reliable:** after a search she can play the first through fifth ordinary YouTube result from the result list she fetched herself, with no screenshot or answer-model call.
-- **Local compounds:** "open Notepad and type hello", "new tab and open YouTube", and "type hello and press Enter" become fixed steps on the PC. A request to compose a mail, poem or message still goes to the answer model. Unnamed typing first goes through the is-it-for-her decision.
+- **Local compounds:** "open Notepad and type hello", "new tab and open YouTube", and "type hello and press Enter" become fixed steps on the PC (in a chat app she won't press Enter, since that would send). A request to compose a mail, poem or message, or to fill something in like today's date, still goes to the answer model. Unnamed typing first goes through the is-it-for-her decision.
 - **Accent slips:** the measured nonsense spellings of "type" from Alfred (`diap`, `dayeb`, and similar) are repaired only in a command-verb position. Real words and the text to type are never changed. This PC's own "prone" for Chrome, "clone the tab" and "new term" are fixed too.
 
 Not adopted: Apple's echo canceller (Windows speech mode already removes this PC's playback); Ghostty/Apple Accessibility code; early execution while a sentence is still being spoken ("open Chrome—no, don't" must not open it); and page clicking by visible text. A read-only Windows UI Automation probe saw Chrome's tabs and toolbar in 69 ms but not the web document, so the existing screenshot vision remains the reliable Windows path. Messaging is deliberately a separate feature because sending to the wrong person needs confirmation and post-send checks.
@@ -116,15 +116,15 @@ Settings > Without her name > Answer without her name: no "Hey Jev" needed at an
 
 1. On the PC: a phrase only counts if it could be a request, with a word that asks for something ("open", "play", "search", "scroll", "volume"), a question ("what", "who", "how"), or the name of an app or site (`ASKING` in `siri.py`). "Are you coming for dinner?", "pass me the water" and "okay, so it's gonna rain later" stop there and never leave the PC. Words speech-to-text isn't sure of and small talk stop there too, as above.
 2. Simple commands run straight away: "open Chrome", "volume down", "YouTube", "new tab".
-3. The rest goes to the answer model, told it was overheard (`COLD_NOTE`), with up to three things said in the half minute before it that weren't for her, so it can tell a conversation. It answers `{"to": "others"}` for people talking to each other, a phone call, a video or garbled words, and she says nothing. A question about what "you" did or ate ("why are you late?") is always to a person.
+3. The rest goes to the answer model, told it was overheard (`COLD_NOTE`), with up to three things said in the half minute before it that weren't for her, so it can tell a conversation. It answers `{"to": "others"}` for people talking to each other, a phone call, a video or garbled words, and she says nothing. If it says so out loud instead ("That sounded like someone else in the room"), she still says nothing. A question about what "you" did or ate ("why are you late?") is always to a person.
 
-In `test_open_mic.py`, 19, 19 and 18 of 20 phrases were taken right in three runs: 10 for her, like "open prone" (Chrome) and "who directed Iron Man", and 10 to someone else, like "I told him to open the door" and "did you watch the match yesterday". What it got wrong changed from run to run: "what did he say to you yesterday" answered, or "who directed Iron Man" or "play some lo-fi music" let go. The model took 2 to 3 seconds for the ones that went to it.
+In `test_open_mic.py`, all 20 phrases were taken right in each of three runs: 10 for her, like "open prone" (Chrome) and "who directed Iron Man", and 10 to someone else, like "I told him to open the door" and "did you watch the match yesterday". Only 3 of the 20 reach the model, though: the rest are settled on the PC, so it mostly tests those checks, not the model's judgement. Before the fixes it was 19, 19 and 18, and what it got wrong changed from run to run.
 
 What could be a request goes to the answer model as text, with what was said just before it. Your voice never leaves the PC.
 
 Speech-to-text gets words wrong, so the answer model is told to work out what you meant from the sound, your apps and what you just did: "open prone" is open Chrome, "clone the tab" is close the tab, "new term" a new tab, and just "YouTube" opens it. The ones heard here most often are fixed on the PC too (`QUICK` in `siri.py`), so they're instant.
 
-The mic now stays on while she thinks and acts, and only pauses while she talks, so she doesn't hear herself. What you say while she's working is heard once she's done, instead of lost.
+The mic now stays on while she thinks and acts, and only pauses while she talks, so she doesn't hear herself. What you say while she's working is heard once she's done, instead of lost, up to 20 seconds of it.
 
 ### Memory
 
@@ -143,7 +143,7 @@ Skills are [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s: one `
 - "When I say work mode, open Gmail in my Work profile and set the volume to 30." She saves it as a skill.
 - "Work mode." Gmail opens in the Work profile and the volume goes to 30, in about a second.
 
-Her learning loop is a light version of Hermes'. After a turn worth learning from (you corrected her, something failed, a task took three steps or more, or every sixth turn), she looks back over the last few turns in the background and keeps what she learned: a fact about you, a skill for a task that took a few goes, or a word speech-to-text got wrong ("no, I said Zostel"), which goes into your Dictionary. A word only goes in if what was written sounds like it and you said the right one after: a look back once made "I'm interpreting" then "it was accept" into interpreting -> Accept, which would have changed every "interpreting" from then on. Most looks back find nothing. The Memory tab lists her skills with what you say for them, and Forget this deletes one. Untick Learn as she goes in Settings to stop it.
+Her learning loop is a light version of Hermes'. After a turn worth learning from (you corrected her, something failed, a task took three steps or more, or every sixth turn), she looks back over the last few turns in the background and keeps what she learned. Room talk she overheard without her name and only answered doesn't count and isn't looked back over, and overheard words only go into her memory when they ask her to remember, forget or note something ("remember that ...", "keep in mind ..."), not when someone says "I remember ...". What she keeps is a fact about you, a skill for a task that took a few goes, or a word speech-to-text got wrong ("no, I said Zostel"), which goes into your Dictionary. A word only goes in if what was written sounds like it and you said the right one after: a look back once made "I'm interpreting" then "it was accept" into interpreting -> Accept, which would have changed every "interpreting" from then on. Most looks back find nothing. The Memory tab lists her skills with what you say for them, and Forget this deletes one. Untick Learn as she goes in Settings to stop it.
 
 ### The internet
 
@@ -175,12 +175,14 @@ She can message on **WhatsApp**, **Telegram**, and other chat apps on this PC, a
 4. You say **yes**, and only then does she press Enter.
 5. On WhatsApp she then checks the box emptied, so she says it sent only when it did. Telegram draws its own interface and Windows can read nothing inside it, so there she says she can't read it back and you check the window.
 
-Other ways to say it: "Send hi to Mum on WhatsApp", "On Telegram to bittu send hi", "WhatsApp Mum: running late", "Message Bittu on Signal: hi". Saying nothing for 90 seconds leaves the message unsent; saying **no** drops it, and clears the box in the apps she typed into herself.
+Other ways to say it: "Send hi to Mum on WhatsApp", "On Telegram to bittu send hi", "WhatsApp Mum: running late", "Message Bittu on Signal: hi", "Message Mum on WhatsApp saying I'm running late". With Answer without her name on, a message heard without her name is only typed in once the answer model decides it was for her. Asked to send one later, she says she can only send it now.
+
+You have 90 seconds to say yes ("yes", "yes, send it", "go ahead"); after the first few seconds, start with her name: "Jev, send it". Saying nothing for 90 seconds leaves the message unsent; saying **no** ("not now", "forget it") drops it, and clears the box in the apps she typed into herself. After the first few seconds, asking for something else, like "Jev, stop the music", does that instead, and the message stays typed in, unsent.
 
 **She learns who people are.** The first time you name someone she doesn't know, she asks once:
 
 - "Message Mum on WhatsApp: running late" → *"I don't know Mum on WhatsApp yet. What's their phone number, with the country code?"*
-- "+91 98765 43210" → she saves it, then carries on with the message that was waiting.
+- "+91 98765 43210" → she saves it, then carries on with the message that was waiting. The reply has to be just the number or username. A number without its country code, like 98765 43210, gets asked for again.
 - From then on, "message Mum on WhatsApp: hi" is one step.
 
 You can also teach her outright: "Mum's WhatsApp number is +91 98765 43210", "Save bittu on Telegram as @bittu_01". The **Contacts** tab lists everyone she knows, and you can fix or remove them there. They are kept in `%APPDATA%\Hey Jev\contacts.json`, on this PC only.
@@ -212,11 +214,13 @@ Not supported on purpose: groups, replying to the last message, attachments, voi
 4. She reads it back: *"VLC media player 3.0.24 from VideoLAN, the 64-bit version for this PC. Install it?"* If it's installed and something newer is out: *"Git 2.53.0.2 is installed, and 2.55.0.5 is out. Update it?"* If it's already the latest, she says so and asks nothing.
 5. On **yes** it runs as a background task (in the Tasks tab), so she's free while it downloads. winget picks the installer that fits this PC and checks its SHA-256 before running it. If Windows asks whether to allow the install, say yes there. She tells you when it's done, or why it didn't work.
 
+Only install, download and install, reinstall and update start a lookup straight away. "Get me Spotify" or "download VLC" go through the answer model first, then the same lookup and yes.
+
 She installs exactly the version she read back. One goes at a time. Installs can't be scheduled, and one cut off by Jev closing or a restart waits for "approve task N" rather than running again by itself. Saying no, or nothing for 90 seconds, installs nothing.
 
 ### Durable tasks, schedules and commands
 
-The **Tasks** tab is a small durable job queue in `%APPDATA%\Hey Jev\tasks.db`. One worker sleeps when there is nothing due, runs one task at a time and tells you when it finishes. Queued work, recurring schedules and reminders survive closing Jev, signing out and restarting Windows. Work that was due while the PC was off runs once when Jev starts; a repeating task then moves to its next future time rather than running every missed occurrence.
+The **Tasks** tab is a small durable job queue in `%APPDATA%\Hey Jev\tasks.db`. One worker sleeps when there is nothing due and tells you when each task finishes. Commands, installs and research run one at a time on a thread of their own, so a reminder or PC check that falls due meanwhile isn't held up. Queued work, recurring schedules and reminders survive closing Jev, signing out and restarting Windows. Work that was due while the PC was off runs once when Jev starts; a repeating task then moves to its next future time rather than running every missed occurrence.
 
 Examples:
 
@@ -227,7 +231,7 @@ Examples:
 - "Research budget laptops tomorrow at 9 AM."
 - "Check git status in `C:\path\to\project`.", then "Do that at 6 PM." — the later task copies the already validated command; it is not reinterpreted later.
 - "Run the tests in `C:\path\to\project`." Jev uses a project's declared `npm test`, pytest, `dotnet test`, `go test` or `cargo test`; if none is declared, she asks rather than guessing.
-- "What tasks are running?", "What is scheduled?", "Cancel task 3", "Approve task 3."
+- "What tasks are running?", "What is scheduled?", "Cancel my reminders", "Stop reminding me to drink water", "Cancel task 3", "Approve task 3."
 
 Commands run through hidden, non-interactive PowerShell with an existing working folder, at most 120 seconds and 64 KB of stored output. Read-only diagnostics, `git status/diff/log`, and declared test/build/lint/typecheck commands run automatically. Anything that can install, write, delete, move, commit, push, stop a process or change the system waits in **waiting approval**; approve it by voice or in the Tasks tab. Disk formatting, broad forced deletion, registry/security/Defender/firewall changes, restart/shutdown, encoded or nested PowerShell, downloads, credentials/private keys, `.env`, forced Git operations, elevation and similar commands are blocked even if asked. Output is redacted, kept locally and shown in Tasks; Jev only speaks success, exit code or that details are there.
 
@@ -237,7 +241,7 @@ Scheduled work is deliberately limited to reminders, PC lookups, research and gu
 
 She reads the Windows notification list on this PC (the same one the notification centre shows), read only. That's how she answers "any new messages?", and how welcome back tells you who messaged while you were away. Messaging apps count: WhatsApp, Messages, Teams, Outlook, Gmail, Telegram, Slack, Discord, Signal, Instagram and Messenger, and your phone's WhatsApp and texts through Phone Link.
 
-Every 20 seconds she checks a few things and speaks up, once each, as soon as she isn't in the middle of something:
+Every 20 seconds she checks a few things and speaks up, once each, as soon as she isn't in the middle of something and you aren't mid-sentence (she waits up to 10 seconds). Anything that comes up during a dictation is told once it stops:
 
 - a new message, who it's from and the app, never what it says
 - the battery at 20 and 10 percent, when it's not charging
@@ -261,11 +265,13 @@ Any app in the Start menu works by its name. Add apps to `apps.json` (or the App
 
     "vscode": {"app": "Visual Studio Code", "say": "VS Code", "exe": "Code.exe", "heard_as": ["this code", "v s code"]}
 
+A heard_as spelling is only put right where an app is named: said on its own, or after open, close, switch to and the like, so a message, the text to type or a search keeps its words ("type I'm prone to typos" stays as said).
+
 `exe` is only needed when close or switch to can't find the app's windows by its name.
 
 ### Dictation
 
-Say "Hey Jev, transcribe" and the popup shows at the bottom of the screen. Talk as long as you like, then say "Hey Jev, stop transcribing" and the text is pasted where your cursor is (and left on the clipboard). It's written on your PC, so the audio never leaves it. Every dictation is saved to `%LOCALAPPDATA%\Hey Jev\Logs\Hey Jev dictation.jsonl`. To fix words it gets wrong, open the Dictionary tab: add a word and the ways it gets misheard. It saves to `vocabulary.json`, which is gitignored (`vocabulary.example.json` is the starter list).
+Say "Hey Jev, transcribe" and the popup shows at the bottom of the screen. Talk as long as you like, then say "Hey Jev, stop transcribing" and the text is pasted where your cursor is (and left on the clipboard). With Answer without her name on, "transcribe this" said without her name first goes through the is-it-for-her decision, like any other request. It's written on your PC, so the audio never leaves it. Every dictation is saved to `%LOCALAPPDATA%\Hey Jev\Logs\Hey Jev dictation.jsonl`. To fix words it gets wrong, open the Dictionary tab: add a word and the ways it gets misheard. It saves to `vocabulary.json`, which is gitignored (`vocabulary.example.json` is the starter list).
 
 ## What you need
 
@@ -327,16 +333,18 @@ Useful for seeing what she heard, planned and did:
 
 `test_listen.py` has Windows' own voice say "Hey Jev, open Notepad", a follow-up, a bare "Hey Jev", "Hello Jev", a pause after her name, a pause to think mid-sentence and a few things that aren't for her. It runs them through the real voice detector, speech-to-text and Smart Turn, 32 ms at a time, and checks where each turn ended, what it was taken as and what the quick path would do.
 
+Tests: the unit tests live in `tests\`. Run them with `.venv\Scripts\python.exe -m unittest discover -s tests -t .`. `tests\support.py` points her app data at a temp folder and blocks anything that would act on the PC or go online.
+
 Keys can also go in a `.env` file in this folder (`OPENCODE_ZEN_API_KEY`, `FISH_AUDIO_API_KEY`). A key in `.env` takes priority over the one saved in Credential Manager. `.env` can also set `OPENCODE_MODEL`, free models only.
 
 ## How it works
 
 1. The mic hands over 32 ms at a time. While you hold right Alt it goes straight into speech-to-text, so the words are ready a moment after you let go. In Hey Jev mode the mic stays open, and Silero VAD hears where speech starts and pauses. The mic runs in Windows' speech mode (WASAPI with the speech category), so what the PC plays is taken out first.
-2. Smart Turn decides at each pause whether you've finished, and Parakeet writes the words (see Listening above). The words are ready about 0.65 seconds after you stop talking.
-3. A phrase is for her if her name is in it, written however speech-to-text heard it: Jev, Jarvis, Jeff, Joe, Jim, Ju, or run together as "Heijev" or "HF" (`STRONG` and `WEAK` in `siri.py`). Real names like Jeff only count after "hey", "hello", "ok" and so on, or at the start the way you'd call someone ("Jeff, open Chrome", or "Jeff open Chrome", as Nemotron often writes it), so "I told Jeff about it" doesn't wake her. A phrase also counts if it comes right after a bare "Hey Jev", or in the follow-up window. With Answer without her name on, anything else that could be a request goes to the answer model to decide (see Without her name above).
+2. Smart Turn decides at each pause whether you've finished, and Parakeet writes the words (see Listening above). The words are ready about 0.65 seconds after you stop talking on a quiet machine, 1 to 2 seconds when the PC is busy.
+3. A phrase is for her if her name is in it, written however speech-to-text heard it: Jev, Jarvis, Jeff, Jet, Jeth, Joe, Jim, Ju, or run together as "Heijev" or "HF" (`STRONG` and `WEAK` in `siri.py`). Real names like Jeff only count after "hey", "hello", "ok" and so on, or at the start the way you'd call someone ("Jeff, open Chrome", or "Jeff open Chrome", as Nemotron often writes it), so "I told Jeff about it" doesn't wake her. A phrase also counts if it comes right after a bare "Hey Jev", or in the follow-up window. With Answer without her name on, anything else that could be a request goes to the answer model to decide (see Without her name above).
 4. Routines you taught her come first, then simple commands, which match a list of patterns (`QUICK` in `siri.py`). They run straight away, with a scripted reply that was made once and kept in `cache\tts`.
-5. Everything else goes to the answer model with her personality, her memory, the list of her skills, the time, the app in front, what's playing, running timers, your browser profiles and the last half hour of turns, so "close it" and "and Australia?" make sense. It answers with JSON: the steps to take, from a fixed list (open, close, website, youtube, google, media, volume, scroll, keys, type, timer, memory, skill, research, note, screen and so on), and what to say. It can look things up first, on the PC, on the internet or in past conversations, and gets the results back before it answers, up to 4 times. It's told speech-to-text mishears words, so it searches for what you meant ("Avengers Doomshare Tyler" is the Doomsday trailer). The free model's queue makes the same question take anywhere from 2 to 16 seconds, so if it's slow the question goes out again after 2.5 and 5 seconds, and the first answer back is used. After 12 seconds she says she's slow rather than going quiet.
-6. The steps run while she says her line, through Windows: the Start menu to launch apps, window messages to close, minimise and focus them, the volume mixer, Windows' media controls for whatever is playing, YouTube's search page for the top video, the mouse wheel for scrolling, the keyboard for shortcuts, and the clipboard for typing.
+5. Everything else goes to the answer model with her personality, her memory, the list of her skills, the time, the app in front, what's playing, running timers, your browser profiles and the last half hour of turns, so "close it" and "and Australia?" make sense. It answers with JSON: the steps to take, from a fixed list (open, close, website, youtube, google, media, volume, scroll, keys, type, timer, memory, skill, research, note, screen and so on), and what to say. It can look things up first, on the PC, on the internet or in past conversations, and gets the results back before it answers, up to 4 times. It's told speech-to-text mishears words, so it searches for what you meant ("Avengers Doomshare Tyler" is the Doomsday trailer). The free model's queue makes the same question take anywhere from 2 to 16 seconds, so if it's slow the question goes out again after 2.5 and 5 seconds, and the first answer back is used. An empty answer is asked again once within that time, and after 12 seconds she says she's slow rather than going quiet.
+6. The steps run while she says her line, through Windows: the Start menu to launch apps, window messages to close, minimise and focus them, the volume mixer, Windows' media controls for whatever is playing, YouTube's search page for the top video, the mouse wheel for scrolling, the keyboard for shortcuts, and the clipboard for typing. Closing or minimising an app, sending, installing and saving something are said once they're done, and only if they worked.
 7. When she wasn't called by name first (a follow-up, or the name in the middle of a sentence), she lets small talk, words she isn't sure of and anything unclear go (see Is it for her? above), and the model may decide it wasn't for her, like a video saying "thanks for watching". Typing, shortcuts, closing, minimising, lock, sleep and looking at the screen then only go ahead when the words ask for them. Closing an app needs the words to start with "close" or name the app, since a model once planned closing Kiro for "Yeah, do you open close?". Otherwise she asks first, "Should I close Google Chrome?", and a yes or no in the next few seconds decides.
 8. Smart Turn hears most pauses mid-sentence for what they are. If a turn still ends on a word like "to" or "and", as in "so at the end of the day we need to", she waits 1.8 seconds more for the rest.
 
@@ -344,9 +352,9 @@ Keys can also go in a `.env` file in this folder (`OPENCODE_ZEN_API_KEY`, `FISH_
 
 She does what she hears, and a video or someone in the room can say "Hey Jev" too. So there are limits whoever asks:
 
-- Typing, key presses and clicks never go to command windows (Command Prompt, PowerShell, Windows Terminal), and never use the Windows key. Terminal work instead goes through the durable hidden command runner, where code classifies the command as automatic, approval-required or blocked before it starts.
+- Typing, key presses and clicks never go to command windows (Command Prompt, PowerShell, Windows Terminal), and never use the Windows key. Enter is never pressed in a chat app (WhatsApp, Telegram, Signal, Slack, Discord, Teams and the like), so a message only goes out after it's read back and you say yes. Terminal work instead goes through the durable hidden command runner, where code classifies the command as automatic, approval-required or blocked before it starts.
 - Websites are web addresses only, never a file or a program. Apps are opened by their plain name only, never a path.
-- What web pages and messages say is information, never instructions. Pages that try to give her orders are left out, she only reads addresses on the internet, and after reading the web or your messages, typing, shortcuts, closing apps, lock and sleep need a yes first.
+- What web pages and messages say is information, never instructions. Pages, messages, search results and headlines that try to give her orders are left out, she only reads addresses on the internet, and after reading the web or your messages anything that changes things needs a yes first: typing, shortcuts, closing apps, lock and sleep, and also saving or forgetting a contact (she reads the number back), her memory, skills, schedules, dark mode, cancelling timers and approving a task. Opening, playing and looking things up still go ahead. With a shutdown or restart in the plan, that is what she asks about.
 - Messages are never sent without a spoken yes, never to someone she had to guess, and never to a group. The recipient comes from your contacts book as a number or username, so a misheard name can't reach the wrong person, and she won't send at all if the app isn't in front or the words in the box changed.
 - Her memory and skills go through Hermes Agent's threat scanner before they're saved, and her personality before it's used. Routines can only hold steps that act, the same list the model plans from, never a command line.
 
@@ -362,12 +370,12 @@ $0. The answer model is a free Kilo or OpenCode Zen model, the voice is Fish's f
 - She only chimes when you say "Hello Jev" with Nemotron picked. It heard "Hello" without her name, so she listens for what you want instead of answering. Say it, or pick Parakeet in Settings > Speech to text, which hears her name as Joe, Jim or Jill and counts those.
 - She answers to room conversation during a WhatsApp, Teams, Zoom, Discord or browser call. Keep Require her name on calls ticked in Settings; say "Jev" or "Jarvis" during the call. The log prints `[call: ...]` when Windows says one starts.
 - She doesn't answer an unnamed request. Check Settings > Without her name > Answer without her name. During a call, her name is still required.
-- She answers late, or not at all for a while. The log line after each phrase ends with the time and, if she was behind the mic, `Xs behind`. More than 2 seconds behind and she skips to now, logged as `(listening was ... behind, skipped ...)`. That means the CPU was too busy.
+- She answers late, or not at all for a while. The log line after each phrase ends with the time and, if she was behind the mic, `Xs behind`. More than 2 seconds behind, apart from what was said while she was working on a turn, or 20 seconds behind in all (`CATCH_UP`), and she skips to now, logged as `(listening was ... behind, skipped ...)`. That means the CPU was too busy.
 - She answers before you've finished, or waits a beat too long. Smart Turn's lines are `FINISHED`, `MAYBE`, `SETTLE` and `LONGEST` in `speech.Listener`. The log's `stt` time after each phrase is how long the words took once you stopped.
 - She misses "Hey Jev" while a video is playing. Check the log says `speech mode` on the `[mic: ...]` line, and that Echo cancelling is ticked in Settings. Sound from another device, like a TV or a phone, isn't taken out, since Windows only knows what this PC plays. Pause it, or hold right Alt.
 - She stopped hearing you after an update. Untick Echo cancelling in Settings, that opens the mic the old way.
 - A video opens but doesn't play. Chrome waits until its window is on screen. She brings it to the front, but if Chrome was still starting it can stay behind: click it.
-- She misses "Hey Jev" in a quiet room. The log shows phrases that start with "hey" but didn't count, like `(not for me: 'Hey Jet, open Spotify')`. Add the word she heard to `WEAK` in `siri.py`.
+- She misses "Hey Jev" in a quiet room. The log shows phrases that start with "hey" but didn't count, like `(not for me: 'Hey Jed, open Spotify')`. Add the word she heard to `WEAK` in `siri.py`. "Hey Jet" and "Hey Jeth", missed this way before, now count.
 - She says her brain isn't answering. The free answer model stopped working from outside OpenCode. Open Settings, hit Refresh and pick another. Simple commands still work meanwhile.
 - She types or scrolls in the wrong place. Steps go to the app in front, so click the window you mean first, or name it: "open Notepad and write...".
 - The app won't open again. It's still running with the window closed, the shortcut brings it back, or quit it with Ctrl+Q.
