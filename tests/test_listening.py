@@ -570,6 +570,19 @@ class NotOverYou(Case):
     def test_a_heads_up_waits_till_you_finish(self):
         self.wait_then_talk(lambda a: a.var("tell")("New message from Mum on WhatsApp.", "heads-up"))
 
+    def test_in_hold_right_alt_mode_nothing_waits_on_the_open_mic(self):
+        """The listener stops where it was when you pick Hold right Alt, mid-phrase as likely as not: a timer waited
+        10 s on that every time."""
+        a = self.assistant(mode="ptt")
+        said = []
+        a.listener.session, a.var("held")[0] = object(), ("Hey Jev, search", "other", 100, 0.0)
+        with mock.patch.object(siri, "say", lambda line, notify: said.append(line)), \
+                mock.patch.object(siri.win, "chime", lambda name: None), contextlib.redirect_stdout(a.out):
+            start = time.time()
+            a.timer_done({"label": "", "line": "Your pasta is ready.", "secs": 60})
+        self.assertLess(time.time() - start, 2.0)
+        self.assertEqual(said, ["Your pasta is ready."])
+
     def test_a_timer_waits_till_you_finish(self):
         self.wait_then_talk(lambda a: a.timer_done({"label": "", "line": "Your pasta is ready.", "secs": 60}))
 

@@ -3847,7 +3847,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         """Waits while a turn goes on or you're in the middle of saying something, up to most seconds, so a timer, a
         heads-up or a welcome doesn't talk over you: pausing the mic for it threw away the command you were giving."""
         until = time.time() + most
-        while time.time() < until and (busy.locked() or rec.on or held[0] or listener.session is not None):
+        # the listener only while it's listening: in Hold right Alt mode it stopped where it was, mid-phrase as
+        # likely as not, and every timer waited the whole 10 s on that
+        while time.time() < until and (busy.locked() or rec.on or rec.wake and (
+                held[0] or listener.session is not None)):
             time.sleep(0.1)
 
     def timer_done(t, wait=True):
