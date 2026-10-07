@@ -128,6 +128,57 @@ class ToolCalls(unittest.TestCase):
             self.assertEqual(siri.parse_plan(raw)["steps"], steps, raw)
 
 
+class AskAgain(unittest.TestCase):
+    """M4: an empty reply, or one with nothing she can do, is asked again once, in the time that's left."""
+
+    def ask(self, *replies, **kw):
+        self.model = FakeModel(*replies)
+        with patch.object(siri, "ask_model", self.model):
+            return siri.ask_plan([{"role": "user", "content": "who directed Iron Man 2?"}], **kw)
+
+    def test_an_empty_reply_is_asked_again(self):
+        raw, plan, _, _ = self.ask("", '{"steps": [], "say": "Jon Favreau."}', deadline=12.0)
+        self.assertEqual(plan["say"], "Jon Favreau.")
+        self.assertEqual(len(self.model.calls), 2)
+        self.assertLessEqual(self.model.calls[1][1]["deadline"], 12.0)  # the same deadline, not a new one
+
+    def test_only_made_up_steps_is_asked_again(self):
+        _, plan, _, _ = self.ask('{"steps": [{"do": "Here"}], "say": ""}', '{"steps": [{"do": "new_tab"}], "say": ""}')
+        self.assertEqual(plan["steps"], [{"do": "new_tab"}])
+
+    def test_not_again_without_time_or_when_asked_not_to(self):
+        self.ask("", '{"say": "late"}', deadline=2.0)
+        self.assertEqual(len(self.model.calls), 1)
+        self.ask("", '{"say": "late"}', again=False)
+        self.assertEqual(len(self.model.calls), 1)
+
+    def test_a_review_that_found_nothing_is_an_answer(self):
+        _, plan, _, _ = self.ask('{"memory": [], "skills": [], "words": {}}')
+        self.assertEqual(len(self.model.calls), 1)
+        self.assertEqual(plan["memory"], [])
+
+    def test_a_failed_retry_keeps_the_first_answer(self):
+        calls = []
+
+        def model(messages, **kw):
+            calls.append(kw)
+            if len(calls) > 1:
+                raise TimeoutError("no answer in 9 s")
+            return "", {}, "fake-model"
+        with patch.object(siri, "ask_model", model):
+            raw, plan, _, _ = siri.ask_plan([{"role": "user", "content": "hi"}])
+        self.assertEqual((raw, plan), ("", {"steps": [], "say": ""}))
+        self.assertEqual(len(calls), 2)
+
+    def test_think_asks_again_only_when_named(self):
+        with patch.object(siri, "ask_plan", wraps=siri.ask_plan) as ask, \
+                patch.object(siri, "ask_model", FakeModel('{"to": "others"}')), \
+                patch.object(siri.history, "recent", lambda *a, **k: []), \
+                patch.object(siri, "context", lambda: ""), patch.object(siri, "memory_block", lambda: ""):
+            siri.think("open the door for him", "cold")
+        self.assertIs(ask.call_args.kwargs["again"], False)
+
+
 class WebSearch(unittest.TestCase):
     """M5: the sources share one deadline, and what's there by then is the answer."""
 

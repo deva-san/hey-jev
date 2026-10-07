@@ -1912,14 +1912,25 @@ def _mend(step):
     return step
 
 
-def ask_plan(messages, **kw):
-    """(raw, plan, usage, model): ask_model and parse_plan, asking once more if the JSON came back broken."""
+def ask_plan(messages, again=True, deadline=DEADLINE, **kw):
+    """(raw, plan, usage, model): ask_model and parse_plan, asking once more, in the time that's left, if the JSON came
+    back broken, or with again if nothing did: no reply, or only steps there are none of. 6 of 102 live turns on
+    7 October came back empty after 2 to 19 s, and each would have been "Sorry, could you say that again?"."""
+    end, first = time.time() + deadline, None
     for attempt in (1, 2):
-        raw, usage, model = ask_model(messages, **kw)
+        try:
+            raw, usage, model = ask_model(messages, deadline=end - time.time(), **kw)
+        except Exception:
+            if first is None:
+                raise
+            return first  # the second try failed or ran out of time: the first answer it is
         plan = parse_plan(raw)
-        if not plan.get("broken") or attempt == 2:
+        empty = again and not plan["steps"] and not str(plan.get("say") or "").strip() and set(plan) <= {"steps", "say"}
+        if attempt == 2 or not (plan.get("broken") or empty) or end - time.time() < 3.0:
             return raw, plan, usage, model
-        print(f"  broken JSON from {model}, asking again: {raw[:120]!r}")
+        first = raw, plan, usage, model
+        print(f"  {'broken JSON' if plan.get('broken') else 'nothing to do or say'} from {model}, asking again: "
+              f"{raw[:120]!r}")
 
 
 def _day(day):
@@ -2040,7 +2051,7 @@ def think(text, gate, notify=None, sure=1.0):
     needs_task, task_retry = bool(TASK_REQUEST.search(text)), False
     for round_ in range(ROUNDS + 1):
         t = time.time()
-        raw, plan, usage, model = ask_plan(messages, deadline=DEADLINE if round_ == 0 else 14.0)
+        raw, plan, usage, model = ask_plan(messages, again=not gate, deadline=DEADLINE if round_ == 0 else 14.0)
         task_steps = [s for s in plan["steps"] if s.get("do") in ("command", "schedule", "task_control")]
         if needs_task and not task_steps and not plan.get("ignore") and not task_retry:
             task_retry = True
