@@ -151,5 +151,27 @@ class Messages(Routing):
                                          ("WhatsApp", "Mum", "that was fun")])
 
 
+class UnnamedMessages(Routing):
+    """R6: without her name no chat opens before the model decides it was for her, and there are no messages later."""
+
+    def test_no_chat_opens_or_install_is_looked_up_without_her_name(self):
+        for words in ("WhatsApp Mum: running late", "install VLC"):
+            with self.subTest(words=words):
+                self.assertIsNone(self.quick(words, "cold"))
+                asked, _, _ = self.handle(words, "cold")
+                self.assertTrue(asked)
+        self.assertEqual((self.messages, self.installs), ([], []))
+        self.quick("WhatsApp Mum: running late", True)  # just after she answered: as with her name
+        self.assertEqual(self.messages, [("WhatsApp", "Mum", "running late")])
+
+    def test_a_message_for_later_is_refused(self):
+        plan = self.quick("text Mum on WhatsApp tomorrow at 9 saying hi")
+        self.assertEqual(self.messages, [])
+        self.assertEqual(plan["steps"], [])
+        self.assertIn("not later", plan["say"])
+        self.quick("Message Mum on WhatsApp: tomorrow I'm coming home")
+        self.assertEqual(self.messages, [("WhatsApp", "Mum", "tomorrow I'm coming home")])
+
+
 if __name__ == "__main__":
     unittest.main()

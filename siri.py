@@ -901,6 +901,11 @@ def _teach_search(m):
 
 def _message(m):
     g = m.groupdict()
+    # "text Mum on WhatsApp tomorrow at 9 saying hi" staged "tomorrow at 9 saying hi" to send now: messages are
+    # never sent later (README), so say so rather than send it now
+    later = rf"(?:{WHEN}|tomorrow|tonight|later|on \w+day|every \w+|in (?:an?|\d+|\w+) (?:minutes?|hours?))"
+    if re.match(rf"{later}(?:,? {later})*,? (?:saying|that|to say)\b", g["text"], re.I):
+        return make_plan(say="I can only send a message now, with your yes, not later.")
     return stage_message(g["app"], g["who"], g["text"])
 
 
@@ -1272,16 +1277,17 @@ def as_said(lowered, words):
     return m.group(0).strip() if m else lowered
 
 
-def quick(words):
-    """A plan for a simple command without asking the model, so it happens straight away. None if it isn't one."""
-    plan = _quick(words)
+def quick(words, gate=False):
+    """A plan for a simple command without asking the model, so it happens straight away. None if it isn't one.
+    gate as in handle: "cold" for words said without her name, which may not be for her."""
+    plan = _quick(words, gate)
     for step in (plan or {}).get("steps") or []:
         if step.get("do") == "type" and step.get("text"):
             step["text"] = as_said(step["text"], words)
     return plan
 
 
-def _quick(words):
+def _quick(words, gate=False):
     answered = finish_asked(words)  # the number or username she just asked for
     if answered:
         return answered
@@ -1292,11 +1298,13 @@ def _quick(words):
         if phrase and t == phrase:
             print(f"  routine: {skill['dir']}")
             return make_plan(skill["plan"]["steps"], skill["plan"]["say"])
-    message = direct_message(words)
+    # Without her name the model decides it was for her first: staging opens the chat with the words typed in
+    # ("WhatsApp Mum: running late" from across the room), and an install sits through winget searches
+    message = direct_message(words) if gate != "cold" else None
     if message:
         print("  local message")
         return message
-    install = direct_install(words)
+    install = direct_install(words) if gate != "cold" else None
     if install:
         print("  local install")
         return install
@@ -3266,7 +3274,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
             return False
         plan = make_plan(say=say_line("go_ahead"))  # "yes" to her "Anything you'd like me to do?"
     else:
-        plan = quick(words)
+        plan = quick(words, gate)
         # Always-on mic: typing, Enter, closing apps and other consequential changes need the model to decide the
         # words were for her first. Safe opens, sites, volume, media, scrolling and tab navigation stay instant.
         if plan and gate == "cold" and any(s.get("do") in {"type", "close", "minimise", "lock", "sleep", "dark_mode", "screen"} | POWER_STEPS
