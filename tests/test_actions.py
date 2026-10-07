@@ -34,30 +34,57 @@ class Keys(unittest.TestCase):
             self.assertIn(siri.combo(keys), siri.SAFE_KEYS, keys)
 
 
-def session(app, position):
-    return SimpleNamespace(source_app_user_model_id=app, position=position)
+def session(app, position=0.0, playing=True):
+    return SimpleNamespace(source_app_user_model_id=app, position=position, playing=playing)
+
+
+VLC_EXE = r"C:\Program Files\VideoLAN\VLC\vlc.exe"
 
 
 class Media(unittest.TestCase):
-    def previous(self, app, position):
-        sent = []
-        with mock.patch.object(siri.win, "media_session", lambda hint=None: session(app, position)), \
+    def media(self, action, now=None, vlc=(), front=VLC_EXE):
+        """What media(action) did, with now as Windows' media controls' session and vlc as VLC's windows."""
+        done = []
+        with mock.patch.object(siri.win, "media_session", lambda hint=None: now), \
+                mock.patch.object(siri.win, "media_playing", lambda s: s.playing), \
                 mock.patch.object(siri.win, "media_position", lambda s: s.position), \
-                mock.patch.object(siri.win, "media_command", lambda s, action: sent.append(action) or True), \
+                mock.patch.object(siri.win, "media_command", lambda s, action: done.append(action) or True), \
+                mock.patch.object(siri.win, "app_windows", lambda app: list(vlc) if app is siri.VLC else []), \
+                mock.patch.object(siri.win, "bring_to_front", lambda hwnd: done.append(f"front {hwnd}")), \
+                mock.patch.object(siri.win, "foreground_exe", lambda: front), \
+                mock.patch.object(siri.win, "press", lambda *keys: done.append(keys)), \
                 mock.patch.object(siri.time, "sleep", lambda secs: None):
-            siri.media("previous")
-        return sent
+            siri.media(action)
+        return done
 
     def test_previous_on_spotify_mid_song_goes_back_a_song(self):
         """One "previous" 40 s into a Spotify song only started it again."""
-        self.assertEqual(self.previous("Spotify.exe", 40.0), ["previous", "previous"])
+        self.assertEqual(self.media("previous", session("Spotify.exe", 40.0)), ["previous", "previous"])
 
     def test_previous_at_the_start_of_a_song_is_one_press(self):
-        self.assertEqual(self.previous("Spotify.exe", 1.0), ["previous"])
+        self.assertEqual(self.media("previous", session("Spotify.exe", 1.0)), ["previous"])
 
     def test_previous_elsewhere_is_one_press(self):
         """YouTube's previous goes back a video straight away, two would skip one."""
-        self.assertEqual(self.previous("Chrome", 40.0), ["previous"])
+        self.assertEqual(self.media("previous", session("Chrome", 40.0)), ["previous"])
+
+    def test_vlc_gets_its_own_keys(self):
+        """VLC 3.0.16 isn't in Windows' media controls: "pause" said nothing was playing, or paused something else."""
+        self.assertEqual(self.media("pause", None, vlc=[42]), ["front 42", ("space",)])
+        self.assertEqual(self.media("next", session("Chrome", playing=False), vlc=[42]), ["front 42", ("n",)])
+        self.assertEqual(self.media("previous", session("Chrome", playing=False), vlc=[42]), ["front 42", ("p",)])
+
+    def test_what_is_playing_in_the_media_controls_comes_first(self):
+        self.assertEqual(self.media("pause", session("Spotify.exe"), vlc=[42]), ["pause"])
+        self.assertEqual(self.media("play", session("Spotify.exe", playing=False), vlc=[42]), ["play"])
+
+    def test_vlc_that_wont_come_to_the_front_gets_no_keys(self):
+        with self.assertRaisesRegex(RuntimeError, "Nothing's playing"):
+            self.media("pause", None, vlc=[42], front=r"C:\Windows\explorer.exe")
+
+    def test_nothing_playing_and_no_vlc(self):
+        with self.assertRaisesRegex(RuntimeError, "Nothing's playing"):
+            self.media("pause", None)
 
 
 class RamFigures(unittest.TestCase):

@@ -2505,9 +2505,22 @@ def spotify_play(tries=12):
     raise RuntimeError("Spotify never started playing")
 
 
+VLC = win.App("VLC media player", "vlc.exe")
+VLC_KEYS = {"play": ("space",), "pause": ("space",), "next": ("n",), "previous": ("p",)}  # its own shortcuts
+
+
 def media(action):
-    """Play, pause, next or previous on what Windows shows in its media controls: YouTube in a browser, Spotify, VLC."""
+    """Play, pause, next or previous on what Windows shows in its media controls: YouTube in a browser, Spotify. VLC 3
+    (3.0.16 here) isn't in them, so pause acted on some other app or said nothing was playing: when nothing there is
+    playing and VLC is open, it's brought to the front and gets its own keys, the way YouTube does below."""
     session = win.media_session()
+    vlc = win.app_windows(VLC) if not session or (action != "play" and not win.media_playing(session)) else []
+    if vlc:
+        win.bring_to_front(vlc[0])
+        time.sleep(0.3)
+        if VLC.matches(win.foreground_exe()):
+            win.press(*VLC_KEYS[action])
+            return
     if session:
         # Spotify takes "previous" a few seconds into a song as back to its start, so it gets it twice, as on the Mac
         try:
