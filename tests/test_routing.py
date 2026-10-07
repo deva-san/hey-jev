@@ -106,5 +106,26 @@ class RoomTalk(Routing):
         self.assertEqual(self.steps("let's play some music"), [{"do": "youtube", "query": "some music", "play": True}])
 
 
+class Installs(Routing):
+    """A18, A41: only an install word looks an app up in winget."""
+
+    def test_everyday_asks_arent_installs(self):
+        for words in ("get me the weather", "get me the latest news", "Get me the weather in Delhi",
+                      "set up dark mode", "download the youtube video", "download the report"):
+            self.quick(words)
+        self.assertEqual(self.installs, [])
+
+    def test_get_me_the_weather_is_the_weather(self):
+        with mock.patch.object(siri.web, "weather", return_value={}) as weather, \
+                mock.patch.object(siri, "weather_line", lambda w, day=None: "Sunny."):
+            self.assertEqual(self.quick("Get me the weather in Delhi")["say"], "Sunny.")
+        weather.assert_called_once_with("delhi")
+
+    def test_install_words_still_install(self):
+        for words in ("download and install VLC", "install Zoom on this PC", "update Git"):
+            self.quick(words)
+        self.assertEqual(self.installs, ["VLC", "Zoom", "Git"])
+
+
 if __name__ == "__main__":
     unittest.main()

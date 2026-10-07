@@ -794,15 +794,18 @@ def stage_message(app, contact, text):
 STAGED_INSTALL = {"ready": None, "until": 0.0}
 INSTALL_WAIT = 90.0
 INSTALL_APP = r"(?P<app>[\w .+&'#-]{2,40}?)"
+# Only an install said in so many words: with "get me", "set up" and "download" too, "get me the latest news" was
+# looked up in winget for 12 s and offered NewsLeecher, and "get me the weather in Delhi" never got the weather.
+# The model plans an install for the rest ("get me Spotify"), and that's looked up and asked about the same way.
 INSTALL_PATTERNS = [re.compile(p, re.I) for p in (
     rf"(?:please\s+)?(?:can you\s+|could you\s+)?(?:download and install|download & install|download and set up|install|"
-    rf"reinstall|set up|get me|download)\s+(?:the\s+)?(?:latest\s+(?:version\s+of\s+)?|newest\s+(?:version\s+of\s+)?)?"
+    rf"reinstall)\s+(?:the\s+)?(?:latest\s+(?:version\s+of\s+)?|newest\s+(?:version\s+of\s+)?)?"
     rf"{INSTALL_APP}(?:\s+(?:app|application|software|program))?(?:\s+(?:on|for|to|in)\s+(?:this|my|the)\s+"
     rf"(?:pc|laptop|computer|system))?(?:\s+for me)?(?:\s+please)?",
     rf"(?:please\s+)?(?:update|upgrade)\s+(?:the\s+)?{INSTALL_APP}(?:\s+(?:app|application|software|program))?"
     rf"(?:\s+to the latest(?: version)?)?(?:\s+(?:on|for)\s+(?:this|my)\s+(?:pc|laptop|computer))?",
 )]
-# "download this video", "set up a meeting", "get me a coffee": not apps
+# "download and install this video", "update the meeting", "update me": not apps
 NOT_AN_APP = re.compile(r"^(?:this|that|it|these|those|a|an|the|my|some|all|every|everything|me|video|file|pdf|image|"
                         r"photo|song|music|meeting|reminder|timer|alarm|call|coffee|water|updates?|windows)\b", re.I)
 
@@ -960,7 +963,7 @@ QUICK = [(re.compile(p), make) for p, make in (
     (r"(?:cancel|stop) task (?P<id>\d+)", _task_control("cancel")),
     (r"approve task (?P<id>\d+)", _task_control("approve")),
     # the weather, straight from Open-Meteo
-    (r"(?:(?:what(?:'s| is)|how(?:'s| is)|tell me|check|give me)(?: the)? )?(?:weather|temperature|forecast)"
+    (r"(?:(?:what(?:'s| is)|how(?:'s| is)|tell me|check|give me|get me)(?: the)? )?(?:weather|temperature|forecast)"
      r"(?: like| forecast| going to be like| gonna be like)?(?: (?:in|at|for) (?P<place>[a-z][a-z .'-]*?))?"
      r"(?: (?P<day>today|tomorrow|tonight|now|right now|outside|(?:the )?day after tomorrow))?"
      r"(?: (?:in|at|for) (?P<place2>[a-z][a-z .'-]*?))?(?: like)?", _weather),
