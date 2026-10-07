@@ -2506,8 +2506,17 @@ def media(action):
     """Play, pause, next or previous on what Windows shows in its media controls: YouTube in a browser, Spotify, VLC."""
     session = win.media_session()
     if session:
+        # Spotify takes "previous" a few seconds into a song as back to its start, so it gets it twice, as on the Mac
+        try:
+            twice = action == "previous" and "spotify" in str(session.source_app_user_model_id or "").lower() \
+                and win.media_position(session) > 3
+        except Exception:
+            twice = False
         if not win.media_command(session, action) and action in ("next", "previous"):
             raise RuntimeError("That player can't skip")
+        if twice:
+            time.sleep(0.3)
+            win.media_command(session, "previous")
         return
     found = youtube_window() if action != "pause" else None
     if found:  # a YouTube page that hasn't played yet isn't in the media controls, its own keys still work
