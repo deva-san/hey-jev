@@ -12,11 +12,12 @@ import html
 import ipaddress
 import json
 import re
+import socket
 import threading
 import time
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -128,16 +129,32 @@ class _Reader(HTMLParser):
 
 
 def _public(url):
-    """Only web addresses on the internet, never this PC or the home network."""
+    """Only web addresses on the internet, never this PC or the home network. A name counts by where it points, since
+    names like 127.0.0.1.nip.io or localtest.me point straight back here; one that doesn't point anywhere doesn't."""
     p = urlparse(url)
     host = (p.hostname or "").lower()
     if p.scheme not in ("http", "https") or not host or host == "localhost" or host.endswith((".local", ".lan")):
         return False
     try:
-        ip = ipaddress.ip_address(host)
-        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved)
-    except ValueError:
-        return True
+        ips = [ipaddress.ip_address(str(a[4][0]).split("%")[0])
+               for a in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)]
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return bool(ips) and all(ip.is_global and not ip.is_multicast for ip in ips)
+
+
+def _get(url):
+    """A page, its redirects followed only to addresses on the internet. Each is checked before it's asked for:
+    requests would follow one to the router first, and only then could its address be checked."""
+    for _ in range(6):
+        r = S.get(url, headers=UA, timeout=10, stream=True, allow_redirects=False)
+        if not r.is_redirect:
+            return r
+        r.close()
+        url = urljoin(r.url, r.headers["location"])
+        if not _public(url):  # it sent her somewhere on this PC or the home network
+            raise RuntimeError("I only read pages on the internet")
+    raise requests.TooManyRedirects(f"more than 5 redirects from {url}")
 
 
 def _story(url):
@@ -172,10 +189,8 @@ def read(url, limit=5000):
 
     def make():
         try:
-            with S.get(url, headers=UA, timeout=10, stream=True) as r:
+            with _get(url) as r:
                 r.raise_for_status()
-                if not _public(r.url):  # it sent her somewhere on this PC or the home network
-                    raise RuntimeError("I only read pages on the internet")
                 data = b""
                 for chunk in r.iter_content(65536):
                     data += chunk
