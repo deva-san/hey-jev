@@ -3236,6 +3236,25 @@ def let_go(plan):
     return None
 
 
+def tab_not_browser(plan, words):
+    """"Close this tab" is Ctrl+W, never quitting the browser. A model planned closing Google Chrome for "okay, close
+    this tab", asked "Should I close Google Chrome?" and on a yes closed it all, saying "Closed the tab for you", and
+    for "Okay close the" said "Tab closed." as all of Chrome went. A plan she'd ask about first is put right inside,
+    and asked about again only if something else in it still needs it."""
+    inner = plan.get("confirm") or plan
+    t, said = plain(words), plain(str(inner.get("say") or ""))
+    tab = re.search(r"\btabs?\b", t) or (re.search(r"\btabs?\b", said) and not re.search(rf"\b(?:{BROWSER_WORDS})\b", t))
+    if not tab or re.search(r"\b(?:all|every|whole|browser|window)\b", f"{t} {said}"):
+        return plan
+    steps = [{"do": "keys", "keys": "ctrl+w"} if isinstance(s, dict) and s.get("do") == "close"
+             and APP_LOOKUP.get(key_of(s.get("app") or "")) in BROWSERS else s for s in inner.get("steps") or []]
+    if steps == (inner.get("steps") or []):
+        return plan
+    print("  (a tab, not the whole browser: ctrl+w)")
+    mended, risky = {**inner, "steps": steps}, plan.get("confirm") and needs_asking(steps, words)
+    return {**plan, "say": confirm_question(risky), "confirm": mended} if risky else mended
+
+
 PENDING = {"plan": None, "until": 0.0}  # a plan waiting on a yes or no, see think
 YES = re.compile(r"(?:yes|yeah|yep|yup|ya|sure|ok|okay|do it|go ahead|go on|please|please do|correct|right|haan|ha|"
                  r"avunu|of course)(?: (?:yes|please|do it|go ahead|sure|thanks|thank you))*")  # after plain()
@@ -3305,6 +3324,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
                 print("  (not for me, staying quiet)")
                 emit(notify, "Ready", "That didn't sound like it was for me")
                 return False
+        plan = tab_not_browser(plan, words or text)
         why = let_go(plan) if gate else None
         if why:  # never "sorry, say that again" to someone else's conversation
             print(f"  (no name {why}, staying quiet: {json.dumps(plan, ensure_ascii=False)[:200]})")

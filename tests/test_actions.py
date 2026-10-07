@@ -169,6 +169,56 @@ class SaysWhatHappened(unittest.TestCase):
         self.assertEqual(order, ["Opening it now.", "opened"])
 
 
+class Turn(unittest.TestCase):
+    """Whole turns through handle(): what she said and pressed, with the model, her voice and the learning loop
+    stubbed. A test patches siri.think for what the model would plan."""
+    def setUp(self):
+        self.said, self.pressed = [], []
+        for target, name, value in ((siri, "say", lambda line, notify: self.said.append(line)),
+                                    (siri, "learn_later", lambda *a: None), (siri, "media_playing", lambda: False),
+                                    (siri, "asked_last", lambda within=0: False), (siri, "not_into_shell", lambda: None),
+                                    (siri.win, "press", lambda *keys: self.pressed.append(keys))):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        siri.PENDING.update(plan=None, until=0.0)
+        siri.STAGED.update(ready=None, until=0.0)
+        siri.STAGED_INSTALL.update(ready=None, until=0.0)
+
+    def model(self, plan):
+        return mock.patch.object(siri, "think", lambda *a, **kw: plan)
+
+
+class CloseTab(Turn):
+    def test_close_this_tab_planned_as_closing_chrome_closes_the_tab(self):
+        """Log, 11:08: the model planned closing Google Chrome, she asked, "Yeah, right", and all of Chrome went."""
+        plan = {"steps": [], "say": "Should I close Google Chrome?",
+                "confirm": {"steps": [{"do": "close", "app": "Google Chrome"}], "say": "Closed the tab for you, Hari."}}
+        with self.model(plan), mock.patch.object(siri.win, "quit_app", tripwire_quit):
+            siri.handle("England does not okay close this tab", gate="cold")
+        self.assertEqual(self.pressed, [("ctrl", "w")])
+        self.assertEqual(self.said, ["Closed the tab for you, Hari."])
+        self.assertIsNone(siri.PENDING["plan"])
+
+    def test_tab_closed_said_for_closing_chrome_closes_the_tab(self):
+        """Log, 11:35: "Okay close the" -> "Tab closed." as she closed all of Chrome."""
+        with self.model({"steps": [{"do": "close", "app": "Google Chrome"}], "say": "Tab closed."}), \
+                mock.patch.object(siri.win, "quit_app", tripwire_quit):
+            siri.handle("Okay close the", gate="cold")
+        self.assertEqual(self.pressed, [("ctrl", "w")])
+
+    def test_close_chrome_still_closes_chrome(self):
+        closed = []
+        with self.model({"steps": [{"do": "close", "app": "Google Chrome"}], "say": "Closing Chrome and its tabs."}), \
+                mock.patch.object(siri.win, "quit_app", lambda app: closed.append(app.name)):
+            siri.handle("close chrome and everything in it")
+        self.assertEqual((closed, self.pressed), (["Google Chrome"], []))
+
+
+def tripwire_quit(app):
+    raise AssertionError(f"quit {app.name}")
+
+
 class Voice(unittest.TestCase):
     def test_a_line_she_says_now_waits_seconds_for_fish_not_a_minute(self):
         """The mic is paused while she talks, and Fish once took 17 s to start: with 60 s she was silent and deaf."""
