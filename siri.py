@@ -144,10 +144,11 @@ MAYBE_FOR = 8.0  # seconds that listening lasts
 
 
 def wait_for_rest(words):
-    """For speech.Listener's hold_for, with Nemotron: wait the longest before ending a turn that's only "Hello" so
-    far, so "Hello [breath] Jev" doesn't end before her name. Only that: Nemotron writes each word about half a
-    second late, so most sentences look cut off ("open") at the pause, and waiting on those took the words from
-    0.28 to 0.61 s. A phrase that really stops on "open" or "and" waits for the rest in on_phrase (see DANGLING)."""
+    """For speech.Listener's hold_for: wait the longest before ending a turn that's only "Hello" so far, so "Hello
+    [breath] Jev" doesn't end before her name. words: Nemotron's as you talk, or for Parakeet and Whisper what they
+    wrote of a short turn at its pause. Only that: Nemotron writes each word about half a second late, so most
+    sentences look cut off ("open") at the pause, and waiting on those took the words from 0.28 to 0.61 s. A phrase
+    that really stops on "open" or "and" waits for the rest in on_phrase (see DANGLING)."""
     return bool(GREETING_ONLY.fullmatch(words))
 MISSED_KEEP = 10  # those greetings kept as clips in Logs\missed, to test fixes on Hari's real voice (he said yes)
 
@@ -3639,7 +3640,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     checked = [None]  # where the speech last checked early for her name began
     partials = ThreadPoolExecutor(1)
     listener = speech.Listener(speech.end_of_speech(starting), ears, on_phrase, on_speech=warm, turn=turn,
-                               on_words=on_words, hold_for=wait_for_rest if ears.live else None,
+                               on_words=on_words, hold_for=wait_for_rest,
                                is_hers=lambda words: bool(words) and bool(find_name(words)))
 
     def show_listening():

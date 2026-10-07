@@ -309,5 +309,41 @@ class MaxTurn(Case):
         self.assertGreater(phrases[2][0] / RATE, 1.0 + speech.Listener.PRE_ROLL)  # its pre-roll, for a soft "H"
 
 
+# --------------------------------------------------------------------------- T1: "Hello [700 ms] Jev" with Parakeet
+class BareGreeting(Case):
+    @staticmethod
+    def hello_jev(audio):
+        return "Hello Jev." if segments(audio) > 1 else "Hello."
+
+    def test_hello_then_her_name_after_a_breath_is_one_turn_with_parakeet(self):
+        ear, phrases = listener(FakeEars(write=self.hello_jev), hold_for=siri.wait_for_rest)
+        for block in blocks(0.5, 0.0) + blocks(0.4, 1.0) + blocks(0.7, 0.0) + blocks(0.3, 1.0) + blocks(1.5, 0.0):
+            ear.feed(block)
+        self.assertEqual([p[2] for p in phrases], ["Hello Jev."])
+
+    def test_a_bare_greeting_ends_after_the_longest_wait_written_once(self):
+        ears = FakeEars(write=self.hello_jev)
+        ear, phrases = listener(ears, hold_for=siri.wait_for_rest)
+        for block in blocks(0.5, 0.0) + blocks(0.4, 1.0) + blocks(2.0, 0.0):
+            ear.feed(block)
+        self.assertEqual([p[2] for p in phrases], ["Hello."])
+        quiet = (phrases[0][3] - int(round(0.9 * RATE / BLOCK)) * BLOCK) / RATE
+        self.assertAlmostEqual(quiet, speech.Listener.LONGEST, delta=0.05)
+        self.assertEqual(ears.calls, 1)
+
+    def test_other_short_turns_end_as_soon_as_before(self):
+        """The hold costs nothing for anything but a bare greeting: same end, one transcription."""
+        ends = []
+        for hold in (None, siri.wait_for_rest):
+            ears = FakeEars(write=lambda audio: "Louder.")
+            ear, phrases = listener(ears, hold_for=hold)
+            for block in blocks(0.5, 0.0) + blocks(0.5, 1.0) + blocks(2.0, 0.0):
+                ear.feed(block)
+            self.assertEqual(len(phrases), 1)
+            self.assertEqual(ears.calls, 1)
+            ends.append(phrases[0][3])
+        self.assertEqual(ends[0], ends[1])
+
+
 if __name__ == "__main__":
     unittest.main()

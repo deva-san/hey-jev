@@ -125,7 +125,7 @@ def main():
             words["seen"] = fed[0]
 
     listener = speech.Listener(speech.end_of_speech(), ears, on_phrase, turn=turn, on_words=on_words,
-                               hold_for=siri.wait_for_rest if ears.live else None)
+                               hold_for=siri.wait_for_rest)
     speech_ends, starts = [], []  # where each line's voice starts and stops, in samples from the start
     for (gap, _, _), clip in zip(SCRIPT, clips):
         audio = np.concatenate([np.zeros(int(gap * speech.RATE), "float32"), clip])

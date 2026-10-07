@@ -380,6 +380,7 @@ class Listener:
         self.turn_start = self.onset = self.voice = 0  # where the turn's audio starts, its speech, and the last of it
         self.cut = 0  # where the last turn cut at MAX_TURN ended, so the next one doesn't hear any of it again
         self.chance, self.turn_ms, self.words = None, 0, ""
+        self.early = None  # (words, ms) of a short turn Parakeet or Whisper wrote at its pause, see feed
         self.ended = (None, 0.0)
 
     def arm(self, secs):
@@ -423,11 +424,11 @@ class Listener:
         return "other"
 
     def _end(self):
-        audio, kind, session = self._audio(self.turn_start), self._kind(), self.session
+        audio, kind, session, early = self._audio(self.turn_start), self._kind(), self.session, self.early
         quiet = (self.pos - self.voice) / RATE
-        self.session, self.words, self.talking = None, "", False
+        self.session, self.words, self.talking, self.early = None, "", False, None
         self.ended = (self.chance, quiet)  # why it ended, for the log: Smart Turn's chance and the quiet
-        text, ms = session.finish(quiet)
+        text, ms = early or session.finish(quiet)
         self.on_phrase(audio, kind, text, ms + self.turn_ms)
 
     def feed(self, block, dictating=False):
@@ -465,7 +466,7 @@ class Listener:
         if talking:
             if not was:
                 self.speech_start = self.pos - len(block)
-            self.chance = None  # still talking, so what Smart Turn said no longer counts
+            self.chance = self.early = None  # still talking, so what Smart Turn said or was written no longer counts
         else:
             self.speech_start = None
         if self.session.live:
@@ -496,4 +497,11 @@ class Listener:
         if quiet >= self.LONGEST or (not held and (
                 (self.chance is not None and self.chance >= self.FINISHED) or
                 (quiet >= self.SETTLE and (self.chance is None or self.chance >= self.MAYBE)))):
+            if not self.session.live and spoke < self.SHORT and quiet < self.LONGEST:
+                # Parakeet and Whisper only write once you stop, so a short turn is written here, when it would end
+                # anyway, and waits the same if that's only a greeting: "Hello [700 ms] Jev" came out as "Hello." and
+                # "Jeff". Anything else ends as soon as before, without being written twice
+                self.early = self.early or self.session.finish(quiet)
+                if self.hold_for(self.early[0]):
+                    return
             self._end()
