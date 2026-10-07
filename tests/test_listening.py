@@ -518,6 +518,27 @@ class WhileSheThinks(Case):
             a.listen()
         self.assertEqual(handled, [(self.FIRST, False), (self.SECOND, False), (third, True)])
 
+    def test_nor_what_it_says_while_she_thinks_on_one_that_ended_at_the_break(self):
+        """The second request ended as she answered the first, and the room talked while she thought on it: that
+        isn't a follow-up to either answer."""
+        room = "pass the salt please"
+        a = self.assistant(ears=FakeEars(write=lambda audio: room if np.any(np.isclose(audio, 0.7)) else
+                                         self.SECOND if np.any(np.isclose(audio, 0.8)) else self.FIRST))
+        handled = []
+
+        def handle(text, words, stt_ms=None, notify=None, gate=False):
+            handled.append((str(text), gate))
+            if len(handled) == 1:
+                a.queue(blocks(0.5, 0.0) + blocks(2.0, 0.8) + blocks(0.3, 0.0))
+            elif len(handled) == 2:
+                a.queue(blocks(0.5, 0.0) + blocks(1.5, 0.7) + blocks(1.5, 0.0))
+            siri.say("Done.", None)
+            return True
+        with mock.patch.object(siri, "handle", handle), mock.patch.object(siri, "speak", lambda line: 0),                 mock.patch.dict(siri.settings._load(), {"no_name": False}):
+            a.speak(blocks(0.5, 0.0) + blocks(2.0, 0.9) + blocks(1.5, 0.0))
+            a.listen()
+        self.assertEqual(handled, [(self.FIRST, False), (self.SECOND, False)])
+
 
 # --------------------------------------------------------------------------- A7: the rest of a held phrase
 class HeldPhrase(Case):

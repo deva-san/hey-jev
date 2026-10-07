@@ -3698,10 +3698,13 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                     gen = g
                     # a break in the audio. Her answer: a turn in a pause counts as finished. Not right Alt or a mode
                     # or mic change, as before, or switching back to Always listening acted on what was left hours ago
+                    last = answered[0]
                     if g == answered[0]:
                         listener.end()
                     held[0] = None  # and what was waiting for the rest goes
-                    listener.reset(next_window[0])
+                    # a turn that ended just now and was answered has its window opened at that answer's break (see
+                    # window_ask): opened here, what the room said while she thought on it went to her as a follow-up
+                    listener.reset(next_window[0] if answered[0] == last else 0.0)
                     next_window[0] = 0.0
                 # a turn ended without her talking, so no reset: open or close it here. If she talked, what's still
                 # waiting from before that was said before her answer, and with the window opened on it "pass the
