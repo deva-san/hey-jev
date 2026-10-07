@@ -27,7 +27,9 @@ class Turn(unittest.TestCase):
     """think() with nothing around it: no skills, memory, history or PC context."""
 
     def setUp(self):
-        for name, value in (("skills_block", ""), ("memory_block", ""), ("context", ""), ("soul", "You are Jev.")):
+        # focused_on reads the real window in front: YouTube there makes every search a YouTube one
+        for name, value in (("skills_block", ""), ("memory_block", ""), ("context", ""), ("soul", "You are Jev."),
+                            ("focused_on", False)):
             p = patch.object(siri, name, lambda *a, _v=value, **k: _v)
             p.start()
             self.addCleanup(p.stop)
