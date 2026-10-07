@@ -4,5 +4,16 @@ numpy>=2.0
 sounddevice>=0.5
 soundfile>=0.13
 pynput>=1.8
+# speech on this PC: Nemotron (streaming) and Parakeet through sherpa-onnx, Silero VAD and Smart Turn through
+# onnxruntime, Whisper as the slower option in Settings
+sherpa-onnx==1.13.8
+onnxruntime==1.30.0
 faster-whisper>=1.2
-pyobjc-framework-Cocoa>=11.0
+# Windows: Credential Manager, volume mixer, process list and media controls
+keyring==25.7.0
+pycaw==20260927
+psutil==7.2.2
+winrt-runtime==3.2.1
+winrt-Windows.Foundation==3.2.1
+winrt-Windows.Foundation.Collections==3.2.1
+winrt-Windows.Media.Control==3.2.1

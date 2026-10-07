@@ -1,0 +1,1310 @@
+"""Windows versions of everything the Mac build did with AppleScript, afplay, pbcopy and pmset."""
+import asyncio
+import contextlib
+import ctypes
+import json
+import os
+import re
+import struct
+import subprocess
+import sys
+import threading
+import time
+import winreg
+from ctypes import wintypes
+from functools import lru_cache
+
+# --------------------------------------------------------------------------- paths
+APPDATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Hey Jev")
+LOG_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Hey Jev", "Logs")
+os.makedirs(APPDATA_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+
+
+def log_path(name):
+    """Where the Mac build used ~/Library/Logs/<name>."""
+    return os.path.join(LOG_DIR, name)
+
+
+CREATE_NO_WINDOW = 0x08000000  # no console flashing up when the app runs without one
+_ps = os.path.join(os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows",
+                   "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+POWERSHELL = _ps if os.path.exists(_ps) else "powershell"  # full path, the shortcut's PATH can't always find it
+
+# --------------------------------------------------------------------------- Win32
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+ole32 = ctypes.WinDLL("ole32")
+dwmapi = ctypes.WinDLL("dwmapi")
+version = ctypes.WinDLL("version")
+powrprof = ctypes.WinDLL("powrprof")
+shell32 = ctypes.WinDLL("shell32")
+
+HWND, DWORD, BOOL, UINT, LONG = wintypes.HWND, wintypes.DWORD, wintypes.BOOL, wintypes.UINT, wintypes.LONG
+WNDENUMPROC = ctypes.WINFUNCTYPE(BOOL, HWND, wintypes.LPARAM)
+
+
+class RECT(ctypes.Structure):
+    _fields_ = [("left", LONG), ("top", LONG), ("right", LONG), ("bottom", LONG)]
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", DWORD), ("rcMonitor", RECT), ("rcWork", RECT), ("dwFlags", DWORD)]
+
+
+def _sig(fn, args, res=BOOL):
+    fn.argtypes, fn.restype = args, res
+
+
+_sig(user32.EnumWindows, [WNDENUMPROC, wintypes.LPARAM])
+_sig(user32.EnumChildWindows, [HWND, WNDENUMPROC, wintypes.LPARAM])
+_sig(user32.GetWindowThreadProcessId, [HWND, ctypes.POINTER(DWORD)], DWORD)
+_sig(user32.IsWindowVisible, [HWND])
+_sig(user32.IsIconic, [HWND])
+_sig(user32.GetWindow, [HWND, UINT], HWND)
+_sig(user32.GetAncestor, [HWND, UINT], HWND)
+_sig(user32.GetWindowLongW, [HWND, ctypes.c_int], LONG)
+_sig(user32.SetWindowLongW, [HWND, ctypes.c_int, LONG], LONG)
+_sig(user32.GetWindowTextLengthW, [HWND], ctypes.c_int)
+_sig(user32.GetWindowTextW, [HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int)
+_sig(user32.GetClassNameW, [HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int)
+_sig(user32.ShowWindow, [HWND, ctypes.c_int])
+_sig(user32.SetWindowPos, [HWND, HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, UINT])
+_sig(user32.PostMessageW, [HWND, UINT, wintypes.WPARAM, wintypes.LPARAM])
+_sig(user32.SendMessageTimeoutW, [HWND, UINT, wintypes.WPARAM, wintypes.LPCWSTR, UINT, UINT,
+                                  ctypes.POINTER(ctypes.c_size_t)], wintypes.LPARAM)
+_sig(user32.GetForegroundWindow, [], HWND)
+_sig(user32.GetWindowRect, [HWND, ctypes.POINTER(RECT)])
+_sig(user32.SetForegroundWindow, [HWND])
+_sig(user32.BringWindowToTop, [HWND])
+_sig(user32.AttachThreadInput, [DWORD, DWORD, BOOL])
+_sig(user32.SwitchToThisWindow, [HWND, BOOL], None)
+_sig(user32.FindWindowW, [wintypes.LPCWSTR, wintypes.LPCWSTR], HWND)
+_sig(user32.LockWorkStation, [])
+_sig(user32.MonitorFromWindow, [HWND, DWORD], wintypes.HANDLE)
+_sig(user32.GetMonitorInfoW, [wintypes.HANDLE, ctypes.POINTER(MONITORINFO)])
+_sig(user32.OpenClipboard, [HWND])
+_sig(user32.EmptyClipboard, [])
+_sig(user32.CloseClipboard, [])
+_sig(user32.SetClipboardData, [UINT, wintypes.HANDLE], wintypes.HANDLE)
+_sig(kernel32.GlobalAlloc, [UINT, ctypes.c_size_t], ctypes.c_void_p)
+_sig(kernel32.GlobalLock, [ctypes.c_void_p], ctypes.c_void_p)
+_sig(kernel32.GlobalUnlock, [ctypes.c_void_p])
+_sig(kernel32.GlobalFree, [ctypes.c_void_p], ctypes.c_void_p)
+_sig(kernel32.OpenProcess, [DWORD, BOOL, DWORD], wintypes.HANDLE)
+_sig(kernel32.QueryFullProcessImageNameW, [wintypes.HANDLE, DWORD, wintypes.LPWSTR, ctypes.POINTER(DWORD)])
+_sig(kernel32.CloseHandle, [wintypes.HANDLE])
+_sig(kernel32.GetCurrentThreadId, [], DWORD)
+_sig(kernel32.CreateMutexW, [ctypes.c_void_p, BOOL, wintypes.LPCWSTR], wintypes.HANDLE)
+_sig(dwmapi.DwmGetWindowAttribute, [HWND, DWORD, ctypes.c_void_p, DWORD], ctypes.c_long)
+_sig(version.GetFileVersionInfoSizeW, [wintypes.LPCWSTR, ctypes.POINTER(DWORD)], DWORD)
+_sig(version.GetFileVersionInfoW, [wintypes.LPCWSTR, DWORD, DWORD, ctypes.c_void_p])
+_sig(version.VerQueryValueW, [ctypes.c_void_p, wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(UINT)])
+_sig(powrprof.SetSuspendState, [wintypes.BOOLEAN, wintypes.BOOLEAN, wintypes.BOOLEAN], wintypes.BOOLEAN)
+_sig(ole32.CoInitializeEx, [ctypes.c_void_p, DWORD], ctypes.c_long)
+
+GW_OWNER, GA_ROOT, GWL_EXSTYLE = 4, 2, -20
+WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_EX_TOOLWINDOW = 0x8, 0x20, 0x80
+WS_EX_LAYERED, WS_EX_NOACTIVATE = 0x80000, 0x08000000
+SW_HIDE, SW_MINIMIZE, SW_RESTORE = 0, 6, 9
+SWP_NOACTIVATE, SWP_SHOWWINDOW = 0x10, 0x40
+HWND_TOPMOST = HWND(-1)
+HWND_BROADCAST = HWND(0xFFFF)
+WM_CLOSE, WM_SYSCOMMAND, WM_SETTINGCHANGE = 0x10, 0x112, 0x1A
+SC_MONITORPOWER = 0xF170
+SMTO_ABORTIFHUNG = 0x2
+DWMWA_CLOAKED = 14
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+MONITOR_DEFAULTTOPRIMARY = 1
+
+# Windows parts that look like app windows but must never be closed or minimised as one
+SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Windows.UI.Core.CoreWindow"}
+# Never force-quit these: the taskbar, the frame UWP apps live in, and Jev herself
+PROTECTED = {"explorer.exe", "applicationframehost.exe", "python.exe", "pythonw.exe", "py.exe", "pyw.exe",
+             "dwm.exe", "csrss.exe", "winlogon.exe", "svchost.exe", "searchhost.exe",
+             "startmenuexperiencehost.exe", "shellexperiencehost.exe", "textinputhost.exe"}
+
+# --------------------------------------------------------------------------- COM, needed by pycaw (volume) and WinRT (media)
+_tls = threading.local()
+RPC_E_CHANGED_MODE = -2147417850
+
+
+def _com():
+    """Start COM on this thread. comtypes initialises COM again when first imported, so it must match this thread."""
+    if getattr(_tls, "com", None) is None:
+        _tls.com = "sta" if ole32.CoInitializeEx(None, 0) == RPC_E_CHANGED_MODE else "mta"
+    if "comtypes" not in sys.modules:
+        sys.coinit_flags = 2 if _tls.com == "sta" else 0
+
+
+# --------------------------------------------------------------------------- sounds
+MEDIA_DIR = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Media")
+SOUNDS = {"wake": "Speech On.wav", "dictate_start": "Speech On.wav", "dictate_stop": "Speech Off.wav",
+          "timer": "Windows Notify Calendar.wav"}  # stand-ins for the Mac's Tink, Pop and Glass
+
+
+def play(path):
+    """Play a sound file and wait until it's done, like afplay."""
+    import sounddevice as sd
+    import soundfile as sf
+    try:
+        data, rate = sf.read(path, dtype="float32", always_2d=True)
+    except Exception:
+        import winsound
+        winsound.PlaySound(path, winsound.SND_FILENAME)
+        return
+    with sd.OutputStream(samplerate=rate, channels=data.shape[1], dtype="float32") as out:
+        out.write(data)
+
+
+def chime(name):
+    path = os.path.join(MEDIA_DIR, SOUNDS[name])
+    if os.path.exists(path):
+        try:
+            play(path)
+        except Exception as exc:
+            print(f"  chime failed: {exc}")
+
+
+# --------------------------------------------------------------------------- volume
+def _endpoint():
+    _com()
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+    speakers = AudioUtilities.GetSpeakers()
+    ep = getattr(speakers, "EndpointVolume", None)
+    if ep is None:  # older pycaw hands back the raw device
+        from comtypes import CLSCTX_ALL
+        ep = ctypes.cast(speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None),
+                         ctypes.POINTER(IAudioEndpointVolume))
+    return ep
+
+
+def volume():
+    return round(_endpoint().GetMasterVolumeLevelScalar() * 100)
+
+
+def set_volume(level, unmute=True):
+    ep = _endpoint()
+    ep.SetMasterVolumeLevelScalar(max(0, min(100, level)) / 100, None)
+    if unmute and level > 0:
+        ep.SetMute(0, None)
+
+
+def set_muted(muted):
+    _endpoint().SetMute(1 if muted else 0, None)
+
+
+def _app_audio(app):
+    """The app's sessions in the Windows volume mixer, which is how Spotify's own volume is set here."""
+    _com()
+    from pycaw.pycaw import AudioUtilities
+    found = []
+    for session in AudioUtilities.GetAllSessions():
+        proc = session.Process
+        if not proc:
+            continue
+        try:
+            path = proc.exe()
+        except Exception:
+            path = proc.name()
+        if app.matches(path):
+            found.append(session)
+    if not found:
+        raise RuntimeError(f"{app.name} isn't in the volume mixer yet, play something first")
+    return found
+
+
+def app_volume(app):
+    return round(_app_audio(app)[0].SimpleAudioVolume.GetMasterVolume() * 100)
+
+
+def set_app_volume(app, level):
+    for session in _app_audio(app):
+        session.SimpleAudioVolume.SetMasterVolume(max(0, min(100, level)) / 100, None)
+
+
+# --------------------------------------------------------------------------- media (Spotify), via Windows media controls
+def media_session(app_hint=None):
+    """The media session of the app whose id contains app_hint ("spotify"). With no hint, the one Windows shows in
+    its media controls: whatever is playing, or played last (YouTube in Chrome, Spotify, VLC). None if there's none."""
+    _com()
+    from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionManager as Manager
+
+    async def find():
+        manager = await Manager.request_async()
+        if app_hint is None:
+            return manager.get_current_session()
+        for session in manager.get_sessions():
+            if app_hint in (session.source_app_user_model_id or "").lower():
+                return session
+        return None
+    return asyncio.run(find())
+
+
+def media_command(session, command):
+    calls = {"play": session.try_play_async, "pause": session.try_pause_async,
+             "toggle": session.try_toggle_play_pause_async,
+             "next": session.try_skip_next_async, "previous": session.try_skip_previous_async}
+
+    async def run():
+        return await calls[command]()
+    return asyncio.run(run())
+
+
+def media_title(session):
+    """'Title - Artist' of what a media session is playing, or "" if it doesn't say."""
+    async def get():
+        return await session.try_get_media_properties_async()
+    try:
+        props = asyncio.run(get())
+    except Exception:
+        return ""
+    title, artist = (props.title or "").strip(), (props.artist or "").strip()
+    return f"{title} - {artist}" if title and artist else title
+
+
+def media_playing(session):
+    from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status
+    return session.get_playback_info().playback_status == Status.PLAYING
+
+
+def media_position(session):
+    """Seconds into the current track, counting time since Windows last heard from the app."""
+    from datetime import datetime, timezone
+    timeline = session.get_timeline_properties()
+    pos = timeline.position.total_seconds()
+    try:
+        if media_playing(session) and timeline.last_updated_time:
+            pos += (datetime.now(timezone.utc) - timeline.last_updated_time).total_seconds()
+    except Exception:
+        pass
+    return pos
+
+
+# --------------------------------------------------------------------------- dark mode, lock, sleep
+PERSONALIZE = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+
+
+def dark_mode():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, PERSONALIZE) as key:
+            return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+    except OSError:
+        return False  # never set means light
+
+
+def set_dark_mode(on):
+    light = 0 if on else 1
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, PERSONALIZE, 0, winreg.KEY_SET_VALUE) as key:
+        winreg.SetValueEx(key, "AppsUseLightTheme", 0, winreg.REG_DWORD, light)
+        winreg.SetValueEx(key, "SystemUsesLightTheme", 0, winreg.REG_DWORD, light)
+    result = ctypes.c_size_t()  # tell the taskbar and open apps to repaint in the new theme
+    user32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "ImmersiveColorSet", SMTO_ABORTIFHUNG, 2000,
+                               ctypes.byref(result))
+
+
+def lock():
+    if not user32.LockWorkStation():
+        raise RuntimeError("Windows wouldn't lock")
+
+
+def sleep():
+    if not powrprof.SetSuspendState(False, False, False):
+        # Modern Standby laptops refuse SetSuspendState, turning the screen off puts those to sleep
+        user32.PostMessageW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2)
+
+
+def shutdown(delay=10):
+    """Initiate a clean Windows shutdown with a grace period (default 10s)."""
+    subprocess.Popen(["shutdown.exe", "/s", "/t", str(delay), "/c", "Hey Jev is shutting down the PC."])
+
+
+def restart(delay=10):
+    """Initiate a clean Windows restart with a grace period (default 10s)."""
+    subprocess.Popen(["shutdown.exe", "/r", "/t", str(delay), "/c", "Hey Jev is restarting the PC."])
+
+
+def abort_shutdown():
+    """Cancel a pending Windows shutdown or restart."""
+    subprocess.Popen(["shutdown.exe", "/a"])
+
+
+# --------------------------------------------------------------------------- apps
+def _norm(text):
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+@lru_cache(maxsize=512)
+def file_description(path):
+    """The "File description" Windows shows for an .exe, like "Visual Studio Code" for Code.exe."""
+    try:
+        size = version.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return ""
+        buf = ctypes.create_string_buffer(size)
+        if not version.GetFileVersionInfoW(path, 0, size, buf):
+            return ""
+        ptr, length = ctypes.c_void_p(), UINT()
+        if not version.VerQueryValueW(buf, "\\VarFileInfo\\Translation", ctypes.byref(ptr), ctypes.byref(length)) \
+                or length.value < 4:
+            return ""
+        lang, codepage = struct.unpack("<HH", ctypes.string_at(ptr.value, 4))
+        if version.VerQueryValueW(buf, f"\\StringFileInfo\\{lang:04x}{codepage:04x}\\FileDescription",
+                                  ctypes.byref(ptr), ctypes.byref(length)) and length.value:
+            return ctypes.wstring_at(ptr.value, length.value).rstrip("\x00")
+    except Exception:
+        pass
+    return ""
+
+
+class App:
+    """An app from apps.json: the name it has in the Start menu, and the .exe its windows belong to."""
+
+    def __init__(self, name, exes=()):
+        self.name = name
+        self.exes = {e.lower() for e in ([exes] if isinstance(exes, str) else exes or ())}
+        words = _norm(name).split()
+        self.joined = "".join(words)
+        self.words = {w for w in words if len(w) >= 3}
+
+    def matches(self, exe_path):
+        if not exe_path:
+            return False
+        base = os.path.basename(exe_path).lower()
+        if base in self.exes:
+            return True
+        stem = re.sub(r"[^a-z0-9]", "", base[:-4] if base.endswith(".exe") else base)
+        if stem == self.joined or stem in self.words:  # Spotify.exe, chrome.exe for "Google Chrome", Code.exe for "VS Code"
+            return True
+        return _norm(file_description(exe_path)).replace(" ", "") == self.joined
+
+    def __repr__(self):
+        return f"App({self.name!r}, {sorted(self.exes)})"
+
+
+_start_apps, _start_lock = None, threading.Lock()
+
+
+def start_apps(refresh=False):
+    """(name, AppID) for everything in the Start menu, which covers normal and Microsoft Store apps."""
+    global _start_apps
+    with _start_lock:
+        if _start_apps is None or refresh:
+            script = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+                      "Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress")
+            try:
+                out = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+                                     capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                     creationflags=CREATE_NO_WINDOW, timeout=60).stdout
+                data = json.loads(out) if out.strip() else []
+            except Exception as exc:
+                print(f"  couldn't read the Start menu: {exc}")
+                data = []
+            if isinstance(data, dict):
+                data = [data]
+            _start_apps = [(d["Name"], d["AppID"]) for d in data if d.get("Name") and d.get("AppID")]
+        return _start_apps
+
+
+def warm_start_apps():
+    threading.Thread(target=start_apps, daemon=True).start()
+
+
+def loaded_start_apps():
+    """The Start menu as far as it's been read, without waiting while it's read the first time."""
+    return _start_apps or []
+
+
+def find_start_app(name, refresh=True):
+    target, target_norm = name.lower(), _norm(name)
+    for again in ((False, True) if refresh else (False,)):  # look again in case it was installed after Jev started
+        apps = start_apps(refresh=again)
+        for rule in (lambda n: n.lower() == target, lambda n: _norm(n) == target_norm,
+                     lambda n: re.search(rf"\b{re.escape(target_norm)}\b", _norm(n))):
+            hits = [a for a in apps if rule(a[0])]
+            if hits:
+                return min(hits, key=lambda a: len(a[0]))  # "Zoom" -> "Zoom Workplace", not something longer
+    return None
+
+
+def launch(name):
+    hit = find_start_app(name)
+    if hit:
+        subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{hit[1]}"], creationflags=CREATE_NO_WINDOW)
+        return
+    try:
+        os.startfile(name)  # last try, anything Windows knows by name, like "notepad"
+    except OSError:
+        raise RuntimeError(f"Couldn't find {name} in the Start menu")
+
+
+def _class_name(hwnd):
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, buf, 256)
+    return buf.value
+
+
+def _pid(hwnd):
+    pid = DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
+def _exe(pid):
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ""
+    try:
+        buf, size = ctypes.create_unicode_buffer(32768), DWORD(32768)
+        return buf.value if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)) else ""
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _children(hwnd):
+    found = []
+    cb = WNDENUMPROC(lambda h, _: found.append(h) or True)
+    user32.EnumChildWindows(hwnd, cb, 0)
+    return found
+
+
+def window_exe(hwnd):
+    """The .exe a window belongs to. Store apps like Calculator sit inside ApplicationFrameHost, so look one level in."""
+    pid = _pid(hwnd)
+    exe = _exe(pid)
+    if os.path.basename(exe).lower() == "applicationframehost.exe":
+        for child in _children(hwnd):
+            child_pid = _pid(child)
+            if child_pid != pid:
+                return _exe(child_pid)
+    return exe
+
+
+def _is_app_window(hwnd):
+    if not user32.IsWindowVisible(hwnd) or user32.GetWindow(hwnd, GW_OWNER):
+        return False
+    if user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW or not user32.GetWindowTextLengthW(hwnd):
+        return False
+    cloaked = DWORD()  # suspended Store apps and other virtual desktops
+    dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+    return not cloaked.value and _class_name(hwnd) not in SHELL_CLASSES
+
+
+def app_windows(app):
+    """The app's windows on screen (minimised ones too), front-most first."""
+    found = []
+    cb = WNDENUMPROC(lambda h, _: found.append(h) or True)
+    user32.EnumWindows(cb, 0)
+    return [h for h in found if _is_app_window(h) and app.matches(window_exe(h))]
+
+
+def _app_processes(app):
+    import psutil
+    me = os.getpid()
+    out = []
+    for proc in psutil.process_iter(["pid", "name", "exe"]):
+        if proc.info["pid"] != me and app.matches(proc.info["exe"] or proc.info["name"] or ""):
+            out.append(proc)
+    return out
+
+
+def bring_to_front(hwnd):
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, SW_RESTORE)
+    front = user32.GetForegroundWindow()
+    if front == hwnd:
+        return
+    # Windows stops background apps stealing focus, borrowing the front window's input queue gets round that
+    me = kernel32.GetCurrentThreadId()
+    other = user32.GetWindowThreadProcessId(front, None) if front else 0
+    attached = bool(other and other != me and user32.AttachThreadInput(me, other, True))
+    try:
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+    finally:
+        if attached:
+            user32.AttachThreadInput(me, other, False)
+    if user32.GetForegroundWindow() != hwnd:
+        user32.SwitchToThisWindow(hwnd, True)
+
+
+def open_app(app, wait=8.0):
+    """Like `open -a`: bring it to the front if it's open, else launch it and wait for its window."""
+    windows = app_windows(app)
+    if windows:
+        bring_to_front(windows[0])
+        return
+    front = user32.GetForegroundWindow()
+    launch(app.name)
+    start = time.time()
+    while time.time() - start < wait:
+        time.sleep(0.2)
+        if app_windows(app):
+            return
+        now = user32.GetForegroundWindow()  # web apps like YouTube run as chrome.exe, so their windows never match
+        if now and now != front and _is_app_window(now):  # a new window came to the front, that's it
+            return
+
+
+def focus_app(app):
+    windows = app_windows(app)
+    if not windows:
+        return open_app(app)  # AppleScript's activate launches it too
+    bring_to_front(windows[0])
+
+
+def minimise_app(app):
+    windows = app_windows(app)
+    if not windows:
+        raise RuntimeError(f"{app.name} has no windows open")
+    for hwnd in windows:
+        user32.ShowWindow(hwnd, SW_MINIMIZE)
+
+
+def quit_app(app):
+    windows, procs = app_windows(app), _app_processes(app)
+    if not windows and not procs:
+        raise RuntimeError(f"{app.name} isn't running")
+    refused = 0
+    for hwnd in windows:  # same as clicking X, so apps still get to ask about unsaved work
+        if not user32.PostMessageW(hwnd, WM_CLOSE, 0, 0) and ctypes.get_last_error() == 5:
+            refused += 1  # access denied: Windows keeps apps that run as administrator, like Task Manager, out of reach
+    if windows and refused == len(windows):
+        raise RuntimeError(f"Windows won't let me close {app.name}, it runs as administrator")
+    deadline = time.time() + 4
+    while windows and time.time() < deadline:
+        time.sleep(0.25)
+        windows = app_windows(app)
+    if windows:  # something's still open, maybe a "save changes?" prompt, so that's up to you
+        raise RuntimeError(f"{app.name} is still open, it may be asking you to save something")
+    import psutil
+    procs = [p for p in _app_processes(app)
+             if os.path.basename(p.info["exe"] or p.info["name"] or "").lower() not in PROTECTED]
+    _, alive = psutil.wait_procs(procs, timeout=4)  # give it a moment to close by itself
+    for proc in alive:  # Spotify, Slack, Discord and co only drop to the tray, quit means quit
+        try:
+            proc.kill()
+        except psutil.Error:
+            pass
+
+
+def foreground_exe():
+    hwnd = user32.GetForegroundWindow()
+    return window_exe(hwnd) if hwnd else ""
+
+
+def window_title(hwnd):
+    n = user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(n + 1)
+    user32.GetWindowTextW(hwnd, buf, n + 1)
+    return buf.value
+
+
+def app_path(exe):
+    """Full path of a program Windows has under App Paths, like chrome.exe or msedge.exe, or None."""
+    sub = rf"Software\Microsoft\Windows\CurrentVersion\App Paths\{exe}"
+    for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(root, sub) as key:
+                path = os.path.expandvars(str(winreg.QueryValueEx(key, "")[0]).strip('"'))
+        except OSError:
+            continue
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def front_title():
+    """The title of the window in front, like "lofi music - YouTube - Google Chrome"."""
+    hwnd = user32.GetForegroundWindow()
+    return window_title(hwnd) if hwnd else ""
+
+
+# --------------------------------------------------------------------------- calls
+# Windows keeps which apps use the mic, for the mic icon on the taskbar: a key per app under ConsentStore\microphone,
+# with LastUsedTimeStop 0 while it's in use. Only apps that mean a conversation count, never Voicemeeter, which can
+# hold the mic all day, or Hey Jev itself, which is python. (in the key's name, in the running program's name, name)
+CALL_APPS = (("whatsapp", "whatsapp", "WhatsApp"), ("msteams", "teams", "Teams"), ("teams", "teams", "Teams"),
+             ("yourphone", "phoneexperiencehost", "Phone Link"), ("zoom", "zoom", "Zoom"),
+             ("discord", "discord", "Discord"), ("skype", "skype", "Skype"), ("slack", "slack", "Slack"),
+             ("telegram", "telegram", "Telegram"), ("signal", "signal", "Signal"), ("webex", "webex", "Webex"),
+             ("chrome.exe", "chrome", "Chrome"), ("msedge.exe", "msedge", "Edge"), ("brave.exe", "brave", "Brave"),
+             ("firefox.exe", "firefox", "Firefox"), ("comet.exe", "comet", "Comet"))
+_MIC_KEY = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+_calls = {"at": 0.0, "apps": ()}
+
+
+def _mic_users():
+    """The names of the mic keys of apps using the mic right now, lower case."""
+    found = []
+    for sub in (_MIC_KEY, _MIC_KEY + r"\NonPackaged"):
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, sub)
+        except OSError:
+            continue
+        with key:
+            for i in range(1000):
+                try:
+                    name = winreg.EnumKey(key, i)
+                except OSError:
+                    break
+                try:
+                    with winreg.OpenKey(key, name) as app:
+                        start = winreg.QueryValueEx(app, "LastUsedTimeStart")[0]
+                        stop = winreg.QueryValueEx(app, "LastUsedTimeStop")[0]
+                except OSError:
+                    continue
+                if start and not stop:
+                    found.append(name.lower())
+    return found
+
+
+def call_apps(max_age=2.0):
+    """The apps that mean a call, WhatsApp, Teams, Zoom or a browser for Meet, that have the mic open right now, read
+    again at most every max_age seconds. Each one's program has to be running too: a crash can leave the key saying
+    in use."""
+    if time.time() - _calls["at"] < max_age:
+        return _calls["apps"]
+    apps = []
+    try:
+        users = _mic_users()
+        hits = [(proc, label) for key, proc, label in CALL_APPS if any(key in u for u in users)]
+        if hits:
+            import psutil
+            running = {(p.info["name"] or "").lower() for p in psutil.process_iter(["name"])}
+            apps = [label for proc, label in hits if any(proc in r for r in running)]
+    except Exception:
+        apps = []
+    _calls.update(at=time.time(), apps=tuple(dict.fromkeys(apps)))
+    return _calls["apps"]
+
+
+def front_app_name():
+    """The app in front by name, like "Google Chrome", so "close it" or "scroll down" make sense to the planner."""
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd or _pid(hwnd) == os.getpid():
+        return ""  # nothing, or Jev's own window
+    exe = window_exe(hwnd)
+    return (file_description(exe) or os.path.splitext(os.path.basename(exe))[0]) if exe else ""
+
+
+def scroll(clicks):
+    """Turn the mouse wheel over the window in front, then put the pointer back. clicks > 0 scrolls up.
+    The wheel, not Page Down, since keys go to the YouTube player and Home there jumps to the start of the video."""
+    from pynput.mouse import Controller
+    hwnd, rect = user32.GetForegroundWindow(), RECT()
+    if not hwnd or not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        raise RuntimeError("There's no window in front to scroll")
+    mouse = Controller()
+    back = mouse.position
+    mouse.position = ((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+    try:
+        for _ in range(abs(clicks)):
+            mouse.scroll(0, 1 if clicks > 0 else -1)
+            time.sleep(0.01)
+        time.sleep(0.05)
+    finally:
+        mouse.position = back
+
+
+def default_browser_progid():
+    base = r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https"
+    for sub in ("UserChoiceLatest", "UserChoice"):
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"{base}\\{sub}") as key:
+                return winreg.QueryValueEx(key, "ProgId")[0]
+        except OSError:
+            continue
+    return ""
+
+
+def open_url(url, app=None):
+    """Open a website, in a given browser if there is one, otherwise in the default browser."""
+    if app:
+        windows = app_windows(app)
+        exe = window_exe(windows[0]) if windows else ""
+        if exe:
+            subprocess.Popen([exe, url], creationflags=CREATE_NO_WINDOW)
+            return
+        for name in sorted(app.exes):  # chrome.exe, msedge.exe, brave.exe and firefox.exe are registered by name
+            try:
+                os.startfile(name, arguments=f'"{url}"')
+                return
+            except OSError:
+                continue
+    os.startfile(url)
+
+
+# --------------------------------------------------------------------------- keyboard and clipboard
+def press(*names):
+    """press("ctrl", "t"), with every key but the last held down."""
+    from pynput.keyboard import Controller, Key
+    keyboard = Controller()
+    keys = [getattr(Key, n) if len(n) > 1 else n for n in names]
+    for key in keys[:-1]:
+        keyboard.press(key)
+    try:
+        keyboard.press(keys[-1])
+        keyboard.release(keys[-1])
+    finally:
+        for key in reversed(keys[:-1]):
+            keyboard.release(key)
+
+
+def type_text(text, chunk=24, gap=0.02):
+    """Type it on the keyboard, in small runs, leaving the clipboard alone.
+
+    Line breaks are dropped on purpose: in a chat box Enter is send, and nothing here may send anything."""
+    from pynput.keyboard import Controller
+    keyboard = Controller()
+    typed = "".join(c for c in str(text or "") if c.isprintable())
+    for i in range(0, len(typed), chunk):
+        keyboard.type(typed[i:i + chunk])
+        time.sleep(gap)
+    return len(typed)
+
+
+def set_clipboard(text):
+    data = text.encode("utf-16-le") + b"\x00\x00"
+    for _ in range(20):  # another app may have it open for a moment
+        if user32.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
+        raise RuntimeError("Couldn't open the clipboard")
+    try:
+        user32.EmptyClipboard()
+        handle = kernel32.GlobalAlloc(0x0002, len(data))  # GMEM_MOVEABLE
+        ptr = kernel32.GlobalLock(handle)
+        ctypes.memmove(ptr, data, len(data))
+        kernel32.GlobalUnlock(handle)
+        if not user32.SetClipboardData(13, handle):  # CF_UNICODETEXT, Windows owns the memory from here
+            kernel32.GlobalFree(handle)
+            raise RuntimeError("Couldn't write to the clipboard")
+    finally:
+        user32.CloseClipboard()
+
+
+def paste(text):
+    set_clipboard(text)  # stays on the clipboard too, in case the paste misses
+    time.sleep(0.2)
+    press("ctrl", "v")
+
+
+# --------------------------------------------------------------------------- push to talk on right Alt
+VK_RMENU, LLKHF_INJECTED = 0xA5, 0x10
+WM_KEYDOWN, WM_SYSKEYDOWN = 0x100, 0x104
+
+
+def start_ptt_listener(on_press, on_release):
+    """Hold right Alt to talk. The key is swallowed, so the app in front doesn't open its menu when you let go.
+    Both callbacks run inside the keyboard hook, so they must return straight away."""
+    from pynput import keyboard
+    held = [False]
+
+    def event_filter(msg, data):
+        if data.vkCode != VK_RMENU or data.flags & LLKHF_INJECTED:
+            return True
+        down = msg in (WM_KEYDOWN, WM_SYSKEYDOWN)
+        if down != held[0]:  # holding a key repeats key-down, only act on the change
+            held[0] = down
+            (on_press if down else on_release)()
+        listener.suppress_event()
+
+    listener = keyboard.Listener(win32_event_filter=event_filter)
+    listener.daemon = True
+    listener.start()
+    return listener
+
+
+# --------------------------------------------------------------------------- microphones
+def _is_mapper(name):
+    return name.startswith(("Microsoft Sound Mapper", "Primary Sound Capture"))
+
+
+def input_devices():
+    """Mics on the default audio API, so each one is listed once (Windows lists them under up to four APIs)."""
+    import sounddevice as sd
+    try:
+        api = sd.query_hostapis(sd.default.hostapi)
+    except Exception:
+        return []
+    names = []
+    for index in api["devices"]:
+        dev = sd.query_devices(index)
+        if dev["max_input_channels"] > 0 and not _is_mapper(dev["name"]) and dev["name"] not in names:
+            names.append(dev["name"])
+    return names
+
+
+LOOPBACK = re.compile(r"stereo mix|what u hear|wave out|loopback", re.I)  # records what the PC plays, not your voice
+
+
+def auto_input():
+    """(index, name) of the mic to use when none is picked: Windows' default, unless that's Stereo Mix."""
+    default = default_input_name()
+    if not LOOPBACK.search(default):
+        return None, default
+    for name in input_devices():
+        if not LOOPBACK.search(name):
+            return input_device(name), name
+    return None, default
+
+
+def input_device(name):
+    """sounddevice index for a mic name from input_devices(), or None if it's gone."""
+    import sounddevice as sd
+    if not name:
+        return None
+    try:
+        for index in sd.query_hostapis(sd.default.hostapi)["devices"]:
+            dev = sd.query_devices(index)
+            if dev["name"] == name and dev["max_input_channels"] > 0:
+                return index
+    except Exception:
+        pass
+    return None
+
+
+def speech_input(name=""):
+    """(index, full name) of a mic on WASAPI, the audio API where Windows can take what the PC is playing out of the
+    mic. name is one from input_devices(), which cuts names at 31 characters, or "" for the automatic one."""
+    import sounddevice as sd
+    name = (name if input_device(name) is not None else auto_input()[1]).strip()
+    try:
+        api = next(i for i, a in enumerate(sd.query_hostapis()) if "WASAPI" in a["name"])
+        for index in sd.query_hostapis(api)["devices"]:
+            dev = sd.query_devices(index)
+            if dev["max_input_channels"] > 0 and dev["name"].startswith(name) and not LOOPBACK.search(dev["name"]):
+                return index, dev["name"]
+    except Exception:
+        pass
+    return None
+
+
+def default_input_name():
+    import sounddevice as sd
+    try:
+        return sd.query_devices(kind="input")["name"]
+    except Exception:
+        return "none found"
+
+
+# --------------------------------------------------------------------------- window helpers for the UI
+def prepare_gui(app_id="HeyJev.App"):
+    """Sharp text on high-DPI screens, and a taskbar button of our own instead of Python's."""
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+    try:
+        shell32.SetCurrentProcessExplicitAppUserModelID(ctypes.c_wchar_p(app_id))
+    except Exception:
+        pass
+
+
+_mutex = []
+
+
+def single_instance(name="HeyJevSingleInstance"):
+    """False if Jev is already running, the way a Mac app only ever opens once."""
+    handle = kernel32.CreateMutexW(None, False, f"Local\\{name}")
+    already = ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
+    _mutex.append(handle)
+    return not already
+
+
+def show_existing(title):
+    hwnd = user32.FindWindowW("TkTopLevel", title)
+    if hwnd:
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.SetForegroundWindow(hwnd)
+    return bool(hwnd)
+
+
+def root_hwnd(widget_id):
+    return user32.GetAncestor(widget_id, GA_ROOT)
+
+
+def make_overlay(hwnd):
+    """Clicks go through, never takes focus, not in the taskbar or Alt+Tab."""
+    style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
+                          | WS_EX_TOOLWINDOW | WS_EX_TOPMOST)
+
+
+def show_no_activate(hwnd, x, y, w, h):
+    user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW)
+
+
+def hide_window(hwnd):
+    user32.ShowWindow(hwnd, SW_HIDE)
+
+
+# --------------------------------------------------------------------------- signing in and coming back
+wtsapi32 = ctypes.WinDLL("wtsapi32")
+_sig(wtsapi32.WTSQuerySessionInformationW, [wintypes.HANDLE, DWORD, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
+                                             ctypes.POINTER(DWORD)])
+_sig(wtsapi32.WTSFreeMemory, [ctypes.c_void_p], None)
+
+
+class _Session(ctypes.Structure):  # WTSINFOEXW at level 1, as far as the lock flag
+    _fields_ = [("level", DWORD), ("_pad", DWORD), ("id", ctypes.c_ulong), ("state", ctypes.c_int),
+                ("flags", ctypes.c_long)]
+
+
+def session_locked():
+    """True while the lock screen is up, False when you're at the desktop, None if Windows won't say."""
+    buf, size = ctypes.c_void_p(), DWORD()
+    if not wtsapi32.WTSQuerySessionInformationW(None, 0xFFFFFFFF, 25, ctypes.byref(buf), ctypes.byref(size)):
+        return None  # 25 is WTSSessionInfoEx, 0xFFFFFFFF this session
+    try:
+        return {0: True, 1: False}.get(_Session.from_address(buf.value).flags)
+    finally:
+        wtsapi32.WTSFreeMemory(buf)
+
+
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"  # what starts when you sign in, also in Task Manager
+
+
+def startup_command():
+    """The venv's pythonw.exe running app.py, so no console flashes up, with --startup so it knows why it started."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    exe = os.path.join(here, ".venv", "Scripts", "pythonw.exe")
+    return f'"{exe if os.path.exists(exe) else sys.executable}" "{os.path.join(here, "app.py")}" --startup'
+
+
+def starts_with_windows(name="Hey Jev"):
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            return bool(winreg.QueryValueEx(key, name)[0])
+    except OSError:
+        return False
+
+
+def set_start_with_windows(on, name="Hey Jev"):
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+        if on:
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, startup_command())
+        else:
+            try:
+                winreg.DeleteValue(key, name)
+            except FileNotFoundError:
+                pass
+
+
+# --------------------------------------------------------------------------- the screen, for vision mode
+gdi32 = ctypes.WinDLL("gdi32")
+_sig(user32.GetDC, [HWND], wintypes.HDC)
+_sig(user32.ReleaseDC, [HWND, wintypes.HDC], ctypes.c_int)
+_sig(user32.SetWindowDisplayAffinity, [HWND, DWORD])
+_sig(user32.WindowFromPoint, [wintypes.POINT], HWND)
+_sig(dwmapi.DwmFlush, [], ctypes.c_long)
+_sig(gdi32.CreateCompatibleDC, [wintypes.HDC], wintypes.HDC)
+_sig(gdi32.CreateCompatibleBitmap, [wintypes.HDC, ctypes.c_int, ctypes.c_int], wintypes.HBITMAP)
+_sig(gdi32.SelectObject, [wintypes.HDC, wintypes.HGDIOBJ], wintypes.HGDIOBJ)
+_sig(gdi32.BitBlt, [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HDC, ctypes.c_int,
+                    ctypes.c_int, DWORD])
+_sig(gdi32.GetDIBits, [wintypes.HDC, wintypes.HBITMAP, UINT, UINT, ctypes.c_void_p, ctypes.c_void_p, UINT], ctypes.c_int)
+_sig(gdi32.DeleteObject, [wintypes.HGDIOBJ])
+_sig(gdi32.DeleteDC, [wintypes.HDC])
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", DWORD), ("biWidth", LONG), ("biHeight", LONG), ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD), ("biCompression", DWORD), ("biSizeImage", DWORD),
+                ("biXPelsPerMeter", LONG), ("biYPelsPerMeter", LONG), ("biClrUsed", DWORD), ("biClrImportant", DWORD)]
+
+
+try:  # Windows 10 1607 and later
+    _sig(user32.SetThreadDpiAwarenessContext, [ctypes.c_void_p], ctypes.c_void_p)
+    _set_dpi_context = user32.SetThreadDpiAwarenessContext
+except AttributeError:
+    _set_dpi_context = None
+NO_CAPTURE = []  # windows left out of screenshots, like the popup (bubble.py adds it)
+
+
+@contextlib.contextmanager
+def _real_pixels():
+    """Positions in real pixels on this thread while inside, whatever the display scaling, so a screenshot and a
+    click agree on where things are."""
+    old = _set_dpi_context(ctypes.c_void_p(-4)) if _set_dpi_context else None  # per monitor, version 2
+    try:
+        yield
+    finally:
+        if old:
+            _set_dpi_context(ctypes.c_void_p(old))
+
+
+def screenshot():
+    """The screen the window in front is on: (height, width, 3) RGB as a numpy array, and where that screen is,
+    (left, top, right, bottom) in real pixels. Windows in NO_CAPTURE, like the popup, are left out."""
+    import numpy as np
+    hidden = [hw for hw in NO_CAPTURE if user32.SetWindowDisplayAffinity(hw, 0x11)]  # WDA_EXCLUDEFROMCAPTURE
+    try:
+        if hidden:  # a frame or two for Windows to draw the screen without them
+            dwmapi.DwmFlush()
+            dwmapi.DwmFlush()
+        with _real_pixels():
+            monitor = user32.MonitorFromWindow(user32.GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY)
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(info)
+            if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                raise RuntimeError("I couldn't find the screen")
+            r = info.rcMonitor
+            left, top, w, h = r.left, r.top, r.right - r.left, r.bottom - r.top
+            screen = user32.GetDC(None)
+            mem = gdi32.CreateCompatibleDC(screen)
+            bmp = gdi32.CreateCompatibleBitmap(screen, w, h)
+            old = gdi32.SelectObject(mem, bmp)
+            try:
+                buf = ctypes.create_string_buffer(w * h * 4)
+                bits = BITMAPINFOHEADER(biSize=ctypes.sizeof(BITMAPINFOHEADER), biWidth=w, biHeight=-h, biPlanes=1,
+                                        biBitCount=32)  # top row first: blue, green, red and a spare byte a pixel
+                if not gdi32.BitBlt(mem, 0, 0, w, h, screen, left, top, 0x00CC0020) or \
+                        gdi32.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(bits), 0) != h:
+                    raise RuntimeError("I couldn't take a screenshot")
+            finally:
+                gdi32.SelectObject(mem, old)
+                gdi32.DeleteObject(bmp)
+                gdi32.DeleteDC(mem)
+                user32.ReleaseDC(None, screen)
+    finally:
+        for hw in hidden:
+            user32.SetWindowDisplayAffinity(hw, 0)
+    return np.frombuffer(buf, np.uint8).reshape(h, w, 4)[:, :, 2::-1].copy(), (left, top, left + w, top + h)
+
+
+def window_at(x, y):
+    """The .exe of the window at a point on the screen, in real pixels, or ""."""
+    with _real_pixels():
+        hwnd = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+    hwnd = user32.GetAncestor(hwnd, GA_ROOT) if hwnd else None
+    return window_exe(hwnd) if hwnd else ""
+
+
+def click(x, y, button="left", double=False):
+    """Click at a point on the screen, in real pixels. The pointer stays there, as if you'd clicked."""
+    from pynput.mouse import Button, Controller
+    mouse = Controller()
+    with _real_pixels():
+        mouse.position = (int(x), int(y))
+        time.sleep(0.08)  # menus and buttons react to the pointer coming over them
+        mouse.click(Button.right if button == "right" else Button.left, 2 if double else 1)
+
+
+def work_area():
+    """(left, top, right, bottom) of the screen you're working on, minus the taskbar."""
+    monitor = user32.MonitorFromWindow(user32.GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY)
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(info)
+    if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        return 0, 0, 1920, 1040
+    r = info.rcWork
+    return r.left, r.top, r.right, r.bottom
+
+
+# --------------------------------------------------------------------------- Native Windows Speech Synthesis (OneCore / SAPI5)
+def native_voices():
+    """Discover available Windows built-in voices (OneCore natural voices and SAPI5 desktop voices).
+    Returns [(id, description, is_onecore)]. Costs 0 MB RAM."""
+    voices = []
+    # 1. OneCore voices (natural Windows 10/11 voices)
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Speech_OneCore\Voices\Tokens") as k:
+            for i in range(winreg.QueryInfoKey(k)[0]):
+                sub = winreg.EnumKey(k, i)
+                try:
+                    with winreg.OpenKey(k, sub) as sk:
+                        desc = winreg.QueryValueEx(sk, "")[0]
+                        voices.append((f"onecore:{sub}", desc, True))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    # 2. SAPI5 desktop voices
+    try:
+        _com()
+        import comtypes.client
+        v = comtypes.client.CreateObject("SAPI.SpVoice")
+        count = v.GetVoices().Count
+        for i in range(count):
+            desc = v.GetVoices().Item(i).GetDescription()
+            sid = v.GetVoices().Item(i).Id
+            voices.append((f"sapi:{sid}", desc, False))
+    except Exception:
+        pass
+    return voices
+
+
+_native_voice_cache = {}
+
+
+def get_native_spvoice(voice_id=None):
+    """Reuse cached SAPI.SpVoice object per thread for sub-10ms speech start. Per thread, since a COM object made on
+    one thread mustn't be used from another."""
+    _com()
+    import comtypes.client
+    key = (threading.get_ident(), str(voice_id or ""))
+    if key in _native_voice_cache:
+        return _native_voice_cache[key]
+    v = comtypes.client.CreateObject("SAPI.SpVoice")
+    if voice_id and str(voice_id).startswith("onecore:"):
+        token_name = voice_id[len("onecore:"):]
+        try:
+            tok = comtypes.client.CreateObject("SAPI.SpObjectToken")
+            tok.SetId(rf"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech_OneCore\Voices\Tokens\{token_name}")
+            v.Voice = tok
+        except Exception:
+            pass
+    elif voice_id and str(voice_id).startswith("sapi:"):
+        token_id = voice_id[len("sapi:"):]
+        try:
+            tok = comtypes.client.CreateObject("SAPI.SpObjectToken")
+            tok.SetId(token_id)
+            v.Voice = tok
+        except Exception:
+            pass
+    else:
+        # Default to best natural OneCore voice available (Heera, Ravi, Mark, Zira, David)
+        for cand in ("MSTTS_V110_enIN_HeeraM", "MSTTS_V110_enIN_RaviM", "MSTTS_V110_enUS_MarkM",
+                     "MSTTS_V110_enUS_ZiraM", "MSTTS_V110_enUS_DavidM"):
+            try:
+                tok = comtypes.client.CreateObject("SAPI.SpObjectToken")
+                tok.SetId(rf"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech_OneCore\Voices\Tokens\{cand}")
+                v.Voice = tok
+                break
+            except Exception:
+                pass
+    _native_voice_cache[key] = v
+    return v
+
+
+def speak_native(text, voice=None, voice_id=None, wait=True):
+    """Speak text using Windows native OneCore / SAPI5 voice. 0 MB added RAM, < 15ms latency."""
+    v = get_native_spvoice(voice or voice_id)
+    flags = 0 if wait else 1
+    v.Speak(str(text or ""), flags)
+
+
+def native_to_wav(text, wav_path, voice=None, voice_id=None):
+    """Render speech to WAV file via native Windows TTS in ~20ms, 0 MB added RAM."""
+    _com()
+    import comtypes.client
+    v = get_native_spvoice(voice or voice_id)
+    fs = comtypes.client.CreateObject("SAPI.SpFileStream")
+    fs.Open(wav_path, 3, False)
+    v.AudioOutputStream = fs
+    try:
+        v.Speak(str(text or ""), 0)
+    finally:
+        fs.Close()
+        v.AudioOutputStream = None
+
+
+# --------------------------------------------------------------------------- Fast UI Automation Element Inspection
+# Buttons the fast path never presses: the vision path, with its own rules, decides those
+RISKY_CLICKS = re.compile(r"\b(?:send|delete|remove|erase|buy|pay|purchase|order|checkout|post|publish|submit|sign ?out|"
+                          r"log ?out|uninstall|format|reset|discard|unsubscribe|transfer|confirm|allow|accept|install)\b")
+
+
+def find_and_click_ui_element(target_name, hwnd=None):
+    """Click a button, link, menu item, tab or list item in the window in front whose name is exactly target_name, in
+    about 40 ms instead of a screenshot and the model. Only when exactly one visible, enabled element has that name;
+    anything vaguer, or a risky button like Send or Delete, returns False so vision mode handles it."""
+    clean = " ".join(str(target_name or "").lower().split())
+    if not clean or RISKY_CLICKS.search(clean):
+        return False
+    _com()
+    hwnd = hwnd or user32.GetForegroundWindow()
+    if not hwnd:
+        return False
+    try:
+        import comtypes.client
+        comtypes.client.GetModule("UIAutomationCore.dll")
+        from comtypes.gen.UIAutomationClient import CUIAutomation, IUIAutomation
+        uia = comtypes.client.CreateObject(CUIAutomation, interface=IUIAutomation)
+        root = uia.ElementFromHandle(hwnd)
+        if not root:
+            return False
+        hits = []
+        for ctype in (50000, 50005, 50011, 50019, 50007):  # button, hyperlink, menu item, tab item, list item
+            found = root.FindAll(4, uia.CreatePropertyCondition(30003, ctype))
+            if not found:
+                continue
+            for i in range(min(200, found.Length)):
+                el = found.GetElement(i)
+                if " ".join((el.CurrentName or "").lower().split()) != clean:
+                    continue
+                if el.CurrentIsOffscreen or not el.CurrentIsEnabled:
+                    continue
+                rect = el.CurrentBoundingRectangle
+                if rect.right > rect.left and rect.bottom > rect.top:
+                    hits.append(rect)
+        if len(hits) != 1:  # none, or more than one with that name: let vision work out which
+            return False
+        rect = hits[0]
+        click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+        return True
+    except Exception as exc:
+        print(f"  uia element click failed: {exc!r}")
+    return False
+
+
+# --------------------------------------------------------------------------- Native Window Management & Shell
+def maximize_foreground_window():
+    """Maximize the active foreground window using Win32 ShowWindow (< 1ms)."""
+    _com()
+    hwnd = user32.GetForegroundWindow()
+    if hwnd:
+        user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+
+
+def restore_foreground_window():
+    """Restore/unmaximize the active foreground window (< 1ms)."""
+    _com()
+    hwnd = user32.GetForegroundWindow()
+    if hwnd:
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+
+
+def minimize_foreground_window():
+    """Minimize the active foreground window (< 1ms)."""
+    _com()
+    hwnd = user32.GetForegroundWindow()
+    if hwnd:
+        user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+
+
+def show_desktop():
+    """Toggle or show desktop via Windows Shell COM (< 5ms, 0 RAM)."""
+    _com()
+    import comtypes.client
+    shell = comtypes.client.CreateObject("Shell.Application")
+    shell.ToggleDesktop()
+
+
+SHELL_FOLDERS = {"shell:MyComputerFolder", "shell:RecycleBinFolder", "shell:Downloads", "shell:Personal",
+                 "shell:My Pictures", "shell:My Music", "shell:My Video", "shell:Desktop"}
+
+
+def open_folder(path_or_uri):
+    """Open a folder in File Explorer. Only an existing folder or one of SHELL_FOLDERS: os.startfile would run a
+    program or script if handed one, so files are refused."""
+    target = str(path_or_uri or "").strip()
+    if target in SHELL_FOLDERS:
+        os.startfile(target)
+        return
+    full = os.path.abspath(os.path.expandvars(os.path.expanduser(target)))
+    if not target or not os.path.isdir(full):
+        raise RuntimeError("I can only open folders that exist")
+    os.startfile(full)
+
+
+def open_snipping_tool():
+    """Launch Windows Snipping Tool / screenclip protocol."""
+    os.startfile("ms-screenclip:")
+

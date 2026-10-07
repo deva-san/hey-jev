@@ -1,28 +1,32 @@
-"""Store API keys in the macOS login Keychain, with .env as a dev fallback."""
-import os
-import subprocess
+"""Store API keys in Windows Credential Manager (the Mac build used the Keychain), with .env as a dev fallback.
 
+Only free services: OpenCode Zen and Kilo Gateway (answers, free models only) and Fish Audio (her voice, free model).
+"""
+import os
+
+import keyring
 from dotenv import load_dotenv
 
-load_dotenv()  # so a .env works from the app bundle too, not just the terminal
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))  # works from the shortcut too
+
+SERVICE = "Hey Jev"  # shows up in Credential Manager > Windows Credentials
+KEY_NAMES = ("OPENCODE_ZEN_API_KEY", "FISH_AUDIO_API_KEY", "KILO_API_KEY")
+OPTIONAL = ("KILO_API_KEY",)  # Kilo Gateway's free models, besides OpenCode's (see opencode.py)
+ALIASES = {"OPENCODE_ZEN_API_KEY": ("OPENCODE_API_KEY",)}  # the name OpenCode's own docs use
 
 
-SERVICE = "com.jevsiri.keys"
-KEY_NAMES = ("TYPESAFE_API_KEY", "FISH_AUDIO_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY")
-OPTIONAL = ("OPENAI_API_KEY",)  # only used for dictation, straight to OpenAI instead of OpenRouter
-
-
-def keychain_value(name):
-    result = subprocess.run(
-        ["security", "find-generic-password", "-a", name, "-s", SERVICE, "-w"],
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip() if result.returncode == 0 else None
+def vault_value(name):
+    try:
+        return keyring.get_password(SERVICE, name)
+    except Exception:
+        return None
 
 
 def get_secret(name):
-    return os.getenv(name) or keychain_value(name)  # .env wins, so editing it always takes effect
+    for env_name in (name, *ALIASES.get(name, ())):
+        if os.getenv(env_name):
+            return os.getenv(env_name)  # .env wins, so editing it always takes effect
+    return vault_value(name)
 
 
 def save_secret(name, value):
@@ -31,15 +35,11 @@ def save_secret(name, value):
     value = value.strip()
     if not value:
         return
-    result = subprocess.run(
-        ["security", "add-generic-password", "-U", "-a", name, "-s", SERVICE, "-w", value],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or "Could not save to Keychain")
+    try:
+        keyring.set_password(SERVICE, name, value)
+    except Exception as exc:
+        raise RuntimeError(f"Could not save to Credential Manager: {exc}")
 
 
 def missing_secrets():
     return [name for name in KEY_NAMES if name not in OPTIONAL and not get_secret(name)]
-
