@@ -1413,9 +1413,11 @@ LOOKING = {"web": "Searching the web\u2026", "read": "Reading it\u2026", "weathe
 # second request on them
 TASK_ASKED = re.compile(r"(?:run|check|schedule|remind|research|set|start|queue|create|add|make|execute|do (?:that|it)|"
                         r"every|daily|weekly|tomorrow|at|git)\b")
-# Overheard words that ask her to remember or forget something, not "I remember ...": room talk put "Nine to Kerawal"
-# in her memory on 6 October
-REMEMBER = re.compile(r"(?<!\bi )(?<!\bwe )\b(?:remember|forget)\b")
+# Overheard words that ask her to remember or forget something, or to note it ("I need you to remember ..."), not
+# someone saying "I remember ...", "I still remember", "we need to remember" or "do you remember": room talk put "Nine to
+# Kerawal" in her memory on 6 October
+REMEMBER = re.compile(r"^(?!.*\b(?:i|we|he|she|they|you)(?:'\w+)? (?:(?!(?<=\byou )to\b)[\w']+ ){0,2}(?:remember|forget)"
+                      r"\b).*\b(?:remember|forget|keep in mind|note (?:that|this|it|down))\b")
 HEDGE_AFTER = 2.5  # the free model usually answers in 1 to 3 s but now and then takes 8 or more, so then ask again
 # On her own prompt in October 2026: Ling 3.0 Flash Sante on Kilo 1.8 to 2.2 s (median of 5), space-bunny on
 # OpenCode 3.6 to 3.7 s. Cohere's North Mini Code, Step 3.7 Flash and Nemotron 3 Super were slower or timed out

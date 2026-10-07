@@ -311,6 +311,21 @@ class Learning(Turn):
                           json.dumps({"to": "you", "steps": [memory, {"do": "open", "app": "Notepad"}], "say": ""}))
         self.assertEqual(plan["steps"], [{"do": "open", "app": "Notepad"}])
 
+    def test_overheard_remembering_in_other_words_is_not_saved(self):
+        memory = {"do": "memory", "action": "add", "target": "user", "content": "Nine to Kerawal"}
+        for said in ("I still remember nine to Kerawal", "I don't remember nine to Kerawal",
+                     "We'll never forget nine to Kerawal", "We need to remember nine to Kerawal",
+                     "Do you remember nine to Kerawal"):
+            self.assertIsNone(self.think(said, "cold", json.dumps({"to": "you", "steps": [memory], "say": "Noted."})),
+                              said)
+
+    def test_asked_to_keep_it_in_other_words_is_saved(self):
+        step = {"do": "memory", "action": "add", "target": "user", "content": "Their website is careerid.in"}
+        for said in ("note that my website is careerid.in", "keep in mind my website is careerid.in",
+                     "don't forget my website is careerid.in", "I need you to remember my website is careerid.in"):
+            plan = self.think(said, "cold", json.dumps({"to": "you", "steps": [step], "say": ""}))
+            self.assertEqual((plan or {}).get("steps"), [step], said)
+
     def test_remember_said_without_her_name_is_saved(self):
         step = {"do": "memory", "action": "add", "target": "user", "content": "Their website is careerid.in"}
         plan = self.think("remember that my website is careerid.in", "cold",
