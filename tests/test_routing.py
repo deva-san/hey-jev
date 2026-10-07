@@ -239,5 +239,17 @@ class Power(Routing):
         self.assertEqual(pending["steps"], [{"do": "shutdown"}])
 
 
+class Numbers(Routing):
+    """R3: a volume level and a number of scrolls said in words, as well as in digits."""
+
+    def test_number_words(self):
+        self.assertEqual(self.steps("set the volume to thirty"), [{"do": "volume", "to": 30}])
+        self.assertEqual(self.steps("volume fifty percent"), [{"do": "volume", "to": 50}])
+        self.assertEqual(self.steps("set volume to twenty five"), [{"do": "volume", "to": 25}])
+        self.assertEqual(self.steps("volume 40"), [{"do": "volume", "to": 40}])
+        self.assertEqual(self.steps("scroll down three times"), [{"do": "scroll", "direction": "down", "times": 3}])
+        self.assertEqual(self.steps("scroll up 2 times"), [{"do": "scroll", "direction": "up", "times": 2}])
+
+
 if __name__ == "__main__":
     unittest.main()

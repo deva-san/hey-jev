@@ -688,6 +688,12 @@ def _search(where):
     return make
 
 
+def _volume(m):
+    """"volume 30", and in words, "set the volume to thirty", which went to the model."""
+    n = "100" if m["n"] in ("hundred", "a hundred", "one hundred") else _digits(m["n"])
+    return make_plan([{"do": "volume", "to": int(n)}]) if n.isdigit() else None
+
+
 def _scroll(m):
     words = re.findall(r"\b(up|down|top|bottom)\b", m[0])
     times = max(1, m[0].count("scroll")) * (3 if "a lot" in m[0] else 1)
@@ -1006,8 +1012,8 @@ QUICK = [(re.compile(p), make) for p, make in (
     (r"mute(?: it| sound| audio| everything| the (?:volume|sound|audio))?",
      lambda m: make_plan([{"do": "volume", "to": "mute"}], say_line("volume_mute"))),
     (r"unmute(?: it| the (?:volume|sound|audio))?", lambda m: make_plan([{"do": "volume", "to": "unmute"}], say_line("volume_unmute"))),
-    (r"(?:(?:set|turn|put|change) )?(?:the )?volume (?:to |at )?(?P<n>\d{1,3})(?: percent|%)?",
-     lambda m: make_plan([{"do": "volume", "to": int(m["n"])}])),
+    (r"(?:(?:set|turn|put|change) )?(?:the )?volume (?:to |at )?(?P<n>\d{1,3}|[a-z]+(?: (?!percent)[a-z]+)?)"
+     r"(?: percent|%)?", _volume),
     # scrolling and the browser
     (r"(?:scroll(?: (?:up|down))?(?: (?:a bit|a little|a lot|more|again|some))?(?: (?:up|down))? ?)+", _scroll),
     (r"(?:scroll|go|jump)(?: all the way)?(?: up| down)? to the (?:top|bottom)(?: of (?:the|this) page)?|page (?:up|down)", _scroll),

@@ -205,10 +205,11 @@ class FastIntentMatcher:
         # 3. Scrolling
         # -------------------------------------------------------------
         m_scroll = re.fullmatch(r"(?:scroll|go|jump)(?: all the way)? (up|down|to the top|to the bottom|to top|to bottom)"
-                               r"(?: (?P<times>\d+)\s+times?)?(?: (?:a bit|a little|a lot|more|fast))?", t)
-        if m_scroll:
+                               r"(?: (?P<times>\w+(?: \w+)?)\s+times?| (?P<twice>twice))?(?: (?:a bit|a little|a lot|more|fast))?", t)
+        said = self.siri._digits(m_scroll["times"]) if m_scroll and m_scroll["times"] else ""  # "three times" too
+        if m_scroll and (said.isdigit() or not said):
             direction = "top" if "top" in m_scroll[1] else "bottom" if "bottom" in m_scroll[1] else m_scroll[1]
-            times = int(m_scroll.group("times")) if m_scroll.group("times") else (3 if "lot" in t else 1)
+            times = int(said) if said else 2 if m_scroll["twice"] else (3 if "lot" in t else 1)
             return self.siri.make_plan([{"do": "scroll", "direction": direction, "times": times}])
 
         # -------------------------------------------------------------
