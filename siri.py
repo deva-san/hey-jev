@@ -404,15 +404,20 @@ def _soon(fn, secs=3.0):
 NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
                 "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
                 "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
-                "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "ninety": 90, "couple": 2, "few": 3}
+                "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+                "couple": 2, "few": 3}
 UNITS = {"s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1, "m": 60, "min": 60, "mins": 60,
          "minute": 60, "minutes": 60, "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600}
-DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b(\s+and\s+a\s+half)?")
+DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b(\s+and\s+(?:a\s+)?(?:half|quarter))?")
+IN_DURATION = re.compile(r"\b(?:in|after)\s+(?:" + DURATION.pattern + r"(?:\s+and)?\s*)+")  # when a reminder is due
 
 
 def _digits(text):
-    """'twenty five minutes' -> '25 minutes', 'half an hour' -> '30 minutes'."""
-    t = re.sub(r"\bhalf an? hour\b", "30 minutes", text.lower())
+    """'twenty five minutes' -> '25 minutes', 'half an hour' -> '30 minutes', 'two and a half minutes' -> '2.5 minutes',
+    '1 minute 30' -> '1 minute 30 seconds'."""
+    t = re.sub(r"\bthree quarters of an hour\b", "45 minutes", text.lower())
+    t = re.sub(r"\b(?:a |one )?quarter of an hour\b", "15 minutes", t)  # was "an hour"
+    t = re.sub(r"\bhalf an? (hour|minute)\b", lambda m: "30 minutes" if m[1] == "hour" else "30 seconds", t)
     t = re.sub(r"\ba couple of\b", "couple", t)
     t = re.sub(r"\b(an?|few|couple)\s+(hours?|minutes?|seconds?)\b", lambda m: f"{NUMBER_WORDS[m[1]]} {m[2]}", t)
     words = t.replace("-", " ").split()
@@ -428,24 +433,30 @@ def _digits(text):
         else:
             out.append(words[i])
         i += 1
-    return " ".join(out)
+    t = re.sub(r"\b(\d+) and (?:a )?half (hours?|minutes?|seconds?)\b", r"\1.5 \2", " ".join(out))  # "one and half hour"
+    # "1 minute 30": the bare number is the next unit down, it used to be dropped
+    return re.sub(r"\b(\d+ (hours?|hrs?|minutes?|mins?))(?: and)? (\d+)\b(?! ?(?:\.\d|hours?|hrs?|h|minutes?|mins?|m|"
+                  r"seconds?|secs?|s)\b)", lambda m: f"{m[1]} {m[3]} {'minutes' if m[2][0] == 'h' else 'seconds'}", t)
 
 
 def parse_duration(text):
     """Total seconds mentioned in the sentence, or None."""
     total = 0
-    for num, unit, half in DURATION.findall(_digits(text)):
+    for num, unit, extra in DURATION.findall(_digits(text)):
         secs = UNITS[unit]
-        total += float(num) * secs + (secs / 2 if half else 0)
+        total += float(num) * secs + (secs / 4 if "quarter" in extra else secs / 2 if extra else 0)
     return int(total) or None
 
 
 def parse_reminder(text):
-    """What to remind about: the part after 'to', minus any duration. 'remind me in 5 min to call mum' -> 'call mum'."""
-    m = re.search(r"\bto\s+(.+)$", _digits(text))
+    """What to remind about: the part after 'to', minus when. 'remind me in 5 min to call mum' -> 'call mum',
+    'remind me to stretch for 10 minutes in 1 hour' -> 'stretch for 10 minutes'."""
+    t = _digits(text)
+    when = IN_DURATION.search(t)
+    m = re.search(r"\bto\s+(.+)$", t[:when.start()] + " " + t[when.end():] if when else t)
     if not m:
         return None
-    what = DURATION.sub("", m[1])
+    what = m[1] if when else DURATION.sub("", m[1])  # without an "in", the duration is when: "5 minutes from now"
     what = re.sub(r"\bplease\b", "", what).strip(" .,!?")
     what = re.sub(r"\s*\b(in|for|after)$", "", what).strip(" .,!?")
     return what or None
@@ -472,12 +483,34 @@ def add_timer(secs, label=None):
     return t
 
 
+REMINDER_SOON = 12 * 3600  # a one-off reminder due within this counts down with the timers
+_reminders_read = [0.0, []]  # when they were last read, and (text, due) for each
+
+
+def reminders_soon():
+    """(text, due) for one-off reminders due within REMINDER_SOON. Read again at most once a second, the window asks
+    twice a second, and never raises: a broken tasks.db mustn't stop the window's clock."""
+    if time.time() - _reminders_read[0] >= 1:
+        try:
+            soon = [(r["payload"].get("text") or r["description"], r["due"]) for r in TASK_STORE.list(active=True)
+                    if r["kind"] == "reminder" and r["status"] == "queued" and not r["repeat"]
+                    and r["due"] < time.time() + REMINDER_SOON]
+        except Exception as exc:
+            print(f"  couldn't read the reminders: {exc!r}")
+            soon = []
+        _reminders_read[:] = [time.time(), soon]
+    return _reminders_read[1]
+
+
 def timer_snapshot():
-    """(name, seconds left) for each running timer, soonest first."""
+    """(name, seconds left) for each running timer and each reminder due soon, soonest first. Reminders are in the
+    task queue now, so "how long is left?" and the window didn't see a reminder due in 10 minutes."""
     now = time.time()
     with TIMERS_LOCK:
-        return [((t["label"] or "").capitalize() or short_duration(t["secs"]) + " timer", max(0, t["end"] - now))
+        left = [((t["label"] or "").capitalize() or short_duration(t["secs"]) + " timer", max(0, t["end"] - now))
                 for t in TIMERS]
+    return sorted(left + [(text.capitalize(), max(0, due - now)) for text, due in reminders_soon()],
+                  key=lambda x: x[1])
 
 
 def short_duration(secs):
@@ -704,7 +737,15 @@ def _scroll(m):
 
 def _timer(m):
     said = m[0]
-    secs = parse_duration(said)
+    if re.match(r"(?:cancel|stop|delete|clear|remove|how)\b", said):
+        return None  # "cancel the 5 minute timer" or "how long is left on the 10 minute timer" set a second timer
+    when = said.startswith("remind") and IN_DURATION.search(_digits(said))
+    # it repeats, see direct_background: "remind me every one hour to ..." was a one-off in an hour. With an "in 10
+    # minutes" only a real repeat counts, "remind me in 10 minutes to water every plant" is once
+    if said.startswith("remind") and re.search(r"\bevery (?:[\w.]+ ){0,2}(?:seconds?|minutes?|mins?|hours?|hrs?|days?|"
+                                                r"half)\b" if when else r"\b(?:every|hourly|daily)\b", said):
+        return None
+    secs = parse_duration(when[0] if when else said)  # "remind me to stretch for 10 minutes in 1 hour": in an hour
     if not secs:
         return None
     if not said.startswith("remind"):
@@ -716,8 +757,39 @@ def _timer(m):
 
 
 def _time_left(m):
-    left = timer_snapshot()
-    return make_plan(say=say_line("timer_check", left=say_duration(left[0][1])) if left else say_line("timer_none"))
+    what = m["what"] or ""
+    secs = parse_duration(what)  # "on the 10 minute timer" or the model's "on the tea timer": that one, else the soonest
+    with TIMERS_LOCK:
+        left = [t["end"] - time.time() for t in TIMERS
+                if t["secs"] == secs or what and re.search(rf"\b{re.escape(what)}\b", (t["label"] or "").lower())]
+    left = left or [s for _, s in timer_snapshot()]
+    return make_plan(say=say_line("timer_check", left=say_duration(left[0])) if left else say_line("timer_none"))
+
+
+def _cancel_timers(m):
+    secs = parse_duration(m["what"] or "")  # "cancel the 5 minute timer": that one, see do_step
+    if not secs and re.search(r"\b(?:and|reminders?)\b", m["what"] or ""):
+        return None  # "stop the music and the timer", "clear my reminders and timers": more than timers, the model
+    return make_plan([{"do": "cancel_timers", **({"seconds": secs} if secs else {})}],
+                     say_line("timers_cancel" if TIMERS else "timer_none"))
+
+
+def _cancel_reminders(m):
+    """Reminders are durable and some repeat, so she names the ones she'd cancel and waits for a yes. "Cancel the
+    timer" used to cancel them all, daily ones too, while she said there was no timer running."""
+    if re.search(r"\b(?:and|timers?|alarms?)\b", m["what"] or ""):
+        return None  # "cancel the timer and the reminder": more than reminders, the model
+    rows = [r for r in TASK_STORE.list(active=True) if r["kind"] == "reminder"]
+    about = " ".join(filter(None, (m["what"], m["about"])))
+    rows = [r for r in rows if about and about in plain(r["payload"].get("text") or r["description"])] or rows
+    if not rows:
+        return make_plan(say="You don't have any reminders.")
+    bits = [f"to {r['payload'].get('text') or r['description']}, "
+            + ("which repeats" if r["repeat"] else tasking.describe_due(r["due"])) for r in rows]
+    ask = f"Should I cancel your reminder {bits[0]}?" if len(bits) == 1 else \
+        f"Should I cancel your {len(bits)} reminders, {'; '.join(bits[:3])}{'; and the rest' if len(bits) > 3 else ''}?"
+    return {"steps": [], "say": ask,
+            "confirm": make_plan([{"do": "task_control", "action": "cancel", "id": r["id"]} for r in rows])}
 
 
 def _step(**step):
@@ -1046,9 +1118,13 @@ QUICK = [(re.compile(p), make) for p, make in (
      lambda m: make_plan([{"do": "dark_mode", "on": False}], say_line("dark_off"))),
     # timers
     (r"(?:(?:set|start|make) )?(?:a |an |the )?(?:timer|alarm)(?: for| of)? .+|.+ timer|remind me .+", _timer),
-    (r"how (?:long|much time)(?: is| do i have| have i got)?(?: left| remaining)?(?: on (?:the|my) timer)?|time left", _time_left),
-    (r"(?:cancel|stop|delete|clear|remove)(?: the| all| my| all the| all my)? (?:timers?|alarms?|reminders?)",
-     lambda m: make_plan([{"do": "cancel_timers"}], say_line("timers_cancel" if TIMERS else "timer_none"))),
+    (r"how (?:long|much time)(?: is| do i have| have i got)?(?: left| remaining)?(?: (?:on|for) (?:the|my) "
+     r"(?:(?P<what>.+?) )?timer)?|time left", _time_left),
+    (r"(?:cancel|stop|delete|clear|remove)(?: all the| all my| the| all| my)? (?:(?P<what>.+?) )?(?:timers?|alarms?)",
+     _cancel_timers),
+    # "stop reminding me to drink water": the model's cancel_timers leaves reminders alone now
+    (r"(?:(?:cancel|stop|delete|clear|remove)(?: all the| all my| the| all| my| that)?(?: (?P<what>.+?))? reminders?|"
+     r"stop reminding me)(?: (?:to|about|for) (?P<about>.+?))?(?: any ?more)?", _cancel_reminders),
     # just a site or an app, "YouTube" after a new tab: open it. Last, so it never takes a phrase meant for the above
     (r"(?P<x>[a-z][a-z .]{1,24})", lambda m: _bare(m["x"])),
 )]
@@ -1207,13 +1283,14 @@ MESSAGE_PATTERNS = [(re.compile(p, re.I), make) for p, make in (
 )]
 TASK_REQUEST = re.compile(r"\b(?:run (?:the )?tests?|git status|command|powershell|schedule|every (?:day|monday|tuesday|"
                           r"wednesday|thursday|friday|saturday|sunday|\d+)|daily|weekly|tomorrow at|remind me at)\b", re.I)
-SCHEDULE_TIME = r"\d{1,2}(?::\d\d)?\s*(?:am|pm)?"
+SCHEDULE_TIME = r"(?:\d{1,2}(?::\d\d)?\s*(?:am|pm)?|midnight|noon)"
 SCHEDULE_NUMBER = r"(?:\d+|one|two|three|four|five|ten|fifteen|thirty)"
 SCHEDULE_DAY = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
-REPEAT_PREFIX = re.compile(rf"^(?P<repeat>(?:every (?:(?:{SCHEDULE_NUMBER}) (?:minutes?|hours?|days?)|"
-                           rf"(?:{SCHEDULE_DAY}) at {SCHEDULE_TIME}|day at {SCHEDULE_TIME})|"
-                           rf"daily at {SCHEDULE_TIME})) (?P<action>.+)$", re.I)
-WHEN = rf"(?:tomorrow at {SCHEDULE_TIME}|(?:on )?{SCHEDULE_DAY} at {SCHEDULE_TIME}|at {SCHEDULE_TIME})"
+REPEAT = (rf"(?:every (?:(?:{SCHEDULE_DAY}|day) at {SCHEDULE_TIME}|(?:{SCHEDULE_NUMBER} )?(?:minutes?|hours?)|"
+          rf"{SCHEDULE_NUMBER} days?|half an hour)|daily at {SCHEDULE_TIME}|hourly)")  # "every hour" lost a reminder
+REPEAT_PREFIX = re.compile(rf"^(?P<repeat>{REPEAT}),? (?P<action>.+)$", re.I)  # Nemotron's "Every hour, remind me ..."
+WHEN = (rf"(?:(?:(?:tomorrow|today)(?: morning| afternoon| evening| night)?|tonight|this (?:morning|afternoon|evening))"
+        rf" at {SCHEDULE_TIME}|(?:on )?{SCHEDULE_DAY} at {SCHEDULE_TIME}|at {SCHEDULE_TIME}(?: tonight| today| tomorrow)?)")
 
 
 def scheduled_payload(action):
@@ -1276,6 +1353,13 @@ def direct_background(words):
         return make_plan([{"do": "schedule", "when": m["when"], "repeat": "",
                            "description": f"Remind me to {m['thing']}",
                            "task": {"kind": "reminder", "text": m["thing"]}}])
+    # "remind me every hour to drink water" went to the model, which asked twice what to say and then made nothing
+    m = re.fullmatch(rf"remind me (?P<repeat>{REPEAT}),? to (?P<thing>.+)", text, re.I) or \
+        re.fullmatch(rf"remind me to (?P<thing>.+?),? (?P<repeat>{REPEAT})", text, re.I)
+    if m:
+        thing = m["thing"].strip(" ,!?")
+        return make_plan([{"do": "schedule", "when": "", "repeat": m["repeat"], "description": f"Remind me to {thing}",
+                           "task": {"kind": "reminder", "text": thing}}])
     m = re.fullmatch(rf"(?P<action>(?:check|research) .+?) (?P<when>{WHEN})", text, re.I)
     if m:
         task = scheduled_payload(m["action"])
@@ -2313,16 +2397,19 @@ def _task_result_line(task, text, success=True):
     return f"Task {task['id']} failed: {task['description']}." + (f" {text}" if text else "")
 
 
+SLOW_TASKS = ("command", "install", "research")  # minutes at a time, so they get a thread of their own
+
+
 def task_worker():
-    """One sleeping worker. It never touches the listener thread and claims one durable task at a time."""
+    """One sleeping worker. It never touches the listener thread and claims one durable task at a time. Commands,
+    installs and research run on a thread of their own, still one at a time, so reminders and PC checks don't wait:
+    a reminder due during a 30 minute install was said when the install finished."""
     TASK_STORE.init()
     TASK_STORE.recover()
     print("[tasks: ready]")
-    while True:
-        task = TASK_STORE.claim_due()
-        if task is None:
-            TASK_STORE.wait(30)
-            continue
+    slow = threading.Event()  # set while a command, install or research runs
+
+    def run(task):
         try:
             kind, payload = task["kind"], task["payload"]
             if kind == "command":
@@ -2332,7 +2419,7 @@ def task_worker():
                 if level == "confirm" and not payload.get("approved"):
                     TASK_STORE.wait_for_approval(task["id"], reason)
                     ANNOUNCE.put(f"Task {task['id']} is waiting for approval: {task['description']}. Say approve task {task['id']}.")
-                    continue
+                    return
                 result = tasking.run_command(payload["command"], payload["cwd"], bool(payload.get("approved")),
                                              payload.get("timeout", 120), lambda: TASK_STORE.is_cancelled(task["id"]))
                 output = result["output"]
@@ -2341,7 +2428,7 @@ def task_worker():
                     TASK_STORE.finish(task["id"], error=error)
                     if not TASK_STORE.is_cancelled(task["id"]):
                         ANNOUNCE.put(_task_result_line(task, f"It exited with code {result['exit_code']}.", False))
-                    continue
+                    return
                 TASK_STORE.finish(task["id"], output)
                 if not TASK_STORE.is_cancelled(task["id"]):
                     ANNOUNCE.put(_task_result_line(task, "It finished successfully."))
@@ -2350,7 +2437,7 @@ def task_worker():
                     TASK_STORE.wait_for_approval(task["id"], "Installing changes this PC; approve it to go ahead")
                     ANNOUNCE.put(f"Task {task['id']} is waiting for approval: {task['description']}. "
                                  f"Say approve task {task['id']}.")
-                    continue
+                    return
                 ok, line, output = installer.install(payload, lambda: TASK_STORE.is_cancelled(task["id"]))
                 TASK_STORE.finish(task["id"], tasking.redact(output[-4000:]), "" if ok else line)
                 if not TASK_STORE.is_cancelled(task["id"]):
@@ -2375,11 +2462,30 @@ def task_worker():
             error = tasking.redact(str(exc))
             if TASK_STORE.is_cancelled(task["id"]):
                 print(f"  task {task['id']} cancelled")
-                continue
+                return
             print(f"  task {task['id']} failed: {error}")
             TASK_STORE.finish(task["id"], error=error)
             if not TASK_STORE.is_cancelled(task["id"]):
                 ANNOUNCE.put(_task_result_line(task, "Open Tasks for the details.", False))
+
+    def run_slow(task):
+        try:
+            run(task)
+        finally:
+            slow.clear()
+            tasking.WAKE.set()  # the next command, install or research may go now
+
+    while True:
+        skip = SLOW_TASKS if slow.is_set() else ()
+        task = TASK_STORE.claim_due(skip=skip)
+        if task is None:
+            TASK_STORE.wait(30, skip)
+            continue
+        if task["kind"] in SLOW_TASKS:
+            slow.set()
+            threading.Thread(target=run_slow, args=(task,), daemon=True).start()
+        else:
+            run(task)
 
 
 # --------------------------------------------------------------------------- Doing the steps
@@ -2847,13 +2953,13 @@ def do_step(step):
             t["line"] = str(step["alert"])
             threading.Thread(target=fetch_tts, args=(t["line"],), daemon=True).start()  # ready before it's needed
         return f"{secs}s {step.get('label') or ''}".strip()
-    if do == "cancel_timers":
+    if do == "cancel_timers":  # timers only: reminders are durable and some repeat, see _cancel_reminders
+        secs = int(float(step.get("seconds") or 0))
         with TIMERS_LOCK:
-            TIMERS.clear()
-        for task in TASK_STORE.list(active=True):
-            if task["kind"] == "reminder":
-                TASK_STORE.cancel(task["id"])
-        return ""
+            gone = [t for t in TIMERS if t["secs"] == secs] or list(TIMERS)  # none that long: all, as before
+            for t in gone:
+                TIMERS.remove(t)
+        return str(len(gone))
     if do == "dark_mode":
         on = step.get("on")
         win.set_dark_mode(not win.dark_mode() if on in (None, "toggle") else bool(on))
