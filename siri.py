@@ -1283,6 +1283,13 @@ def _quick(words):
     answered = finish_asked(words)  # the number or username she just asked for
     if answered:
         return answered
+    t = plain(words)
+    # a routine she learned: runs as it was taught, before anything else, so no shortcut takes its words ("enter
+    # focus mode" typed "focus mode", "get me ready for work" looked up an app called "ready for work")
+    for phrase, skill in routines():
+        if phrase and t == phrase:
+            print(f"  routine: {skill['dir']}")
+            return make_plan(skill["plan"]["steps"], skill["plan"]["say"])
     message = direct_message(words)
     if message:
         print("  local message")
@@ -1295,21 +1302,16 @@ def _quick(words):
     if background:
         print("  local background task")
         return background
-    t = plain(words)
     local = local_compound(t)
     if local:
         print("  local compound")
         return local
-    if SECOND_COMMAND.search(t) and not TYPED_WORDS.match(t) and not any(t == phrase for phrase, _ in routines()):
+    if SECOND_COMMAND.search(t) and not TYPED_WORDS.match(t):
         # two things asked for, and the compound above couldn't do both on this PC: the one-command shortcuts below
         # would do the first and drop the rest ("set a timer for five minutes and play music" set only the timer,
         # "play lo-fi music and open Notepad" searched YouTube for all of it), so the model plans both
         print("  two requests, for the model")
         return None
-    for phrase, skill in routines():  # a routine she learned: runs as it was taught, before anything else
-        if phrase and t == phrase:
-            print(f"  routine: {skill['dir']}")
-            return make_plan(skill["plan"]["steps"], skill["plan"]["say"])
     for rx, make in QUICK:
         m = rx.fullmatch(t)
         if m:

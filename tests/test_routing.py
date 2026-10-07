@@ -127,5 +127,18 @@ class Installs(Routing):
         self.assertEqual(self.installs, ["VLC", "Zoom", "Git"])
 
 
+class Routines(Routing):
+    """A19: a routine she was taught runs before the message, install, typing and compound shortcuts."""
+
+    def test_routines_come_first(self):
+        routine = {"dir": "focus", "plan": {"steps": [{"do": "volume", "to": "mute"}], "say": "Focus time."}}
+        phrases = ("enter focus mode", "write my status", "get me ready for work", "install the usual apps")
+        with mock.patch.object(siri, "routines", lambda: [(p, routine) for p in phrases]):
+            for words in ("Enter focus mode.", "write my status", "get me ready for work", "install the usual apps"):
+                with self.subTest(words=words):
+                    self.assertEqual(self.quick(words), {"steps": [{"do": "volume", "to": "mute"}], "say": "Focus time."})
+        self.assertEqual(self.installs, [])
+
+
 if __name__ == "__main__":
     unittest.main()
