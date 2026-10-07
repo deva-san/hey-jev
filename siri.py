@@ -3601,13 +3601,16 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         else:
             run_turn(what[0], what[1], ms, gate=what[2])
 
-    def check_partial(audio):
+    def check_partial(audio, session):
         """For Parakeet and Whisper, which only write once you stop: her name at the start of speech that's still
-        going on, so the popup comes up before you've finished."""
+        going on, so the popup comes up before you've finished. session: the turn's, which is then let run past
+        MAX_TURN like Nemotron's with her name in the words: "Hey Jev, open Notepad and write..." was cut at 15 s."""
         try:
             text, _ = transcribe(audio)
         except Exception:
             return
+        if find_name(text):
+            hers[0] = session
         if find_name(text) and not busy.locked() and not rec.dictating and listener.state() is None and not held[0]:
             named[0] = True
             emit(notify, "Listening", "Go ahead\u2026")
@@ -3638,10 +3641,12 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     allow = [0]  # mic blocks that piled up while a turn ran, caught up on rather than skipped (see LAG)
     calls = [()]  # apps on a call, logged when Windows' mic list changes
     checked = [None]  # where the speech last checked early for her name began
+    hers = [None]  # the turn whose first seconds had her name in, for Parakeet and Whisper, see check_partial
     partials = ThreadPoolExecutor(1)
     listener = speech.Listener(speech.end_of_speech(starting), ears, on_phrase, on_speech=warm, turn=turn,
                                on_words=on_words, hold_for=wait_for_rest,
-                               is_hers=lambda words: bool(words) and bool(find_name(words)))
+                               is_hers=lambda words: bool(words) and bool(find_name(words))
+                               or (hers[0] is not None and hers[0] is listener.session))
 
     def show_listening():
         """Listening after a bare "Hey Jev" or "Hello", Still listening during a follow-up window, Ready after."""
@@ -3708,7 +3713,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                       and listener.speech_start != checked[0] and listener.state() is None and not busy.locked()
                       and not held[0]):
                     checked[0] = listener.speech_start  # once a phrase, on its first 2.5 seconds
-                    partials.submit(check_partial, listener.partial())
+                    partials.submit(check_partial, listener.partial(), listener.session)
                 if time.time() - started > 0.5:  # a turn ran: what was said meanwhile comes next, catch up on it
                     allow[0] = rec.blocks.qsize()
                 if dictation.timed_out():

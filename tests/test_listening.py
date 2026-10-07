@@ -309,6 +309,26 @@ class MaxTurn(Case):
         self.assertGreater(phrases[2][0] / RATE, 1.0 + speech.Listener.PRE_ROLL)  # its pre-roll, for a soft "H"
 
 
+# --------------------------------------------------------------------------- A9: her long instruction, Parakeet
+class LongInstruction(Case):
+    def run_speech(self, words):
+        a = self.assistant(ears=FakeEars(write=lambda audio: words))
+        phrases = []
+        a.listener.on_phrase = lambda audio, kind, text, ms: phrases.append(len(audio) / RATE)
+        a.speak(blocks(0.5, 0.0) + blocks(20, 1.0))
+        a.listen()
+        return phrases
+
+    def test_named_instruction_isnt_cut_at_max_turn_with_parakeet(self):
+        """Her name at the start, heard early on the first seconds (check_partial): let run to MAX_TURN_HERS."""
+        self.assertEqual(self.run_speech("Hey Jev, open Notepad and write the whole plan for Monday"), [])
+
+    def test_room_talk_is_still_cut_at_max_turn(self):
+        phrases = self.run_speech("so the match yesterday went on and on and on")
+        self.assertEqual(len(phrases), 1)
+        self.assertLess(phrases[0], 15.5)
+
+
 # --------------------------------------------------------------------------- T1: "Hello [700 ms] Jev" with Parakeet
 class BareGreeting(Case):
     @staticmethod
