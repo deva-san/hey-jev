@@ -430,15 +430,17 @@ class WhileSheThinks(Case):
 
     FIRST, SECOND = "Hey Jev, who directed Iron Man?", "Hey Jev, also set a timer for five minutes."
 
-    def two_requests(self, said_meanwhile):
+    def two_requests(self, said_meanwhile, second=SECOND, gates=None):
         """'Hey Jev, who directed Iron Man?', and while the model thinks, said_meanwhile is queued (0.8 for the second
-        request's speech), then she answers. What reached handle()."""
-        a = self.assistant(ears=FakeEars(write=lambda audio: self.SECOND if np.any(np.isclose(audio, 0.8))
+        request's speech, written as second), then she answers. What reached handle(), and in gates how it came."""
+        a = self.assistant(ears=FakeEars(write=lambda audio: second if np.any(np.isclose(audio, 0.8))
                                          else self.FIRST))
         handled = []
 
         def handle(text, words, stt_ms=None, notify=None, gate=False):
             handled.append(str(text))
+            if gates is not None:
+                gates.append(gate)
             if len(handled) == 1:
                 a.queue(said_meanwhile)
                 siri.say("Jon Favreau directed it.", None)
@@ -463,6 +465,41 @@ class WhileSheThinks(Case):
         """Still talking when she started: the rest was never heard, so it isn't acted on half said."""
         handled = self.two_requests(blocks(0.5, 0.0) + blocks(2.0, 0.8))
         self.assertEqual(handled, [self.FIRST])
+
+    def test_what_the_room_says_while_she_thinks_isnt_a_follow_up(self):
+        """She hadn't answered yet, so it needs her name as before, or with Answer without her name on goes through
+        is-it-for-her: the window for carrying on opened on it, and "pass the salt" went to her as said to her."""
+        meanwhile = blocks(0.5, 0.0) + blocks(2.0, 0.8) + blocks(1.5, 0.0)
+        for no_name, second, want in ((False, "pass the salt please", [False]), (True, "pass the salt please", [False]),
+                                      (True, "what time does the match start", [False, "cold"])):
+            with self.subTest(no_name=no_name, second=second), \
+                    mock.patch.dict(siri.settings._load(), {"no_name": no_name}):
+                gates = []
+                self.two_requests(meanwhile, second, gates)
+                self.assertEqual(gates, want)
+
+    def test_after_her_answer_to_one_that_ended_at_the_break_you_can_carry_on(self):
+        """The second request ended as she started answering the first, then she answered it: what you say next counts
+        without her name, as after any answer. It used to close again at that answer."""
+        third = "and when did it come out"
+        a = self.assistant(ears=FakeEars(write=lambda audio: third if np.any(np.isclose(audio, 0.7)) else
+                                         self.SECOND if np.any(np.isclose(audio, 0.8)) else self.FIRST))
+        handled = []
+
+        def handle(text, words, stt_ms=None, notify=None, gate=False):
+            handled.append((str(text), gate))
+            if len(handled) == 1:
+                a.queue(blocks(0.5, 0.0) + blocks(2.0, 0.8) + blocks(0.3, 0.0))
+            if len(handled) <= 2:
+                siri.say("Done.", None)
+            if len(handled) == 2:
+                a.queue(blocks(1.0, 0.0) + blocks(1.5, 0.7) + blocks(1.5, 0.0))
+            return True
+        with mock.patch.object(siri, "handle", handle), mock.patch.object(siri, "speak", lambda line: 0), \
+                mock.patch.dict(siri.settings._load(), {"no_name": False}):
+            a.speak(blocks(0.5, 0.0) + blocks(2.0, 0.9) + blocks(1.5, 0.0))
+            a.listen()
+        self.assertEqual(handled, [(self.FIRST, False), (self.SECOND, False), (third, True)])
 
 
 # --------------------------------------------------------------------------- A7: the rest of a held phrase

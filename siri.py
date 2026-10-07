@@ -3696,7 +3696,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                     held[0] = None  # and what was waiting for the rest goes
                     listener.reset(next_window[0])
                     next_window[0] = 0.0
-                if window_ask[0] is not None:  # a turn ended without her talking, so no reset: open or close it here
+                # a turn ended without her talking, so no reset: open or close it here. If she talked, what's still
+                # waiting from before that was said before her answer, and with the window opened on it "pass the
+                # salt" went to her as a follow-up: the window opens at the break instead
+                if window_ask[0] is not None and g == rec.gen:
                     listener.open(window_ask[0])
                     window_ask[0] = None
                 allow[0] = max(0, allow[0] - 1)
