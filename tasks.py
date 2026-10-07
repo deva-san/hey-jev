@@ -347,6 +347,12 @@ def describe_due(timestamp):
 
 
 # --------------------------------------------------------------------------- commands
+# Credentials and private keys, and the files browsers, password managers and developer tools keep them in: Chrome's
+# Login Data and Cookies, Firefox's logins.json, a .kdbx, gh's hosts.yml and a .ppk were all read with no approval
+CREDENTIALS = (r"(?:\.env\b|credentials?\b|id_(?:rsa|dsa|ecdsa|ed25519)|\.(?:pem|pfx|p12|key|ppk|kdbx?)\b|\benv:|"
+               r"\$env\b|\.ssh\b|\.gnupg\b|\.netrc\b|\.npmrc\b|\.pypirc\b|\.aws[\\/]|\.docker[\\/]+config\.json|"
+               r"\bgh[\\/]+hosts\.ya?ml\b|\b(?:login|web)\s+data\b|\blocal\s+state\b|\bcookies(?:\.sqlite)?(?![\w.])|"
+               r"\blogins\.json\b|\bkey[34]\.db\b)")
 BLOCKED = (
     (r"\b(?:format|diskpart|bcdedit|reagentc|shutdown|restart-computer|stop-computer|clear-disk|remove-partition)\b",
      "system or disk changes are blocked"),
@@ -362,8 +368,7 @@ BLOCKED = (
     (r"\bgit\s+(?:reset\s+--hard|clean\s+-[a-z]*f|push\b[^\r\n]*--force)\b", "destructive Git commands are blocked"),
     (r"\b(?:rm\s+-[a-z]*r[a-z]*|rmdir\s+/s|del\s+/s)\b|\bremove-item\b[^\r\n]*-recurse",
      "recursive deletion is blocked"),
-    (r"(?:\.env\b|credentials?\b|id_rsa\b|id_ed25519\b|\.(?:pem|pfx|key)\b|\benv:|\$env\b)",
-     "reading credentials, environment variables, and private keys is blocked"),
+    (CREDENTIALS, "reading credentials, environment variables, and private keys is blocked"),
     (r"(?:^|\s)(?:cmd(?:\.exe)?\s+/c|powershell(?:\.exe)?\b|pwsh(?:\.exe)?\b)",
      "nested command shells are blocked"),
     (r"\b(?:invoke-webrequest|iwr|curl|wget|scp|sftp|ftp|ssh|telnet|ncat|netcat)\b", "network transfers belong in Jev's browser tools, not commands"),
@@ -423,6 +428,8 @@ def command_policy(command, cwd=None):
         return "block", "the command is empty, too long, or contains control characters"
     if cwd is not None and (not os.path.isdir(os.path.abspath(os.path.expandvars(str(cwd))))):
         return "block", "the working folder doesn't exist"
+    if cwd is not None and re.search(CREDENTIALS, os.path.abspath(os.path.expandvars(str(cwd))), re.I):  # .ssh
+        return "block", "reading credentials, environment variables, and private keys is blocked"
     low = command.lower()
     for pattern, reason in BLOCKED:
         if re.search(pattern, low, re.I):

@@ -4,10 +4,12 @@ import importlib.util
 import json
 import os
 import shutil
+import tempfile
 import unittest
 from unittest import mock
 
-from tests.support import ROOT, messaging, siri
+from tests.support import DATA, ROOT, messaging, siri
+import tasks
 from hermes_memory import skills
 
 
@@ -284,6 +286,34 @@ class BrowserLaunch(unittest.TestCase):
         for url in (r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe"):
             with self.assertRaises(RuntimeError):
                 self.launch(url)
+
+
+SECRETS = "reading credentials, environment variables, and private keys is blocked"
+
+
+class CommandPolicy(unittest.TestCase):
+    """README: read-only checks and declared tests run by themselves, anything that changes things waits for
+    approval, and credentials, broad forced deletion, registry and security changes are blocked even if asked."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(dir=DATA)
+
+    def level(self, command, cwd=None):
+        return tasks.command_policy(command, cwd or self.folder)[0]
+
+    def test_secrets_are_blocked(self):
+        for command in (r'Get-Content "C:\Users\x\AppData\Local\Google\Chrome\User Data\Default\Login Data"',
+                        r'Copy-Item "C:\x\Default\Network\Cookies" C:\temp\c', r'Get-Content "C:\x\Local State"',
+                        r"Get-Content C:\x\Mozilla\Firefox\Profiles\a.default\logins.json", r"Get-Item C:\x\key4.db",
+                        "Get-Content passwords.kdbx", "Select-String -Path *.kdbx -Pattern bank",
+                        r"Get-Content $HOME\.config\gh\hosts.yml", r"Get-Content C:\backup\id_ecdsa",
+                        r"Get-Content C:\Users\x\Downloads\server.ppk", r"Get-Content C:\Users\x\.docker\config.json",
+                        r"Get-Content C:\Users\x\.ssh\config"):
+            self.assertEqual(tasks.command_policy(command, self.folder), ("block", SECRETS), command)
+
+    def test_a_secrets_folder_cant_be_the_working_folder(self):
+        os.mkdir(os.path.join(self.folder, ".ssh"))
+        self.assertEqual(self.level("Get-Content config", os.path.join(self.folder, ".ssh")), "block")
 
 
 if __name__ == "__main__":
