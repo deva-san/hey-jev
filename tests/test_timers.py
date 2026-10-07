@@ -46,6 +46,7 @@ class Durations(unittest.TestCase):
             self.assertEqual((step["when"], step["task"]["text"]), ("in 300 seconds", "call mum"), said)
 
 
+
 class Schedules(unittest.TestCase):
     """P2: normalize_schedule read 'tonight at 8' as 8 tomorrow morning and refused everyday phrasings."""
 
@@ -73,6 +74,24 @@ class Schedules(unittest.TestCase):
 
     def test_iso_still_works(self):
         self.assertEqual(self.due("2026-10-07T18:00:00")[0], at(7, 18))
+
+    def test_tonight_at_12_is_midnight(self):
+        """'Remind me tonight at 12 to wish Rahul' is local now, and it was set for noon the next day."""
+        for when, due in (("tonight at 12", at(8, 0)), ("tonight at 12:30", at(8, 0, 30)), ("at 12 tonight", at(8, 0)),
+                          ("tonight at 1", at(8, 1)), ("tomorrow night at 12", at(9, 0)),
+                          ("tonight at 11", at(7, 23)), ("tomorrow at 12", at(8, 12))):  # the last two as before
+            self.assertEqual(self.due(when)[0], due, when)
+        step = siri.quick("remind me tonight at 12 to wish rahul")["steps"][0]
+        self.assertEqual(self.due(step["when"])[0], at(8, 0))
+
+    def test_unknown_repeats_are_refused_not_daily(self):
+        """'every <anything> at 9' became daily: 'every 2 weeks at 9' was every day at 2 AM."""
+        for repeat in ("every weekday at 9", "every month on the 5th at 9", "every other day at 9",
+                       "every weekend at 10", "every 2 weeks at 9", "every year at 9"):
+            with self.assertRaises(ValueError, msg=repeat):
+                self.due(repeat=repeat)
+        for repeat, hour in (("every morning at 8", 8), ("every night at 10", 22), ("everyday at 9", 9)):
+            self.assertEqual(self.due(repeat=repeat)[1], {"kind": "daily", "hour": hour, "minute": 0}, repeat)
 
     def test_reminder_tonight_is_local(self):
         plan = siri.quick("remind me tonight at 8 to call mum")
@@ -112,6 +131,7 @@ class Repeating(unittest.TestCase):
                          {"kind": "daily", "hour": 9, "minute": 0})
         step = siri.quick("every day at 9 remind me to take my tablets")["steps"][0]  # as before
         self.assertEqual(step["repeat"], "every day at 9")
+
 
 
 class WithStore(unittest.TestCase):

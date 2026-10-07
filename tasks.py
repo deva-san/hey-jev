@@ -265,6 +265,8 @@ def _clock(text):
         if not 1 <= hour <= 12:
             return None
         hour = hour % 12 + (12 if meridiem == "pm" else 0)
+    elif re.search(r"\b(?:tonight|night)\b", text) and (hour == 12 or hour < 5):
+        hour %= 12  # "tonight at 12" is midnight, not noon the next day, and "tonight at 1" is 1 AM
     elif 0 < hour < 12 and re.search(r"\b(?:tonight|night|evening|afternoon)\b", text):
         hour += 12  # "tonight at 8" was 8 the next morning
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
@@ -306,7 +308,9 @@ def normalize_schedule(when=None, repeat=None, now=None):
             weekday = next((i for name, i in WEEKDAYS.items() if name in text), None)
             if weekday is not None and clock:
                 spec = {"kind": "weekly", "weekday": weekday, "hour": clock[0], "minute": clock[1]}
-            elif clock and re.search(r"\b(?:daily|every)\b", text):  # "every day at 9", "every midnight"
+            # "every day at 9", "every midnight". Not any "every": "every 2 weeks at 9" was every day at 2 AM
+            elif clock and re.search(r"\b(?:daily|every ?day|every (?:night|morning|evening|afternoon|midnight|noon|"
+                                     r"midday))\b", text):
                 spec = {"kind": "daily", "hour": clock[0], "minute": clock[1]}
     if repeat and spec is None:
         raise ValueError("I couldn't understand how often")
@@ -329,6 +333,8 @@ def normalize_schedule(when=None, repeat=None, now=None):
         clock = _clock(text)
         if due is None and clock:
             day = now_dt + dt.timedelta(days=1 if "tomorrow" in text.lower() else 0)
+            if "tomorrow" in text and clock[0] < 5 and re.search(r"\bnight\b", text):
+                day += dt.timedelta(days=1)  # "tomorrow night at 12" is the small hours after tomorrow, not tonight
             weekday = next((i for name, i in WEEKDAYS.items() if name in text.lower()), None)
             if weekday is not None:
                 day += dt.timedelta(days=(weekday - day.weekday()) % 7)
