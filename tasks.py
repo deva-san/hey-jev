@@ -158,14 +158,15 @@ class Store:
         WAKE.set()
         return bool(cur.rowcount)
 
-    def claim_due(self, now=None):
+    def claim_due(self, now=None, skip=()):
+        """The next due task, now running, or None. skip: kinds to leave queued for now."""
         self.init()
         now = float(now if now is not None else time.time())
         con = self._db()
         try:
             con.execute("BEGIN IMMEDIATE")
-            row = con.execute("SELECT * FROM tasks WHERE status='queued' AND due<=? ORDER BY due,id LIMIT 1",
-                              (now,)).fetchone()
+            row = con.execute(f"SELECT * FROM tasks WHERE status='queued' AND due<=? AND kind NOT IN "
+                              f"({','.join('?' * len(skip))}) ORDER BY due,id LIMIT 1", (now, *skip)).fetchone()
             if row is None:
                 con.rollback()
                 return None
@@ -212,10 +213,11 @@ class Store:
         task = self.get(task_id)
         return not task or task["status"] == "cancelled"
 
-    def wait(self, maximum=30.0):
+    def wait(self, maximum=30.0, skip=()):
         self.init()
         with self._db() as con:
-            row = con.execute("SELECT MIN(due) FROM tasks WHERE status='queued'").fetchone()
+            row = con.execute(f"SELECT MIN(due) FROM tasks WHERE status='queued' AND kind NOT IN "
+                              f"({','.join('?' * len(skip))})", skip).fetchone()
         due = row[0] if row else None
         seconds = maximum if due is None else max(0.1, min(maximum, float(due) - time.time()))
         WAKE.wait(seconds)

@@ -240,5 +240,77 @@ class RemindersCountDown(WithStore):
             self.assertEqual(len(siri.timer_snapshot()), 1)
 
 
+class StopsWorker(tasks.Store):
+    """A store whose claim_due ends task_worker's loop once the test is over."""
+    stopped = False
+
+    def claim_due(self, *args, **kwargs):
+        if self.stopped:
+            raise SystemExit
+        return super().claim_due(*args, **kwargs)
+
+
+class Worker(unittest.TestCase):
+    """A44: a reminder due during a 30 minute install was said only after the install finished."""
+
+    def test_reminder_is_said_during_a_long_install(self):
+        store = StopsWorker(os.path.join(tempfile.mkdtemp(prefix="heyjev-worker-"), "tasks.db"))
+        said, release, started = queue.Queue(), threading.Event(), threading.Event()
+
+        def slow_install(payload, cancelled):
+            started.set()
+            release.wait(10)
+            return True, "VLC is installed.", ""
+
+        with mock.patch.object(siri, "TASK_STORE", store), mock.patch.object(siri, "ANNOUNCE", said), \
+                mock.patch.object(installer, "install", slow_install):
+            store.create("Install VLC", "install", {"id": "VideoLAN.VLC", "approved": True})
+            worker = threading.Thread(target=siri.task_worker, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(started.wait(5))
+                store.create("Remind me to take the pizza out", "reminder", {"text": "take the pizza out"})
+                self.assertEqual(said.get(timeout=5), "Reminder: take the pizza out.")
+                release.set()
+                self.assertEqual(said.get(timeout=5), "VLC is installed.")
+            finally:
+                release.set()
+                store.stopped = True
+                tasks.WAKE.set()
+                worker.join(5)
+            self.assertFalse(worker.is_alive())
+
+    def test_long_tasks_still_go_one_at_a_time(self):
+        store = StopsWorker(os.path.join(tempfile.mkdtemp(prefix="heyjev-worker-"), "tasks.db"))
+        said, release, running = queue.Queue(), threading.Event(), []
+        overlap = []
+
+        def slow_install(payload, cancelled):
+            running.append(payload["id"])
+            overlap.append(len(running))
+            release.wait(10)
+            running.remove(payload["id"])
+            return True, f"{payload['id']} is installed.", ""
+
+        with mock.patch.object(siri, "TASK_STORE", store), mock.patch.object(siri, "ANNOUNCE", said), \
+                mock.patch.object(installer, "install", slow_install):
+            store.create("Install VLC", "install", {"id": "VLC", "approved": True})
+            store.create("Install Git", "install", {"id": "Git", "approved": True})
+            worker = threading.Thread(target=siri.task_worker, daemon=True)
+            worker.start()
+            try:
+                time.sleep(0.5)
+                self.assertEqual(running, ["VLC"])
+                release.set()
+                self.assertEqual({said.get(timeout=5), said.get(timeout=5)}, {"VLC is installed.", "Git is installed."})
+                self.assertEqual(overlap, [1, 1])
+            finally:
+                release.set()
+                store.stopped = True
+                tasks.WAKE.set()
+                worker.join(5)
+            self.assertFalse(worker.is_alive())
+
+
 if __name__ == "__main__":
     unittest.main()

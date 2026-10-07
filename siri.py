@@ -2321,16 +2321,19 @@ def _task_result_line(task, text, success=True):
     return f"Task {task['id']} failed: {task['description']}." + (f" {text}" if text else "")
 
 
+SLOW_TASKS = ("command", "install", "research")  # minutes at a time, so they get a thread of their own
+
+
 def task_worker():
-    """One sleeping worker. It never touches the listener thread and claims one durable task at a time."""
+    """One sleeping worker. It never touches the listener thread and claims one durable task at a time. Commands,
+    installs and research run on a thread of their own, still one at a time, so reminders and PC checks don't wait:
+    a reminder due during a 30 minute install was said when the install finished."""
     TASK_STORE.init()
     TASK_STORE.recover()
     print("[tasks: ready]")
-    while True:
-        task = TASK_STORE.claim_due()
-        if task is None:
-            TASK_STORE.wait(30)
-            continue
+    slow = threading.Event()  # set while a command, install or research runs
+
+    def run(task):
         try:
             kind, payload = task["kind"], task["payload"]
             if kind == "command":
@@ -2340,7 +2343,7 @@ def task_worker():
                 if level == "confirm" and not payload.get("approved"):
                     TASK_STORE.wait_for_approval(task["id"], reason)
                     ANNOUNCE.put(f"Task {task['id']} is waiting for approval: {task['description']}. Say approve task {task['id']}.")
-                    continue
+                    return
                 result = tasking.run_command(payload["command"], payload["cwd"], bool(payload.get("approved")),
                                              payload.get("timeout", 120), lambda: TASK_STORE.is_cancelled(task["id"]))
                 output = result["output"]
@@ -2349,7 +2352,7 @@ def task_worker():
                     TASK_STORE.finish(task["id"], error=error)
                     if not TASK_STORE.is_cancelled(task["id"]):
                         ANNOUNCE.put(_task_result_line(task, f"It exited with code {result['exit_code']}.", False))
-                    continue
+                    return
                 TASK_STORE.finish(task["id"], output)
                 if not TASK_STORE.is_cancelled(task["id"]):
                     ANNOUNCE.put(_task_result_line(task, "It finished successfully."))
@@ -2358,7 +2361,7 @@ def task_worker():
                     TASK_STORE.wait_for_approval(task["id"], "Installing changes this PC; approve it to go ahead")
                     ANNOUNCE.put(f"Task {task['id']} is waiting for approval: {task['description']}. "
                                  f"Say approve task {task['id']}.")
-                    continue
+                    return
                 ok, line, output = installer.install(payload, lambda: TASK_STORE.is_cancelled(task["id"]))
                 TASK_STORE.finish(task["id"], tasking.redact(output[-4000:]), "" if ok else line)
                 if not TASK_STORE.is_cancelled(task["id"]):
@@ -2383,11 +2386,30 @@ def task_worker():
             error = tasking.redact(str(exc))
             if TASK_STORE.is_cancelled(task["id"]):
                 print(f"  task {task['id']} cancelled")
-                continue
+                return
             print(f"  task {task['id']} failed: {error}")
             TASK_STORE.finish(task["id"], error=error)
             if not TASK_STORE.is_cancelled(task["id"]):
                 ANNOUNCE.put(_task_result_line(task, "Open Tasks for the details.", False))
+
+    def run_slow(task):
+        try:
+            run(task)
+        finally:
+            slow.clear()
+            tasking.WAKE.set()  # the next command, install or research may go now
+
+    while True:
+        skip = SLOW_TASKS if slow.is_set() else ()
+        task = TASK_STORE.claim_due(skip=skip)
+        if task is None:
+            TASK_STORE.wait(30, skip)
+            continue
+        if task["kind"] in SLOW_TASKS:
+            slow.set()
+            threading.Thread(target=run_slow, args=(task,), daemon=True).start()
+        else:
+            run(task)
 
 
 # --------------------------------------------------------------------------- Doing the steps
