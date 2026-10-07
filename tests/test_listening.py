@@ -466,5 +466,32 @@ class WhileSheThinks(Case):
         self.assertEqual(handled, [self.FIRST])
 
 
+# --------------------------------------------------------------------------- A7: the rest of a held phrase
+class HeldPhrase(Case):
+    def test_held_phrase_waits_while_its_continuation_is_still_going(self):
+        """'Hey Jev, search [pause] for flights to Delhi [0.4 s] next Friday': one request, not 'search' alone."""
+        def write(audio):
+            parts = (["Hey Jev, search."] if np.any(np.isclose(audio, 0.9)) else []) + \
+                (["for flights to Delhi next Friday."] if np.any(np.isclose(audio, 0.8)) else [])
+            return " ".join(parts)
+        a = self.assistant(ears=FakeEars(write=write))
+        acted = []
+        a.put("act_on", lambda text, kind, ms: acted.append(str(text)))
+        held, waited = a.var("held"), []
+
+        def expire():  # the rest has begun, and the 1.8 s it had run out while it goes on
+            held[0] = (*held[0][:3], time.time() - 1)
+
+        def the_rest():
+            waited.append(held[0] and held[0][0])
+            a.listener.on_speech = expire
+            a.speak(blocks(1.5, 0.8) + blocks(0.4, 0.0) + blocks(1.0, 0.8) + blocks(1.5, 0.0))
+        a.speak(blocks(0.5, 0.0) + blocks(0.6, 0.9) + blocks(0.6, 0.0))
+        a.then(the_rest)
+        a.listen()
+        self.assertEqual(waited, ["Hey Jev, search."])
+        self.assertEqual(acted, ["Hey Jev, search. for flights to Delhi next Friday."])
+
+
 if __name__ == "__main__":
     unittest.main()

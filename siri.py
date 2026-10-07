@@ -3714,7 +3714,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                           f"{time.strftime('%H:%M:%S')})")
                     continue
                 listener.feed(block, dictating=rec.dictating)
-                if held[0] and time.time() > held[0][3] and not listener.talking:  # the rest never came
+                # the rest never came. Not while it's still coming: a pause in it let "Hey Jev, search" go alone, and
+                # her reply to that threw "for flights to Delhi next Friday" away
+                if held[0] and time.time() > held[0][3] and not listener.talking and listener.session is None:
                     text, kind, ms, _ = held[0]
                     held[0] = None
                     act_on(text, kind, ms)
