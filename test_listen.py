@@ -92,6 +92,16 @@ def ok(want, got):
     return isinstance(got, tuple) and got[0] == want[0] and want[1] in got[1].lower() and got[2] == want[2]
 
 
+def pair(phrases, lines):
+    """Which heard phrases go with which line of the script: the line each overlaps most in the audio fed in, so
+    one line split in two is one line wrong, not every line after it. phrases and lines are (start, end) in
+    samples. Returns the phrases' indexes for each line."""
+    mine = [[] for _ in lines]
+    for i, (a, b) in enumerate(phrases):
+        mine[int(np.argmax([min(b, end) - max(a, start) for start, end in lines]))].append(i)
+    return mine
+
+
 def main():
     # This checks speech/turn routing, not whatever call happens to be using the real PC mic while the test runs.
     # Call-aware routing has its own local check.
@@ -104,17 +114,18 @@ def main():
     heard, follow_up, fed, held, words = [], [None], [0], [None], {}
 
     def on_phrase(audio, kind, text, ms):
+        start = fed[0] - len(audio)  # where it began in the audio fed in, to tell which line it was
         if held[0]:  # the rest of a phrase that a pause cut off, as the app joins them
-            first, first_kind, first_ms = held[0]
+            first, first_kind, first_ms, start = held[0]
             held[0] = None
             text = speech.heard(f"{first} {text}".strip(), min(first.sure, text.sure))
             kind, ms = kind if first_kind == "other" else first_kind, first_ms + ms
         elif siri.unfinished(text) and isinstance(siri.route(text, kind, open_mic=False), tuple):
             print(f"  (cut off at {text!r}, the app waits for the rest)")
-            held[0] = (text, kind, ms)
+            held[0] = (text, kind, ms, start)
             return
         what = taken_as(text, kind)
-        heard.append((kind, text, what, ms, fed[0], words.pop("seen", None)))
+        heard.append((kind, text, what, ms, fed[0], words.pop("seen", None), start))
         if what == "wake":
             listener.arm(siri.WAKE_WINDOW)
         elif what:
@@ -143,11 +154,14 @@ def main():
         listener.feed(np.zeros(siri.Recorder.BLOCK, "float32"))
 
     wrong = 0
-    if len(heard) != len(SCRIPT):
-        print(f"expected {len(SCRIPT)} phrases, the listener made {len(heard)}")
-        wrong += 1
+    mine = pair([(h[6], h[4]) for h in heard], list(zip(starts, speech_ends)))
     waits, early = [], []
-    for (_, line, want), (kind, text, what, ms, at, seen), start, end in zip(SCRIPT, heard, starts, speech_ends):
+    for (_, line, want), got, start, end in zip(SCRIPT, mine, starts, speech_ends):
+        if len(got) != 1:  # split in two, or not heard at all
+            wrong += 1
+            print(f"  BAD {line!r:52} heard as {len(got)} phrases: {[str(heard[i][1]) for i in got]}")
+            continue
+        kind, text, what, ms, at, seen, _ = heard[got[0]]
         wait = (at - end) / speech.RATE + ms / 1000  # from the end of the voice to the words being ready
         waits.append(wait)
         if seen is not None:
@@ -156,8 +170,8 @@ def main():
         wrong += not good
         print(f"  {'ok ' if good else 'BAD'} {line!r:52} heard as {kind:9} {text!r:46} {wait:.2f}s -> {what}")
     print(f"{len(SCRIPT) - wrong} of {len(SCRIPT)} right. From the end of a phrase to its words: "
-          f"{np.mean(waits):.2f}s on average, {np.median(waits):.2f}s median (speech-to-text and Smart Turn "
-          f"{np.mean([h[3] for h in heard]):.0f} ms of it)")
+          f"{np.mean(waits or [0]):.2f}s on average, {np.median(waits or [0]):.2f}s median (speech-to-text and Smart "
+          f"Turn {np.mean([h[3] for h in heard] or [0]):.0f} ms of it)")
     if early:
         print(f"Her name showed up in the words {np.median(early):.2f}s after the speech started (median)")
     sys.exit(1 if wrong else 0)
