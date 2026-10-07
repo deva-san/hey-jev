@@ -2054,6 +2054,10 @@ def think(text, gate, notify=None, sure=1.0):
     messages.append({"role": "user", "content": (OVERHEARD if gate == "cold" else "") + text + unsure})
     used = set()  # what was looked up, for the asking-first rule below
     needs_task, task_retry = bool(TASK_REQUEST.search(text) and TASK_ASKED.match(plain(text))), False
+    # "Google when is the next India match." is a question too, after the word Google, as _search reads it
+    googled = re.fullmatch(r"(?:google|search(?: google)?(?: for| about)?|look up) (?P<q>.+?)(?: on google)?",
+                           plain(text))
+    question = wants_spoken(text) or bool(googled and wants_spoken(googled["q"], text))
     for round_ in range(ROUNDS + 1):
         t = time.time()
         raw, plan, usage, model = ask_plan(messages, again=not gate, deadline=DEADLINE if round_ == 0 else 14.0)
@@ -2072,7 +2076,7 @@ def think(text, gate, notify=None, sure=1.0):
                           "claim it was scheduled or run without a step."}]
             continue
         searches = [s for s in plan["steps"] if s.get("do") == "google"]
-        if searches and len(searches) == len(plan["steps"]) and round_ < ROUNDS and wants_spoken(text):
+        if searches and len(searches) == len(plan["steps"]) and round_ < ROUNDS and question:
             # a question, and all it planned was opening Google: look it up instead and answer out loud, which is what
             # Hari asked for. The model did that anyway 3 times in a row on 7 October
             plan["steps"] = [{"do": "web", "query": str(s.get("query") or text)} for s in searches[:1]]

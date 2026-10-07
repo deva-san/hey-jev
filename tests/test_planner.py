@@ -82,6 +82,23 @@ class CommandRetry(Turn):
         self.assertEqual(plan["steps"][0]["do"], "schedule")
 
 
+class GoogleQuestion(Turn):
+    """A22: "Google when is ..." is a question, with or without a question mark."""
+
+    def test_google_question_without_a_question_mark_is_looked_up(self):
+        plan = self.think("Google when is the next India match.", False,
+                          '{"steps": [{"do": "google", "query": "next India match"}], "say": ""}',
+                          '{"steps": [], "say": "India play Australia on Friday."}')
+        self.assertEqual(self.looked, [[{"do": "web", "query": "next India match"}]])
+        self.assertEqual(plan, {"steps": [], "say": "India play Australia on Friday."})
+
+    def test_show_me_still_opens_google(self):
+        plan = self.think("Google show me pictures of the Taj Mahal", False,
+                          '{"steps": [{"do": "google", "query": "Taj Mahal pictures"}], "say": ""}')
+        self.assertEqual(self.looked, [])
+        self.assertEqual(plan["steps"], [{"do": "google", "query": "Taj Mahal pictures"}])
+
+
 class ToolCalls(unittest.TestCase):
     """M1, M2, M3: the ways Ling writes a step as a <tool_call>, from the live runs on 7 October."""
 
