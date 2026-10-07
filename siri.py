@@ -26,6 +26,7 @@ SAMPLE_RATE = speech.RATE
 WAKE_WINDOW = 10.0  # after a bare "Hey Jev", how long the request can take to start
 FOLLOW_UP = 8.0  # after she answers, how long the next thing you say doesn't need "Hey Jev"
 LAG = 2.0  # seconds behind the mic at which she skips to now: catching up would answer what you said back then
+CATCH_UP = 20.0  # what was said while she thought and acted is caught up on, but past this she skips to now as well
 
 
 def voice_id(voice=None):
@@ -149,10 +150,11 @@ MAYBE_FOR = 8.0  # seconds that listening lasts
 
 
 def wait_for_rest(words):
-    """For speech.Listener's hold_for, with Nemotron: wait the longest before ending a turn that's only "Hello" so
-    far, so "Hello [breath] Jev" doesn't end before her name. Only that: Nemotron writes each word about half a
-    second late, so most sentences look cut off ("open") at the pause, and waiting on those took the words from
-    0.28 to 0.61 s. A phrase that really stops on "open" or "and" waits for the rest in on_phrase (see DANGLING)."""
+    """For speech.Listener's hold_for: wait the longest before ending a turn that's only "Hello" so far, so "Hello
+    [breath] Jev" doesn't end before her name. words: Nemotron's as you talk, or for Parakeet and Whisper what they
+    wrote of a short turn at its pause. Only that: Nemotron writes each word about half a second late, so most
+    sentences look cut off ("open") at the pause, and waiting on those took the words from 0.28 to 0.61 s. A phrase
+    that really stops on "open" or "and" waits for the rest in on_phrase (see DANGLING)."""
     return bool(GREETING_ONLY.fullmatch(words))
 MISSED_KEEP = 10  # those greetings kept as clips in Logs\missed, to test fixes on Hari's real voice (he said yes)
 
@@ -3718,6 +3720,8 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         if plan and gate and any(s["do"] in ("youtube", "google") for s in plan["steps"]) and not \
                 (gate == "cold" and re.match(r"(?:play|search|google|look up|find)\b", plain(words))):
             plan = None  # an unnamed direct command counts; otherwise a video could be talking, so the model tells
+        if plan and gate == "cold" and any(s["do"] == "dictate" for s in plan["steps"]):
+            plan = None  # "Dictate." said in the room took it all down and pasted it: the model decides, see run_turn
         risky = needs_asking(plan["steps"], words) if plan and gate else None
         if risky:  # without her name, and the words didn't ask for it in so many words: ask first
             plan = {"steps": [], "say": confirm_question(risky), "confirm": plan}
@@ -3920,11 +3924,14 @@ class Recorder:
         return None
 
     def set_device(self, mic):
-        """Swap to another microphone, carrying on listening if it was."""
+        """Swap to another microphone, carrying on listening if it was. The new one opens first, so if no mic will
+        (one unplugged a moment before) the one there was carries on: closing it first left a closed stream that
+        nothing could start again until she was restarted."""
         with self.mic_lock:
+            stream = self._open(mic)
             was_active = self.stream.active
             self.stream.close()
-            self.stream = self._open(mic)
+            self.stream = stream
             if was_active:
                 self.gen += 1
                 self.stream.start()
@@ -4009,7 +4016,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             shown[0] = None  # the turn sets the window's text from here
             next_window[0] = FOLLOW_UP if rec.wake else 0.0  # for a reset after she's spoken, till it's decided below
             try:
-                result = "dictate" if DICTATE_START.match(words.strip()) else handle(text, words, stt_ms, notify, gate)
+                # straight to dictating only when called by name or with right Alt: "Can you transcribe this?" said in
+                # the room goes through is-it-for-her like any request, or it took down the room and pasted it
+                result = "dictate" if not gate and DICTATE_START.match(words.strip()) else \
+                    handle(text, words, stt_ms, notify, gate)
                 if result == "dictate":
                     start_dictation()
             except Exception as exc:
@@ -4079,15 +4089,23 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             listener.arm(WAKE_WINDOW)
             threading.Thread(target=win.chime, args=("wake",), daemon=True).start()
         else:
+            before = rec.blocks.qsize()
             run_turn(what[0], what[1], ms, gate=what[2])
+            # what was said while she thought and acted comes next, caught up on rather than skipped (see LAG). Only
+            # that: excusing the whole queue after any slow moment left her 771 s behind, answering 13 minute old talk
+            allow[0] += max(0, rec.blocks.qsize() - before)
+            answered[0] = rec.gen
 
-    def check_partial(audio):
+    def check_partial(audio, session):
         """For Parakeet and Whisper, which only write once you stop: her name at the start of speech that's still
-        going on, so the popup comes up before you've finished."""
+        going on, so the popup comes up before you've finished. session: the turn's, which is then let run past
+        MAX_TURN like Nemotron's with her name in the words: "Hey Jev, open Notepad and write..." was cut at 15 s."""
         try:
             text, _ = transcribe(audio)
         except Exception:
             return
+        if find_name(text):
+            hers[0] = session
         if find_name(text) and not busy.locked() and not rec.dictating and listener.state() is None and not held[0]:
             named[0] = True
             emit(notify, "Listening", "Go ahead\u2026")
@@ -4116,12 +4134,15 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     last_audio = [None]  # the latest turn's audio, kept if it was a bare greeting
     window_ask = [None]  # follow-up seconds a turn that just ended asks for, 0 to close it (listen_loop applies it)
     allow = [0]  # mic blocks that piled up while a turn ran, caught up on rather than skipped (see LAG)
+    answered = [None]  # the mic's gen once a turn is over, so the break her answer made is known (see listen_loop)
     calls = [()]  # apps on a call, logged when Windows' mic list changes
     checked = [None]  # where the speech last checked early for her name began
+    hers = [None]  # the turn whose first seconds had her name in, for Parakeet and Whisper, see check_partial
     partials = ThreadPoolExecutor(1)
     listener = speech.Listener(speech.end_of_speech(starting), ears, on_phrase, on_speech=warm, turn=turn,
-                               on_words=on_words, hold_for=wait_for_rest if ears.live else None,
-                               is_hers=lambda words: bool(words) and bool(find_name(words)))
+                               on_words=on_words, hold_for=wait_for_rest,
+                               is_hers=lambda words: bool(words) and bool(find_name(words))
+                               or (hers[0] is not None and hers[0] is listener.session))
 
     def show_listening():
         """Listening after a bare "Hey Jev" or "Hello", Still listening during a follow-up window, Ready after."""
@@ -4144,8 +4165,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         gen = None
         while True:
             g, block = rec.blocks.get()
-            if g != rec.gen or not (rec.wake or rec.dictating):
-                continue  # from before she talked, a key press, a mic change, or since switching to right Alt
+            # what was said before she talked is heard too: dropping it lost what you said while she thought, nearly
+            # every turn, as her reply paused the mic. The listener starts over at the break, see below
+            if not (rec.wake or rec.dictating):
+                continue  # since switching to right Alt
             try:  # one bad phrase must never stop her listening
                 now_calls = win.call_apps() if settings.get("call_aware") else ()
                 if now_calls != calls[0]:
@@ -4154,16 +4177,28 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                           f"{'say Jev or Jarvis' if now_calls else 'unnamed requests count again'}]")
                 if g != gen:
                     gen = g
-                    held[0] = None  # a break in the audio: what was waiting for the rest goes too
-                    listener.reset(next_window[0])
+                    # a break in the audio. Her answer: a turn in a pause counts as finished. Not right Alt or a mode
+                    # or mic change, as before, or switching back to Always listening acted on what was left hours ago
+                    last = answered[0]
+                    if g == answered[0]:
+                        listener.end()
+                    held[0] = None  # and what was waiting for the rest goes
+                    # a turn that ended just now and was answered has its window opened at that answer's break (see
+                    # window_ask): opened here, what the room said while she thought on it went to her as a follow-up
+                    listener.reset(next_window[0] if answered[0] == last else 0.0)
                     next_window[0] = 0.0
-                if window_ask[0] is not None:  # a turn ended without her talking, so no reset: open or close it here
+                # a turn ended without her talking, so no reset: open or close it here. If she talked, what's still
+                # waiting from before that was said before her answer, and with the window opened on it "pass the
+                # salt" went to her as a follow-up: the window opens at the break instead
+                if window_ask[0] is not None and g == rec.gen:
                     listener.open(window_ask[0])
                     window_ask[0] = None
                 allow[0] = max(0, allow[0] - 1)
-                # mic audio still waiting after this, apart from what came in while a turn ran
+                # mic audio still waiting after this: all of it, and apart from what came in while a turn ran
+                waiting = rec.blocks.qsize() * Recorder.BLOCK / SAMPLE_RATE
                 late = max(0, rec.blocks.qsize() - allow[0]) * Recorder.BLOCK / SAMPLE_RATE
-                if late > LAG and not rec.dictating:  # a dictation keeps every word, however late
+                # a dictation keeps every word, however late
+                if (late > LAG or waiting > CATCH_UP) and not rec.dictating:
                     skipped = 0
                     try:
                         while True:
@@ -4175,12 +4210,13 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                     allow[0] = 0
                     listener.reset(0.0)
                     gone = skipped * Recorder.BLOCK / SAMPLE_RATE
-                    print(f"\n  (listening was {late:.1f}s behind, skipped {gone:.1f}s to now, "
+                    print(f"\n  (listening was {waiting:.1f}s behind, skipped {gone:.1f}s to now, "
                           f"{time.strftime('%H:%M:%S')})")
                     continue
-                started = time.time()
                 listener.feed(block, dictating=rec.dictating)
-                if held[0] and time.time() > held[0][3] and not listener.talking:  # the rest never came
+                # the rest never came. Not while it's still coming: a pause in it let "Hey Jev, search" go alone, and
+                # her reply to that threw "for flights to Delhi next Friday" away
+                if held[0] and time.time() > held[0][3] and not listener.talking and listener.session is None:
                     text, kind, ms, _ = held[0]
                     held[0] = None
                     act_on(text, kind, ms)
@@ -4188,9 +4224,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                       and listener.speech_start != checked[0] and listener.state() is None and not busy.locked()
                       and not held[0]):
                     checked[0] = listener.speech_start  # once a phrase, on its first 2.5 seconds
-                    partials.submit(check_partial, listener.partial())
-                if time.time() - started > 0.5:  # a turn ran: what was said meanwhile comes next, catch up on it
-                    allow[0] = rec.blocks.qsize()
+                    partials.submit(check_partial, listener.partial(), listener.session)
                 if dictation.timed_out():
                     finish_dictation()
                 show_listening()
@@ -4229,8 +4263,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             emit(notify, "Something went wrong", str(exc))
         if late_timers:
             time.sleep(2)  # let the dictation result show before she talks over it
-        while late_timers:
-            timer_done(late_timers.pop(0))
+        while late_timers:  # on the listening thread, which wait_her_turn would hold up, and you've just stopped
+            timer_done(late_timers.pop(0), wait=False)
 
     def feed_ptt(press):
         """While right Alt is held, what the mic hears goes into speech-to-text as it comes, so the words are
@@ -4293,7 +4327,19 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             if len(audio) > SAMPLE_RATE * 0.3:
                 threading.Thread(target=ptt_turn, args=(audio, press), daemon=True).start()
 
-    def timer_done(t):
+    def wait_her_turn(most=10.0):
+        """Waits while a turn goes on or you're in the middle of saying something, up to most seconds, so a timer, a
+        heads-up or a welcome doesn't talk over you: pausing the mic for it threw away the command you were giving."""
+        until = time.time() + most
+        # the listener only while it's listening: in Hold right Alt mode it stopped where it was, mid-phrase as
+        # likely as not, and every timer waited the whole 10 s on that
+        while time.time() < until and (busy.locked() or rec.on or rec.wake and (
+                held[0] or listener.session is not None)):
+            time.sleep(0.1)
+
+    def timer_done(t, wait=True):
+        if wait and not rec.dictating:
+            wait_her_turn()  # first, as what you were saying may start a dictation: "Hey Jev, transcribe"
         if rec.dictating:  # don't pause the mic or talk over a dictation, just chime and tell her afterwards
             late_timers.append(t)
             emit(notify, "Dictating", f"\u23f0 {t['label'] or 'Timer finished'}, I'll tell you when you stop")
@@ -4314,8 +4360,12 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             emit(notify, "Ready", ready_text(rec.wake))
 
     def tell(line, said_for):
-        """Say something she started herself, a welcome or a heads-up, once she's not in the middle of a turn. You
-        can answer without "Hey Jev", the way you carry on after any reply: "read it", "thanks"."""
+        """Say something she started herself, a welcome or a heads-up, once she's not in the middle of a turn and
+        you're not mid-sentence. You can answer without "Hey Jev", the way you carry on after any reply: "read it",
+        "thanks". False if it wasn't said, as what you were saying started a dictation, which it never goes over."""
+        wait_her_turn()
+        if rec.dictating:
+            return False
         print(f"\n> {said_for}: {line}")
         with busy:
             rec.paused = True
@@ -4333,6 +4383,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 rec.paused = False
         if not rec.wake:
             emit(notify, "Ready", ready_text(rec.wake))
+        return True
 
     def welcome(back, since=None):
         """Hello when you sign in or come back to the laptop, the JARVIS way: see welcome_line."""
@@ -4370,6 +4421,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         """What she noticed (see watch.Watcher): messages every few seconds, since WhatsApp takes its notification
         away again within moments, the rest every 20 seconds, and finished background work straight away."""
         next_look, next_message = time.time() + 20, time.time() + watch.MESSAGE_LOOK
+        later = []  # what came up during a dictation, told once it stops
         while True:
             time.sleep(2)
             lines = []
@@ -4392,9 +4444,11 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                         lines += watcher.check(False, win.front_app_name())
                     except Exception as exc:
                         print(f"  heads-up check failed: {exc!r}")
-            for line in lines:
-                if line and not rec.dictating:  # never over a dictation
-                    tell(line, "heads-up")
+            later += [line for line in lines if line]
+            # never over a dictation, but once it stops: a reminder or a finished task that came up during one was
+            # taken off the queue and lost, the reminder already marked done
+            while later and not rec.dictating and tell(later[0], "heads-up"):
+                later.pop(0)
 
     start_timer_loop(timer_done)
     threading.Thread(target=task_worker, daemon=True).start()
@@ -4417,14 +4471,18 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             command = controls.get(timeout=0.5)  # with a timeout, or Ctrl+C never gets through on Windows
         except queue.Empty:
             continue
-        if isinstance(command, tuple) and command[0] == "mode":
-            set_mode(command[1])
-        elif isinstance(command, tuple) and command[0] == "mic":
-            rec.set_device(command[1])
-        elif command == "press":
-            start_recording()
-        elif command == "release":
-            stop_recording()
+        try:  # a mic that won't open or start is shown and she carries on: it ended this loop, and right Alt with it
+            if isinstance(command, tuple) and command[0] == "mode":
+                set_mode(command[1])
+            elif isinstance(command, tuple) and command[0] == "mic":
+                rec.set_device(command[1])
+            elif command == "press":
+                start_recording()
+            elif command == "release":
+                stop_recording()
+        except Exception as exc:
+            print(f"\n[mic failed: {exc!r}]")
+            emit(notify, "Something went wrong", f"The mic didn't start: {exc}")
 
 
 def main():

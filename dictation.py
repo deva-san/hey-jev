@@ -46,7 +46,10 @@ def fix_vocab(text):
 
 class Dictation:
     def __init__(self, names):
-        self.stop_rx = re.compile(rf"(?:\b(?:hey|hi|hay|okay|ok)\W+)?(?:\b(?:{names})\W+)?\b(?:stop|end|finish)\W+(?:the\W+)?"
+        # her name goes with the stop phrase however it was written: "Hey Jev" came out as "Hello" or "Heijev", and
+        # that was pasted at the end of the text
+        self.stop_rx = re.compile(rf"(?:\b(?:hey|hi|hay|hello|hallo|hullo|okay|ok)\W+)?"
+                                  rf"(?:\b(?:hey|hei|he|hi|ha|h|a)?(?:{names})\W+)?\b(?:stop|end|finish)\W+(?:the\W+)?"
                                   r"(?:transcri|dictat)\w*\W*$", re.I)
         self.active = False
 
