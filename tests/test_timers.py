@@ -158,6 +158,12 @@ class Repeating(unittest.TestCase):
         step = siri.quick("every day at 9 remind me to take my tablets")["steps"][0]  # as before
         self.assertEqual(step["repeat"], "every day at 9")
 
+    def test_repeat_said_first_with_a_comma(self):
+        """Nemotron puts the comma in: "Every hour, remind me to drink water." went to the model."""
+        for said in ("Every hour, remind me to drink water.", "Every day at 9, remind me to take my tablets."):
+            step = siri.quick(said)["steps"][0]
+            self.assertEqual((step["do"], step["task"]["kind"]), ("schedule", "reminder"), said)
+            self.assertIsNotNone(tasks.normalize_schedule(step["when"], step["repeat"], WED_7PM)[1], said)
 
 
 class WithStore(unittest.TestCase):
