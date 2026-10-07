@@ -197,13 +197,19 @@ class AskedContact(unittest.TestCase):
             self.assertTrue(siri.ASKED["alias"])  # still waiting for it
 
     def test_a_number_with_its_country_code_is_saved(self):
-        for said in ("+91 98765 43210", "Plus 91 98765 43210", "91 98765 43210", "It's +91 98765 43210"):
+        for said in ("+91 98765 43210", "Plus 91 98765 43210", "91 98765 43210", "It's +91 98765 43210",
+                     "+91, 98765, 43210."):
             self.assertEqual(self.reply("whatsapp", said)["say"], "staged", said)
             self.assertEqual(messaging.read_contacts()["bittu"]["whatsapp"], "919876543210", said)
 
     def test_a_sentence_with_numbers_in_it_isnt_a_number(self):
         self.assertIsNone(self.reply("whatsapp", "remind me at 10 30 on 7 10 2026"))
         self.assertEqual(messaging.read_contacts(), {})
+
+    def test_a_short_reply_isnt_asked_for_its_country_code(self):
+        for said in ("Two.", "One", "10 30", "5"):  # said in the room, it isn't a phone number at all
+            self.assertIsNone(self.reply("whatsapp", said), said)
+            self.assertEqual(messaging.read_contacts(), {}, said)
 
 
 class Contacts(unittest.TestCase):

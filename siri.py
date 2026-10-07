@@ -844,11 +844,12 @@ def finish_asked(words):
     said = re.sub(r"^(?:(?:it'?s|it is)\s+(?=[@+\d]|plus\b)|(?:(?:their|his|her|the) )?(?:phone |whatsapp |telegram )?"
                   r"(?:number|username) is\s+)", "", " ".join(str(words).split()).strip(" .!?"), flags=re.I)
     if messaging.needs_of(app) == "number":
-        handle = said if re.fullmatch(r"\+?[\d\s().-]+", said) else _digits_said(said)
+        handle = said if re.fullmatch(r"\+?[\d\s(),.-]+", said) else _digits_said(said)
         digits = re.sub(r"\D", "", handle)
         if re.match(r"(?:\+|plus\b|00)", said, re.I):
             handle = digits[2:] if said.startswith("00") else digits
-        elif digits and (len(digits) <= 10 or digits[0] == "0"):  # "98765 43210": WhatsApp would read it as +98
+        # "98765 43210": WhatsApp would read it as +98. Under 7 digits isn't a number at all: "Two." or "10 30"
+        elif len(digits) >= 7 and (len(digits) <= 10 or digits[0] == "0"):
             return make_plan(say="I need the country code too. Say the number again, starting with plus.")
     else:
         handle = said.lstrip("@") if re.fullmatch(r"@?\w+", said) and not side_talk(said) \
