@@ -1182,9 +1182,10 @@ def local_compound(t):
 
 MESSAGE_PATTERNS = [(re.compile(p, re.I), make) for p, make in (
     # who she is messaging, on which app, and the words: all three said out loud, none of them guessed. "saying" or
-    # "that" before the words isn't part of them: "message Mum on WhatsApp saying I'm running late" typed "saying"
-    (rf"(?:message|text|send a message to)\s+(?P<who>{WHO})\s+on\s+(?P<app>{APP_WORDS})(?:\s*[:,]\s*|\s+(?:saying|that|"
-     rf"to say|and say|telling (?:him|her|them))(?:\s+that)?\s+|\s+)(?P<text>.+)", _message),
+    # "that" before the words isn't part of them: "message Mum on WhatsApp saying I'm running late" typed "saying".
+    # Nor are the commas speech-to-text puts around "saying", and in "that that was fun" the second "that" is
+    (rf"(?:message|text|send a message to)\s+(?P<who>{WHO})\s+on\s+(?P<app>{APP_WORDS})(?:,?\s+(?:saying|to say|"
+     rf"and say|telling (?:him|her|them))(?:\s+that)?[:,]?\s+|\s*[:,]\s*|\s+that\s+|\s+)(?P<text>.+)", _message),
     (rf"(?:send|say)\s+(?P<text>.+?)\s+to\s+(?P<who>{WHO})\s+on\s+(?P<app>{APP_WORDS})", _message),
     (rf"on\s+(?P<app>{APP_WORDS})\s*,?\s+to\s+(?P<who>{WHO})\s+send\s+(?P<text>.+)", _message),
     (rf"(?P<app>{APP_WORDS})\s+(?P<who>{WHO})\s*[:,]\s*(?P<text>.+)", _message),

@@ -158,6 +158,14 @@ class Messages(Routing):
         self.assertEqual(self.messages, [("WhatsApp", "Mum", "I'm running late"), ("Telegram", "Dad", "I'll call later"),
                                          ("WhatsApp", "Mum", "that was fun")])
 
+    def test_a_comma_after_saying_and_that_twice(self):
+        self.quick("Message Mum on WhatsApp saying, I'm running late.")  # how speech-to-text writes it
+        self.quick("Message Mum on WhatsApp, saying I'm running late.")
+        self.quick("text Dad on Telegram that that was fun")
+        self.quick("text Dad on Telegram, that was fun")
+        self.assertEqual(self.messages, [("WhatsApp", "Mum", "I'm running late"), ("WhatsApp", "Mum", "I'm running late"),
+                                         ("Telegram", "Dad", "that was fun"), ("Telegram", "Dad", "that was fun")])
+
 
 class UnnamedMessages(Routing):
     """R6: without her name no chat opens before the model decides it was for her, and there are no messages later."""
