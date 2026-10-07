@@ -288,10 +288,13 @@ class FastIntentMatcher:
         if re.fullmatch(r"(?:put (?:(?:the|my) )?(?:pc|laptop|computer) to )?sleep(?: mode)?", t):
             return self.siri.make_plan([{"do": "sleep"}], self.siri.say_line("system_sleep"))
 
-        if re.fullmatch(r"(?:shut ?down|turn off|power off)(?: (?:the|my))?(?: computer| pc| laptop| it)?", t):
+        # handle asks before either. "Shut the laptop down" and "switch off the computer" too, but not a bare "turn
+        # off" or "restart it", which could be anything
+        if re.fullmatch(r"(?:shut ?down|turn off|switch off|power (?:off|down))(?: (?:the|my|this))? (?:computer|pc|laptop|"
+                        r"system)|shut ?down|power off|shut (?:the |my |this )?(?:computer|pc|laptop|system) down", t):
             return self.siri.make_plan([{"do": "shutdown"}], self.siri.say_line("system_shutdown"))
 
-        if re.fullmatch(r"(?:reboot|restart)(?: (?:the|my))?(?: computer| pc| laptop| it)?", t):
+        if re.fullmatch(r"reboot|(?:reboot|restart)(?: (?:the|my|this))? (?:computer|pc|laptop|system)", t):
             return self.siri.make_plan([{"do": "restart"}], self.siri.say_line("system_restart"))
 
         if re.fullmatch(r"(?:cancel|abort|stop|don'?t)(?: (?:the|my))? (?:shut ?down|restart)(?: (?:the|my))?(?: computer| pc| laptop)?", t):

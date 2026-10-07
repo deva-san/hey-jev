@@ -221,5 +221,23 @@ class Asking(Routing):
                 self.assertFalse(siri.could_be_request(words))
 
 
+class Power(Routing):
+    """R2: shutting down and restarting the PC are planned on the PC, and always asked about first."""
+
+    def test_planned_locally(self):
+        for words, do in (("shut down the computer", "shutdown"), ("Shut down the PC.", "shutdown"),
+                          ("shut the laptop down", "shutdown"), ("switch off the computer", "shutdown"),
+                          ("shut down the system", "shutdown"), ("restart the computer", "restart"),
+                          ("restart my laptop", "restart"), ("reboot the system", "restart")):
+            with self.subTest(words=words):
+                self.assertEqual(self.steps(words), [{"do": do}])
+
+    def test_without_her_name_she_asks(self):
+        asked, ran, pending = self.handle("Shut down the computer", "cold")
+        self.assertFalse(asked)
+        self.assertEqual(ran["say"], "Should I shut down the computer?")
+        self.assertEqual(pending["steps"], [{"do": "shutdown"}])
+
+
 if __name__ == "__main__":
     unittest.main()

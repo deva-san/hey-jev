@@ -3285,8 +3285,10 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     else:
         plan = quick(words, gate)
         # Always-on mic: typing, Enter, closing apps and other consequential changes need the model to decide the
-        # words were for her first. Safe opens, sites, volume, media, scrolling and tab navigation stay instant.
-        if plan and gate == "cold" and any(s.get("do") in {"type", "close", "minimise", "lock", "sleep", "dark_mode", "screen"} | POWER_STEPS
+        # words were for her first. Safe opens, sites, volume, media, scrolling and tab navigation stay instant, and
+        # so do shutdown and restart, which always get a yes or no first (below): asked instead, the model said it
+        # couldn't shut the PC down
+        if plan and gate == "cold" and any(s.get("do") in {"type", "close", "minimise", "lock", "sleep", "dark_mode", "screen"}
                 or (s.get("do") == "keys" and combo(s.get("keys")) not in SAFE_KEYS) for s in plan["steps"]):
             plan = None
         if plan and gate and any(s["do"] in ("youtube", "google") for s in plan["steps"]) and not \
