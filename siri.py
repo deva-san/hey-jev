@@ -2512,9 +2512,12 @@ VLC_KEYS = {"play": ("space",), "pause": ("space",), "next": ("n",), "previous":
 def media(action):
     """Play, pause, next or previous on what Windows shows in its media controls: YouTube in a browser, Spotify. VLC 3
     (3.0.16 here) isn't in them, so pause acted on some other app or said nothing was playing: when nothing there is
-    playing and VLC is open, it's brought to the front and gets its own keys, the way YouTube does below."""
+    playing and VLC is open, it's brought to the front and gets its own keys, the way YouTube does below. Play only
+    with nothing there at all, the rest only while VLC makes sound: with Spotify paused, "previous" went to an idle
+    VLC, and "pause" started it playing."""
     session = win.media_session()
-    vlc = win.app_windows(VLC) if not session or (action != "play" and not win.media_playing(session)) else []
+    quiet = not (session and win.media_playing(session))  # nothing in the media controls is playing
+    vlc = win.app_windows(VLC) if (not session if action == "play" else quiet and win.app_sounding(VLC)) else []
     if vlc:
         win.bring_to_front(vlc[0])
         time.sleep(0.3)

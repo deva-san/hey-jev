@@ -223,6 +223,15 @@ def set_app_volume(app, level):
         session.SimpleAudioVolume.SetMasterVolume(max(0, min(100, level)) / 100, None)
 
 
+def app_sounding(app):
+    """True if the app is playing sound now: its session in the volume mixer runs while it plays and stops when it's
+    paused. VLC 3 isn't in Windows' media controls, so this is how to tell it's the one playing."""
+    try:
+        return any(s.State == 1 for s in _app_audio(app))  # AudioSessionStateActive
+    except Exception:
+        return False
+
+
 # --------------------------------------------------------------------------- media (Spotify), via Windows media controls
 def media_session(app_hint=None):
     """The media session of the app whose id contains app_hint ("spotify"). With no hint, the one Windows shows in

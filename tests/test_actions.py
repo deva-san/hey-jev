@@ -42,10 +42,12 @@ VLC_EXE = r"C:\Program Files\VideoLAN\VLC\vlc.exe"
 
 
 class Media(unittest.TestCase):
-    def media(self, action, now=None, vlc=(), front=VLC_EXE):
-        """What media(action) did, with now as Windows' media controls' session and vlc as VLC's windows."""
+    def media(self, action, now=None, vlc=(), front=VLC_EXE, sounding=True):
+        """What media(action) did, with now as Windows' media controls' session, vlc as VLC's windows and sounding
+        whether VLC is making sound."""
         done = []
         with mock.patch.object(siri.win, "media_session", lambda hint=None: now), \
+                mock.patch.object(siri.win, "app_sounding", lambda app: sounding and app is siri.VLC), \
                 mock.patch.object(siri.win, "media_playing", lambda s: s.playing), \
                 mock.patch.object(siri.win, "media_position", lambda s: s.position), \
                 mock.patch.object(siri.win, "media_command", lambda s, action: done.append(action) or True), \
@@ -77,6 +79,16 @@ class Media(unittest.TestCase):
     def test_what_is_playing_in_the_media_controls_comes_first(self):
         self.assertEqual(self.media("pause", session("Spotify.exe"), vlc=[42]), ["pause"])
         self.assertEqual(self.media("play", session("Spotify.exe", playing=False), vlc=[42]), ["play"])
+
+    def test_an_idle_vlc_leaves_a_paused_spotify_alone(self):
+        """With Spotify paused and VLC open but not playing, "previous" went to VLC and "pause" started it playing."""
+        paused = session("Spotify.exe", 40.0, playing=False)
+        self.assertEqual(self.media("previous", paused, vlc=[42], sounding=False), ["previous", "previous"])
+        self.assertEqual(self.media("next", paused, vlc=[42], sounding=False), ["next"])
+        self.assertEqual(self.media("pause", paused, vlc=[42], sounding=False), ["pause"])
+        with self.assertRaisesRegex(RuntimeError, "Nothing's playing"):
+            self.media("pause", None, vlc=[42], sounding=False)
+        self.assertEqual(self.media("play", None, vlc=[42], sounding=False), ["front 42", ("space",)])
 
     def test_vlc_that_wont_come_to_the_front_gets_no_keys(self):
         with self.assertRaisesRegex(RuntimeError, "Nothing's playing"):
