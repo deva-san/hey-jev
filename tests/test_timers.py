@@ -221,6 +221,18 @@ class CancelTimer(WithStore):
             self.assertIsNone(siri.quick(said), said)
         self.assertEqual(siri.quick("cancel the one and a half hour timer")["steps"][0]["seconds"], 5400)
 
+    def test_stop_reminding_me(self):
+        """The model's cancel_timers doesn't touch reminders now, so this one has to be local."""
+        water = self.reminder("drink water", time.time() + 1800, {"kind": "interval", "seconds": 3600})
+        mum = self.reminder("call mum", time.time() + 600)
+        for said in ("stop reminding me to drink water", "Stop reminding me to drink water anymore."):
+            plan = siri.quick(said)
+            self.assertIn("drink water", plan["say"], said)
+            self.assertNotIn("mum", plan["say"], said)
+        self.run_plan(plan["confirm"])
+        self.assertEqual(self.store.get(water)["status"], "cancelled")
+        self.assertEqual(self.store.get(mum)["status"], "queued")
+
     def test_plain_cancel_still_cancels_every_timer(self):
         siri.add_timer(300)
         siri.add_timer(600)
