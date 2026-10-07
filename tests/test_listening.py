@@ -493,5 +493,51 @@ class HeldPhrase(Case):
         self.assertEqual(acted, ["Hey Jev, search. for flights to Delhi next Friday."])
 
 
+# --------------------------------------------------------------------------- A5: she doesn't talk over you
+class NotOverYou(Case):
+    def wait_then_talk(self, start):
+        """start() in a thread while a turn is open: nothing said until it's over."""
+        a = self.assistant()
+        said = []
+        a.listener.session = object()  # you're half way through a sentence
+        with mock.patch.object(siri, "say", lambda line, notify: said.append(line)), \
+                mock.patch.object(siri.history, "add", lambda *args: None), \
+                mock.patch.object(siri.win, "chime", lambda name: None):
+            import threading
+            t = threading.Thread(target=start, args=(a,), daemon=True)
+            t.start()
+            time.sleep(0.4)
+            self.assertEqual(said, [])
+            self.assertFalse(a.rec.paused)
+            a.listener.session = None  # you've finished
+            t.join(5)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(len(said), 1)
+
+    def test_a_heads_up_waits_till_you_finish(self):
+        self.wait_then_talk(lambda a: a.var("tell")("New message from Mum on WhatsApp.", "heads-up"))
+
+    def test_a_timer_waits_till_you_finish(self):
+        self.wait_then_talk(lambda a: a.timer_done({"label": "", "line": "Your pasta is ready.", "secs": 60}))
+
+    def test_a_timer_kept_till_a_dictation_stops_doesnt_hold_up_listening(self):
+        """finish_dictation runs on the listening thread, where a turn can't move on while it waits."""
+        a = self.assistant()
+        said = []
+        a.var("late_timers").append({"label": "", "line": "Your pasta is ready.", "secs": 60})
+        a.listener.session = object()
+        a.rec.dictating = True
+        no_sleep = types.SimpleNamespace(time=time.time, sleep=lambda secs: None, strftime=time.strftime)
+        with mock.patch.object(siri, "say", lambda line, notify: said.append(line)), \
+                mock.patch.object(siri.win, "chime", lambda name: None), \
+                mock.patch.object(siri.win, "paste", lambda text: None), \
+                mock.patch.object(a.var("dictation"), "finish", lambda: "Hello there."), \
+                mock.patch.object(siri, "time", no_sleep), contextlib.redirect_stdout(a.out):
+            start = time.time()
+            a.var("finish_dictation")()
+        self.assertLess(time.time() - start, 1.0)
+        self.assertEqual(said, ["Your pasta is ready."])
+
+
 if __name__ == "__main__":
     unittest.main()

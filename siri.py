@@ -3763,8 +3763,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             emit(notify, "Something went wrong", str(exc))
         if late_timers:
             time.sleep(2)  # let the dictation result show before she talks over it
-        while late_timers:
-            timer_done(late_timers.pop(0))
+        while late_timers:  # on the listening thread, which wait_her_turn would hold up, and you've just stopped
+            timer_done(late_timers.pop(0), wait=False)
 
     def feed_ptt(press):
         """While right Alt is held, what the mic hears goes into speech-to-text as it comes, so the words are
@@ -3827,12 +3827,21 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             if len(audio) > SAMPLE_RATE * 0.3:
                 threading.Thread(target=ptt_turn, args=(audio, press), daemon=True).start()
 
-    def timer_done(t):
+    def wait_her_turn(most=10.0):
+        """Waits while a turn goes on or you're in the middle of saying something, up to most seconds, so a timer, a
+        heads-up or a welcome doesn't talk over you: pausing the mic for it threw away the command you were giving."""
+        until = time.time() + most
+        while time.time() < until and (busy.locked() or rec.on or held[0] or listener.session is not None):
+            time.sleep(0.1)
+
+    def timer_done(t, wait=True):
         if rec.dictating:  # don't pause the mic or talk over a dictation, just chime and tell her afterwards
             late_timers.append(t)
             emit(notify, "Dictating", f"\u23f0 {t['label'] or 'Timer finished'}, I'll tell you when you stop")
             win.chime("timer")
             return
+        if wait:
+            wait_her_turn()
         with busy:
             rec.paused = True
             try:
@@ -3848,8 +3857,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             emit(notify, "Ready", ready_text(rec.wake))
 
     def tell(line, said_for):
-        """Say something she started herself, a welcome or a heads-up, once she's not in the middle of a turn. You
-        can answer without "Hey Jev", the way you carry on after any reply: "read it", "thanks"."""
+        """Say something she started herself, a welcome or a heads-up, once she's not in the middle of a turn and
+        you're not mid-sentence. You can answer without "Hey Jev", the way you carry on after any reply: "read it",
+        "thanks"."""
+        wait_her_turn()
         print(f"\n> {said_for}: {line}")
         with busy:
             rec.paused = True
