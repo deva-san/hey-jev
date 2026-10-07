@@ -129,6 +129,16 @@ class Installs(Routing):
             self.assertEqual(self.quick("Get me the weather in Delhi")["say"], "Sunny.")
         weather.assert_called_once_with("delhi")
 
+    def test_for_tomorrow_is_a_day_not_a_place(self):
+        got = []
+        with mock.patch.object(siri.web, "weather", lambda where=None: {"where": where}), \
+                mock.patch.object(siri, "weather_line", lambda w, day=None: got.append((w["where"], day)) or "Sunny."):
+            for words in ("get me the weather for tomorrow", "what's the weather for the day after tomorrow",
+                          "weather in Delhi for tomorrow", "weather for tomorrow in Mumbai", "weather in Tomorrowland"):
+                self.quick(words)
+        self.assertEqual(got, [(None, "tomorrow"), (None, "the day after tomorrow"), ("delhi", "tomorrow"),
+                               ("mumbai", "tomorrow"), ("tomorrowland", None)])
+
     def test_install_words_still_install(self):
         for words in ("download and install VLC", "install Zoom on this PC", "update Git"):
             self.quick(words)

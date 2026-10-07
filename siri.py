@@ -984,10 +984,12 @@ QUICK = [(re.compile(p), make) for p, make in (
      lambda m: make_plan(say=task_summary(True))),
     (r"(?:cancel|stop) task (?P<id>\d+)", _task_control("cancel")),
     (r"approve task (?P<id>\d+)", _task_control("approve")),
-    # the weather, straight from Open-Meteo
+    # the weather, straight from Open-Meteo. "for tomorrow" is a day, not a place: "get me the weather for tomorrow"
+    # looked up a town called tomorrow, and "for the day after tomorrow" one called "the"
     (r"(?:(?:what(?:'s| is)|how(?:'s| is)|tell me|check|give me|get me)(?: the)? )?(?:weather|temperature|forecast)"
-     r"(?: like| forecast| going to be like| gonna be like)?(?: (?:in|at|for) (?P<place>[a-z][a-z .'-]*?))?"
-     r"(?: (?P<day>today|tomorrow|tonight|now|right now|outside|(?:the )?day after tomorrow))?"
+     r"(?: like| forecast| going to be like| gonna be like)?(?: (?:in|at|for) "
+     r"(?!(?:the )?(?:today|tomorrow|tonight|day after)\b)(?P<place>[a-z][a-z .'-]*?))?"
+     r"(?: (?:for )?(?P<day>today|tomorrow|tonight|now|right now|outside|(?:the )?day after tomorrow))?"
      r"(?: (?:in|at|for) (?P<place2>[a-z][a-z .'-]*?))?(?: like)?", _weather),
     (r"(?:is it|will it|is it going to|is it gonna)(?: be)? (?:rain|raining|hot|cold|sunny)(?: (?P<day>today|tomorrow|"
      r"tonight|now|outside))?(?: (?:in|at) (?P<place>[a-z][a-z .'-]*?))?", _weather),
