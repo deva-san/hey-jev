@@ -713,9 +713,12 @@ def _timer(m):
     said = m[0]
     if re.match(r"(?:cancel|stop|delete|clear|remove|how)\b", said):
         return None  # "cancel the 5 minute timer" or "how long is left on the 10 minute timer" set a second timer
-    if said.startswith("remind") and re.search(r"\b(?:every|hourly|daily)\b", said):
-        return None  # it repeats, see direct_background: "remind me every one hour to ..." was a one-off in an hour
     when = said.startswith("remind") and IN_DURATION.search(_digits(said))
+    # it repeats, see direct_background: "remind me every one hour to ..." was a one-off in an hour. With an "in 10
+    # minutes" only a real repeat counts, "remind me in 10 minutes to water every plant" is once
+    if said.startswith("remind") and re.search(r"\bevery (?:[\w.]+ ){0,2}(?:seconds?|minutes?|mins?|hours?|hrs?|days?|"
+                                                r"half)\b" if when else r"\b(?:every|hourly|daily)\b", said):
+        return None
     secs = parse_duration(when[0] if when else said)  # "remind me to stretch for 10 minutes in 1 hour": in an hour
     if not secs:
         return None
@@ -728,9 +731,11 @@ def _timer(m):
 
 
 def _time_left(m):
-    secs = parse_duration(m["what"] or "")  # "on the 10 minute timer": that one, else the soonest
+    what = m["what"] or ""
+    secs = parse_duration(what)  # "on the 10 minute timer" or the model's "on the tea timer": that one, else the soonest
     with TIMERS_LOCK:
-        left = [t["end"] - time.time() for t in TIMERS if secs and t["secs"] == secs]
+        left = [t["end"] - time.time() for t in TIMERS
+                if t["secs"] == secs or what and re.search(rf"\b{re.escape(what)}\b", (t["label"] or "").lower())]
     left = left or [s for _, s in timer_snapshot()]
     return make_plan(say=say_line("timer_check", left=say_duration(left[0])) if left else say_line("timer_none"))
 

@@ -45,6 +45,17 @@ class Durations(unittest.TestCase):
             step = siri.quick(said)["steps"][0]
             self.assertEqual((step["when"], step["task"]["text"]), ("in 300 seconds", "call mum"), said)
 
+    def test_every_or_daily_in_what_to_do_is_still_once(self):
+        for said, secs, text in (("remind me in 10 minutes to water every plant", 600, "water every plant"),
+                                 ("remind me in 5 minutes to join the daily standup", 300, "join the daily standup")):
+            step = siri.quick(said)["steps"][0]
+            self.assertEqual((step["when"], step["repeat"], step["task"]["text"]), (f"in {secs} seconds", "", text), said)
+        for said in ("remind me every twenty minutes to look away", "remind me in 10 minutes and every hour after to "
+                     "drink water"):  # these repeat: never a one-off
+            plan = siri.quick(said)
+            self.assertFalse(plan and any(s.get("do") == "schedule" and not s.get("repeat") for s in plan["steps"]),
+                             said)
+
     def test_one_and_half_without_a(self):
         """Said in India without the "a": "one and half hour" was refused."""
         for said, secs in (("set a timer for one and half hour", 5400), ("set a timer for one hour and half", 5400),
