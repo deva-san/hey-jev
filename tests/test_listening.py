@@ -565,5 +565,47 @@ class DuringDictation(Case):
         self.assertEqual(told, ["Reminder: call Mum."])
 
 
+# --------------------------------------------------------------------------- A3: dictation without her name
+class DictationStart(Case):
+    def run_turn(self, text, words, gate, handled_as=False):
+        a = self.assistant()
+        started, handled = [], []
+        a.put("start_dictation", lambda: started.append(True))
+
+        def handle(text, words, stt_ms=None, notify=None, gate=False):
+            handled.append(gate)
+            return handled_as
+        with mock.patch.object(siri, "handle", handle):
+            with contextlib.redirect_stdout(a.out):
+                a.var("run_turn")(text, words, 100, gate=gate)
+        return started, handled
+
+    def test_unnamed_transcribe_this_goes_through_is_it_for_her(self):
+        """'Can you transcribe this?' in the room, with Answer without her name on: the model decides."""
+        for gate in ("cold", True):
+            with self.subTest(gate=gate):
+                started, handled = self.run_turn("Can you transcribe this?", "Can you transcribe this?", gate)
+                self.assertEqual(started, [])
+                self.assertEqual(handled, [gate])
+
+    def test_and_starts_dictating_if_the_model_says_so(self):
+        started, handled = self.run_turn("Start dictating.", "Start dictating.", "cold", handled_as="dictate")
+        self.assertEqual((started, handled), ([True], ["cold"]))
+
+    def test_with_her_name_it_starts_straight_away(self):
+        started, handled = self.run_turn("Hey Jev, transcribe.", "transcribe", False)
+        self.assertEqual((started, handled), ([True], []))
+
+    def test_the_stop_phrase_goes_whatever_her_name_came_out_as(self):
+        """Nemotron writes 'Hey Jev' as 'Hello' and Parakeet runs it together as 'Heijev': neither is pasted."""
+        for stop in ("Hello, stop transcribing.", "Heijev, stop transcribing.", "Hey Jev, stop transcribing."):
+            with self.subTest(stop=stop):
+                d = siri.Dictation(siri.NAMES)
+                d.start()
+                d.add("So the plan for Monday is simple.")
+                self.assertTrue(d.add(stop))
+                self.assertEqual(d.finish(), "So the plan for Monday is simple.")
+
+
 if __name__ == "__main__":
     unittest.main()

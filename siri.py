@@ -3530,7 +3530,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             shown[0] = None  # the turn sets the window's text from here
             next_window[0] = FOLLOW_UP if rec.wake else 0.0  # for a reset after she's spoken, till it's decided below
             try:
-                result = "dictate" if DICTATE_START.match(words.strip()) else handle(text, words, stt_ms, notify, gate)
+                # straight to dictating only when called by name or with right Alt: "Can you transcribe this?" said in
+                # the room goes through is-it-for-her like any request, or it took down the room and pasted it
+                result = "dictate" if not gate and DICTATE_START.match(words.strip()) else \
+                    handle(text, words, stt_ms, notify, gate)
                 if result == "dictate":
                     start_dictation()
             except Exception as exc:
