@@ -242,6 +242,101 @@ class Readback(Turn):
         self.assertEqual(self.said, [LONG[:LONG.index(" Tell Appa")]])
 
 
+SEND = {"steps": [{"do": "message_send"}], "say": ""}
+SCREEN = {"steps": [{"do": "screen", "task": "open the Recycle Bin on the desktop"}], "say": ""}
+SHUTDOWN = {"steps": [{"do": "shutdown"}], "say": ""}
+CLOSE = {"steps": [{"do": "close", "app": "Google Chrome"}], "say": ""}
+
+
+class YesOrNo(Turn):
+    """The yes or no to her question, said the way people say it."""
+    def setUp(self):
+        super().setUp()
+        self.sent, self.cleared = [], []
+        for name, value in (("send", lambda ready: self.sent.append(ready["contact"]) or (True, "Sent to Mum.")),
+                            ("discard", lambda ready: self.cleared.append(ready["contact"]) or True)):
+            patcher = mock.patch.object(siri.messaging, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def ask(self, plan=SEND):
+        """She's just asked about plan, "'hi' to Mum on WhatsApp. Send it?" by default."""
+        siri.STAGED.update(ready={"app": "whatsapp", "contact": "Mum", "text": "hi"}, until=time.time() + 90)
+        siri.PENDING.update(plan=plan, until=time.time() + 16)
+
+    def test_natural_yeses(self):
+        for words, plan in (("Yes, send it.", SEND), ("Okay, send it.", SEND), ("Sure, send it", SEND),
+                            ("Yes please.", SEND), ("Yes, do it.", SEND), ("Go for it.", SEND), ("Send.", SEND),
+                            ("Yes, install it.", {"steps": [{"do": "install_run"}]}),
+                            ("Yes, shut it down.", SHUTDOWN), ("Yes, restart.", {"steps": [{"do": "restart"}]}),
+                            ("Yes, close it.", CLOSE), ("Okay, close Chrome.", CLOSE),
+                            ("Sure sure you can", SCREEN), ("Yeah, sure, sure. Yeah, you can", SCREEN),
+                            ("Sure you want", SCREEN), ("Ha.", CLOSE), ("Right.", SCREEN), ("Okay.", SEND)):
+            self.assertTrue(siri.said_yes(words, plan), words)
+
+    def test_not_a_yes(self):
+        for words, plan in (("Ha.", SEND), ("Right.", SEND), ("Ya", SEND), ("Please", SEND), ("Ha ha", SHUTDOWN),
+                            ("Yes, close it.", SEND), ("Don't send it.", SEND), ("No, send it to Ravi", SEND),
+                            ("Yes, send it to Ravi instead", SEND), ("Okay, open Notepad", SCREEN), ("", SEND)):
+            self.assertFalse(siri.said_yes(words, plan), words)
+
+    def test_yes_send_it_sends(self):
+        """"Yes, send it." became "send it" after plain(), was no yes, and the message was never sent."""
+        self.ask()
+        siri.handle("Yes, send it.", gate=True)
+        self.assertEqual(self.sent, ["Mum"])
+        self.assertEqual(self.said, ["Sent to Mum."])
+
+    def test_a_laugh_doesnt_send_and_the_yes_can_still_follow(self):
+        self.ask()
+        siri.handle("Ha.", gate=True)
+        siri.handle("Hmm.", gate=True)
+        self.assertEqual((self.sent, self.said), ([], []))
+        siri.handle("Yes.", gate=True)
+        self.assertEqual(self.sent, ["Mum"])
+
+    def test_not_now_and_forget_it_clear_the_typed_message(self):
+        """"Forget it" got "Sure." and "not now" went to the model: the text stayed typed in the chat."""
+        for words in ("Not now.", "Forget it.", "Never mind."):
+            self.cleared.clear()
+            self.ask()
+            siri.handle(words, gate=True)
+            self.assertEqual(self.cleared, ["Mum"], words)
+            self.assertIsNone(siri.PENDING["plan"])
+        self.assertEqual(self.sent, [])
+
+    def test_a_laugh_never_shuts_down(self):
+        shut = []
+        self.ask(SHUTDOWN)
+        with mock.patch.object(siri.win, "shutdown", lambda: shut.append("down")):
+            siri.handle("Ha.", gate=True)
+            siri.handle("Right.", gate=True)
+        self.assertEqual(shut, [])
+
+    def test_sure_you_can_lets_her_look(self):
+        """Real log: "Sure sure you can" to "Should I look at your screen for that?" wasn't a yes, she asked again."""
+        looked = []
+        self.ask(SCREEN)
+        with mock.patch.object(siri, "see", lambda task, notify=None: looked.append(task) or ("It's open.", [])):
+            siri.handle("Sure sure you can", gate=True)
+        self.assertEqual(looked, ["open the Recycle Bin on the desktop"])
+
+    def test_the_window_for_a_yes_opens_once_she_has_asked(self):
+        """It was 16 s from before the readback: a long one used it up, and the yes came too late."""
+        with mock.patch.object(siri, "say", lambda line, notify: time.sleep(0.5)), self.model(
+                {"steps": [], "say": "Should I close Google Chrome?", "confirm": CLOSE}):
+            siri.handle("close it")
+        self.assertGreater(siri.PENDING["until"] - time.time(), siri.FOLLOW_UP + 8 - 0.2)
+
+    def test_a_message_waits_for_its_yes_as_long_as_it_is_typed_in(self):
+        """README: saying nothing for 90 seconds leaves the message unsent, so a yes inside 90 s sends it."""
+        with mock.patch.object(siri.messaging, "prepare", staged):
+            siri.handle("Message Mum on WhatsApp: hi")
+        self.assertEqual(siri.PENDING["plan"], SEND)
+        self.assertAlmostEqual(siri.PENDING["until"], siri.STAGED["until"], delta=1)
+        self.assertGreater(siri.PENDING["until"] - time.time(), 80)
+
+
 def tripwire_quit(app):
     raise AssertionError(f"quit {app.name}")
 

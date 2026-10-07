@@ -3261,7 +3261,35 @@ def tab_not_browser(plan, words):
 PENDING = {"plan": None, "until": 0.0}  # a plan waiting on a yes or no, see think
 YES = re.compile(r"(?:yes|yeah|yep|yup|ya|sure|ok|okay|do it|go ahead|go on|please|please do|correct|right|haan|ha|"
                  r"avunu|of course)(?: (?:yes|please|do it|go ahead|sure|thanks|thank you))*")  # after plain()
-NO = re.compile(r"(?:no|nope|nah|don't|dont|do not|cancel|stop|never ?mind|leave it|wait)\b.*")
+NO = re.compile(r"(?:no|nope|nah|not|don't|dont|do not|cancel|stop|never ?mind|forget (?:it|about it|that)|leave it|"
+                r"wait|hold on)\b.*")  # after plain(), which makes "not now" "not"
+# A yes to her question, said the way people say one: "Yes, send it", "Sure, sure, you can", "Okay, go for it". Read
+# from the words as said: plain() takes a leading "yes" or "okay" off as filler, so "Yes, send it." was "send it",
+# no yes at all, and the message stayed unsent. In a week 6 clear yeses to "Should I look at your screen?" didn't count
+SAYS_YES = (r"yes|yeah|yep|yup|ya|yah|sure|ok|okay|alright|all right|fine|correct|right|haan|han|ha|ji|avunu|of course|"
+            r"absolutely|definitely|please|please do|do it|do that|go ahead|go on|go for it|carry on|why not|"
+            rf"(?:if )?you (?:can|may|want|should)|that's (?:right|fine)|thanks|thank you|now|{NAMES}")
+CLEAR_YES = r"yes|yeah|yep|yup|sure|ok|okay|alright|all right|haan|avunu|of course|absolutely|definitely|do it|go ahead|go for it"
+YES_VERBS = {"message_send": "send", "install_run": "install|update|upgrade|download",  # the question's own verb
+             "shutdown": "shut(?: it| the (?:computer|pc|laptop))? down|turn (?:it )?off|power (?:it )?off",
+             "restart": "restart|reboot", "close": "close|quit|exit", "minimise": "minimi[sz]e|hide", "lock": "lock",
+             "sleep": "sleep", "type": "type|write", "keys": "press|hit", "screen": "look|check|see|have a look|take a look"}
+# a laugh, "right" or a bare "please" never send a message, install an app or shut down: those need a clear yes or the verb
+STRICT_YES = {"message_send", "install_run"} | POWER_STEPS
+
+
+def said_yes(words, plan):
+    """True if words are a yes to her question about doing plan: "Yes, install it", "Okay, shut it down"."""
+    t = " ".join(re.sub(r"[^\w\s']", " ", str(words).lower().replace("’", "'")).split())
+    steps = [s for s in plan.get("steps") or [] if isinstance(s, dict)]
+    verbs = "|".join(YES_VERBS[s["do"]] for s in steps if s.get("do") in YES_VERBS)
+    names = "".join(f"|{re.escape(w)}" for s in steps for w in key_of(s.get("app") or "").split())  # "close Chrome"
+    said = SAYS_YES + (rf"|(?:{verbs})(?: (?:it|that|this|them|the (?:message|app|update|computer|pc|laptop|tab|"
+                       rf"window){names}))*" if verbs else "")
+    if not re.fullmatch(rf"(?:{said})(?: (?:{said}))*", t):
+        return False
+    return not any(s.get("do") in STRICT_YES for s in steps) or \
+        bool(re.search(rf"\b(?:{CLEAR_YES}{'|' + verbs if verbs else ''})\b", t))
 
 
 def handle(text, words=None, stt_ms=None, notify=None, gate=False):
@@ -3274,9 +3302,10 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     text, words = fix_vocab(text), fix_vocab(words)  # their dictionary, as for dictation
     MEMORY.reset_consolidation_failures()
     note = None  # shown in the window instead of her line, when something needs fixing
-    pending, PENDING["plan"] = (PENDING["plan"] if time.time() < PENDING["until"] else None), None
+    # kept through talk she lets go ("Hmm", a mumble, someone else), so the yes can still follow; gone once she acts
+    pending = PENDING["plan"] if time.time() < PENDING["until"] else None
     answer = plain(words) if pending else ""
-    if pending and YES.fullmatch(answer):
+    if pending and said_yes(words, pending) and not (gate and sure < UNSURE):  # a mumbled yes isn't one
         print("  (yes, doing what she asked about)")
         plan = pending
         if any(s.get("do") in POWER_STEPS for s in plan.get("steps") or []):
@@ -3289,7 +3318,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         emit(notify, "Ready", None)
         return False
     elif gate and side_talk(words):  # "Mm-hmm", "Hello?", "Okay": you talking to someone, or on the phone
-        if not (YES.fullmatch(plain(words)) and asked_last()):
+        if pending or not (YES.fullmatch(plain(words)) and asked_last()):  # "Ha." to "Send it?" is no yes
             print("  (no name and just talk, staying quiet)")
             emit(notify, "Ready", None)
             return False
@@ -3336,24 +3365,26 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         power = next((s for s in plan.get("steps") or [] if s.get("do") in POWER_STEPS), None)
         if power and not plan.get("confirm"):  # shutting down or restarting always gets a yes or no first
             plan = {"steps": [], "say": confirm_question(power), "confirm": plan}
-    if plan.get("confirm"):  # a yes or no in the next few seconds decides
-        PENDING.update(plan=plan["confirm"], until=time.time() + FOLLOW_UP + 8)
-    else:
+    if not plan.get("confirm"):  # else a yes or no decides, once she's asked (below)
         plan = prepare_task_steps(plan)  # command/schedule steps become durable rows before anything runs
         first = next((s for s in plan.get("steps") or [] if s.get("do") == "message"), None)
         if first:  # the model planned a message: open the chat with it typed in and ask, never send
             plan = stage_message(first.get("app"), first.get("contact") or first.get("to"), first.get("text"))
-            if plan.get("confirm"):
-                PENDING.update(plan=plan["confirm"], until=time.time() + FOLLOW_UP + 8)
         wanted = next((s for s in plan.get("steps") or [] if s.get("do") == "install"), None)
         if wanted:  # the model planned an install: look it up and ask, never install straight away
             plan = stage_install(wanted.get("app") or wanted.get("name")) or \
                 make_plan(say="I didn't catch which app to install.")
-            if plan.get("confirm"):
-                PENDING.update(plan=plan["confirm"], until=time.time() + FOLLOW_UP + 8)
     if not plan.get("steps") and not tidy(plan.get("say")):
         plan = make_plan(say=say_line("not_caught"))
+    PENDING["plan"] = None  # answered, or something else asked for instead
     failed, dictate, voice_error, spoken = run_plan(plan, notify)
+    if plan.get("confirm"):
+        # the yes or no window opens once she's finished asking: it was 16 s from before she started, so a long
+        # message read back used it up and the yes came too late. A message or install waits for its yes as long as
+        # it's typed in or looked up (90 s), said with her name once the follow-up window has shut
+        waits = [STAGED["until"] if s.get("do") == "message_send" else STAGED_INSTALL["until"]
+                 for s in plan["confirm"].get("steps") or [] if s.get("do") in ("message_send", "install_run")]
+        PENDING.update(plan=plan["confirm"], until=max([time.time() + FOLLOW_UP + 8] + waits))
     # what she said, also when it came from the screen: the next turn's "play the third one" needs what she saw
     kept = {"steps": plan.get("steps") or [],
             "say": (tidy(plan.get("say"), not plan.get("confirm")) if not failed else "") or " ".join(spoken)}
