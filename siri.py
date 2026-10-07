@@ -99,9 +99,14 @@ APPS = {k: v if isinstance(v, str) else v["app"] for k, v in _apps.items()}
 APP_SAY = {k: v if isinstance(v, str) else v.get("say", v["app"]) for k, v in _apps.items()}
 # "exe" in apps.json: the program its windows run as, for when the name alone doesn't find them (VS Code is Code.exe)
 APP_SPECS = {k: win.App(APPS[k], [] if isinstance(v, str) else v.get("exe", [])) for k, v in _apps.items()}
-# "heard_as" in apps.json: things speech-to-text writes instead of the app name, swapped back before anything else
-HEARD_AS = [(re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(v["heard_as"], key=len, reverse=True))) + r")\b", re.I), APP_SAY[k])
-            for k, v in _apps.items() if isinstance(v, dict) and v.get("heard_as")]
+# "heard_as" in apps.json: things speech-to-text writes instead of the app name, swapped back before anything else,
+# but only where an app is named: said on its own, or after open, close, switch to and the like. Anywhere else they
+# are someone's words: "Message Mum: starting keto from Monday" staged "starting Kiro", "type I'm prone to typos"
+# typed "I'm Google Chrome to typos" and "explain this code" reached the model as "explain VS Code"
+APP_SLOT = (r"(^\W*(?=(?:{0})\W*$)|\b(?:open|launch|switch to|go to|bring up|close|quit|exit|kill|minimi[sz]e|hide)\s+"
+            r"(?:the\s+|my\s+)?)(?:{0})\b")
+HEARD_AS = [(re.compile(APP_SLOT.format("|".join(map(re.escape, sorted(v["heard_as"], key=len, reverse=True)))), re.I),
+             APP_SAY[k]) for k, v in _apps.items() if isinstance(v, dict) and v.get("heard_as")]
 BROWSERS = tuple(k for k in ("chrome", "edge", "brave", "firefox") if k in APPS)
 BROWSER_PROGIDS = {"chrome": "chromehtml", "edge": "msedgehtm", "brave": "bravehtml", "firefox": "firefoxurl"}
 SPOTIFY = APP_SPECS.get("spotify") or win.App("Spotify", "Spotify.exe")
@@ -3173,7 +3178,7 @@ def snap_verbs(text):
 def fix_names(text):
     text = snap_verbs(text)
     for rx, name in HEARD_AS:
-        text = rx.sub(name, text)
+        text = rx.sub(lambda m: m[1] + name, text)  # the verb before it kept
     return text
 
 

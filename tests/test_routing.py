@@ -173,5 +173,24 @@ class UnnamedMessages(Routing):
         self.assertEqual(self.messages, [("WhatsApp", "Mum", "tomorrow I'm coming home")])
 
 
+class HeardAs(Routing):
+    """A24: heard_as puts an app's name right where an app is named, and leaves everyone's words alone."""
+
+    def test_the_app_name_is_put_right(self):
+        self.assertEqual(siri.fix_names("open prone"), "open Google Chrome")
+        self.assertEqual(siri.fix_names("Prone."), "Google Chrome.")
+        self.assertEqual(siri.fix_names("Jeff, switch to this code"), "Jeff, switch to VS Code")
+        self.assertEqual(siri.fix_names("open my files and close keto"), "open File Explorer and close Kiro")
+
+    def test_words_are_left_alone(self):
+        for words in ("Message Mum on WhatsApp: starting keto from Monday", "Type I'm prone to typos",
+                      "Play keto recipes on YouTube", "Search for this code of conduct on Google",
+                      "Google cloud code pricing", "explain this code", "run this code"):
+            with self.subTest(words=words):
+                self.assertEqual(siri.fix_names(words), words)
+        self.assertEqual(self.steps(siri.fix_names("Play keto recipes on YouTube")),
+                         [{"do": "youtube", "query": "keto recipes", "play": True}])
+
+
 if __name__ == "__main__":
     unittest.main()
