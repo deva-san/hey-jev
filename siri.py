@@ -1,6 +1,6 @@
 """Windows voice assistant: say "Hey Jev" or hold right Alt, then ask for anything. Simple commands are worked out on
 this PC straight away, anything else goes to a free OpenCode Zen model that plans the steps. Fish Audio speaks."""
-import os, re, sys, json, time, queue, random, argparse, threading, hashlib, collections, difflib
+import os, re, sys, json, time, queue, random, argparse, threading, hashlib, collections, difflib, contextlib, datetime
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.parse import quote_plus
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows without Developer Mode: copies instead, works fine
@@ -8,7 +8,7 @@ import subprocess
 import numpy as np, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
 import decider, fast_intent, hermes_memory, history, installer, messaging, opencode, pocket, settings, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
-from hermes_memory import skills
+from hermes_memory import curator, hermes_bits, skills
 from hermes_memory.threat_patterns import INVISIBLE_CHARS, first_threat_message
 from secrets_store import get_secret, missing_secrets
 from dictation import Dictation, START as DICTATE_START, USER_VOCAB, fix_vocab, read_vocab, save_vocab
@@ -47,6 +47,7 @@ SPEAK_LEVELS = collections.deque(maxlen=40)  # her voice's loudness while she ta
 # Hermes Agent's memory (hermes_memory, MIT): USER.md is who you are, MEMORY.md her own notes, both small and read into
 # every request. Conversations are kept apart, in history.py, where she can search them.
 hermes_memory.set_memory_dir(os.path.join(win.APPDATA_DIR, "memories"))
+hermes_memory.set_home(win.APPDATA_DIR)  # skills\ with Hermes' usage records and curator state, see skills.py
 MEMORY = hermes_memory.MemoryStore()
 # Hermes Agent's skills: how to do things for you, learned as she goes, in %APPDATA%\Hey Jev\skills (see learn)
 skills.set_skills_dir(os.path.join(win.APPDATA_DIR, "skills"))
@@ -1437,6 +1438,7 @@ def _quick(words, gate=False):
     for phrase, skill in routines():
         if phrase and t == phrase:
             print(f"  routine: {skill['dir']}")
+            skills.used(skill["dir"])
             return make_plan(skill["plan"]["steps"], skill["plan"]["say"])
     # Without her name the model decides it was for her first: staging opens the chat with the words typed in
     # ("WhatsApp Mum: running late" from across the room), and an install sits through winget searches
@@ -1518,7 +1520,7 @@ Reply with one JSON object and nothing else: {"steps": [...], "say": "..."}
 {"do":"screen","task":"click the second video on the page"}  look at their screen and do this, or answer it: what's on the screen, read or sum up this page, click, pick or fill in something you'd have to see. Write the task in full. It can come after steps that open something. Use it with "say" ""
 {"do":"memory","action":"add","target":"user","content":"Their website CareerID is careerid.in"}  save to your memory. action add, replace or remove. target user (who they are: names, sites, people, apps, likes, words) or memory (your own notes, like what works on this PC). replace and remove find the entry by "old_text", a few words from it
 {"do":"lookup","what":"disk"}  facts about this PC: disk, battery, cpu, memory (RAM), apps (what's using the most), network, uptime, system, or messages (what came in on WhatsApp, Teams, Messages and so on, and who from). Never say you can't check these
-{"do":"recall","query":"careerid","day":"2026-10-03"}  search your past conversations with them by words, a day, or both: "what did we talk about yesterday", "what was that video"
+{"do":"recall","query":"careerid","day":"2026-10-03"}  search your past conversations with them by words, a day, or both: "what did we talk about yesterday", "what was that video". "after":"7d" for the last week
 {"do":"web","query":"Iron Man 2 cast"}  look it up on the internet: a quick answer, Wikipedia and the latest news on it. {"do":"read","url":"https://..."}  read a page, like a Wikipedia one from the results. If they don't have it, like a price or a live score, open a google search and read it off the page with screen
 {"do":"weather","place":""}  the weather where they are, now, today and the next two days. Put a place in only for somewhere they name. Never ask where they are
 {"do":"news","topic":""}  headlines, "topic":"" for the top stories. Tell them the top two or three, briefly
@@ -1792,7 +1794,10 @@ class LiveSay:
         return self.said
 
 
-REASONING = "low"  # Ling's thinking before it answers, see ask_model
+# Ling's thinking before it answers. "none" was tried on 34 real requests (7 Oct 2026): no quicker (3.5 s median
+# against 3.4), slower at p90 (9.2 s against 6.5), space-bunny refused it 39 times, and it typed "360" for "what's 15%
+# of 2,400?". So low it stays
+REASONING = "low"
 STREAM_SAY = True  # say plain answers as they're written, see LiveSay
 TURN_SPOKE = threading.Event()  # she's said something this turn, so no "One moment" (see fill_silence)
 FILLER_AFTER = 0.9  # seconds into thinking, about 1.2 s after you stopped: a natural "On it." rather than silence
@@ -1899,14 +1904,44 @@ def memory_block():
     return "".join("\n\n" + b for b in blocks) if blocks else "\n\nYour memory is empty so far."
 
 
-def skills_block():
-    """Her skills, listed the way Hermes Agent lists them in its system prompt. "" when she has none."""
+def skills_block(text=""):
+    """Her skills, listed the way Hermes Agent lists them in its system prompt, with the ones that fit text written
+    out in full (relevant_skills), so the model doesn't spend a round trip on skill_view. "" when she has none."""
     routines()  # brings the list up to date
     try:
-        return skills.system_prompt_block(_skill_cache[1])
+        detail = relevant_skills(text, _skill_cache[1])
+        for name in detail:
+            skills.used(name)
+        return skills.system_prompt_block(_skill_cache[1], detail)
     except Exception as exc:
         print(f"  couldn't list her skills: {exc!r}")
         return ""
+
+
+SKILL_FITS = 0.45  # how alike a request and a skill's description must be, to the decider's encoder, to write it out
+_skill_vectors = {}  # skill: (what it's about, its numbers), worked out once
+
+
+def relevant_skills(text, entries, most=2):
+    """The skills that fit what was asked, best first: by meaning with the decider's encoder (decider.py) when it's
+    there, else by shared words."""
+    if not text or not entries:
+        return []
+    about = {e["dir"]: f"{e['dir'].replace('-', ' ')}: {e['description']}. {' '.join(e['triggers'])}" for e in entries}
+    if decider.available():
+        try:
+            encode = decider.get().encode
+            q, scored = encode(str(text)), []
+            for name, a in about.items():
+                if _skill_vectors.get(name, (None,))[0] != a:
+                    _skill_vectors[name] = (a, encode(a))
+                scored.append((float(q @ _skill_vectors[name][1]), name))
+            return [name for score, name in sorted(scored, reverse=True)[:most] if score >= SKILL_FITS]
+        except Exception as exc:
+            print(f"  couldn't match skills: {exc!r}")
+    words = set(re.findall(r"[a-z]{4,}", plain(text)))
+    scored = [(len(words & set(re.findall(r"[a-z]{4,}", a.lower()))), name) for name, a in about.items()]
+    return [name for n, name in sorted(scored, reverse=True)[:most] if n >= 1]
 
 
 # Steps a skill can run by itself, as a routine: what acts, not what looks things up or changes her
@@ -1915,8 +1950,9 @@ ROUTINE_STEPS = {"open", "close", "minimise", "website", "youtube", "google", "m
                  "research"}
 
 
-def learn_skill(step):
-    """A skill from the model: create (or rewrite), patch or delete, through Hermes' checks. Returns a few words."""
+def learn_skill(step, agent=False):
+    """A skill from the model: create (or rewrite), patch or delete (archived, Hermes' way), through Hermes' checks.
+    agent: her learning review made it, so Hermes' curator may archive it once it goes unused. Returns a few words."""
     action = str(step.get("action") or "create").lower()
     name = re.sub(r"[^a-z0-9._-]+", "-", str(step.get("name") or "").lower()).strip("-.")[:64]
     if action == "delete":
@@ -1928,7 +1964,8 @@ def learn_skill(step):
         content = skills.build_content(name, step.get("description") or name.replace("-", " "),
                                        str(step.get("notes") or ""), step.get("triggers") or [], steps,
                                        str(step.get("say") or ""))
-        result = skills.edit_skill(name, content) if skills.find_skill(name) else skills.create_skill(name, content)
+        result = skills.edit_skill(name, content) if skills.find_skill(name) else \
+            skills.create_skill(name, content, agent_created=agent)
     _skill_cache[0] = 0.0  # read them again next time
     if not result.get("success"):
         error = str(result.get("error") or "")
@@ -2011,7 +2048,11 @@ LEARN = """You're reviewing the last few turns between {name} and Jev, the voice
 memory: changes to her memory, each {"action": "add", "target": "user" or "memory", "content": "..."}, or "replace" or "remove" with "old_text", a few words of the entry. user is who they are: preferences, people, sites, apps, how they like things done. memory is facts about this PC and what works on it. One fact goes in one place. Never repeat what she already knows.
 skills: how to do a kind of task for them the way that worked, so next time it's right first go. Each {"action": "create", "name": "lowercase-name", "description": "one sentence: when to use it", "triggers": ["phrases they say for it"], "steps": [her steps, as she ran them], "say": "what she says", "notes": "how and when, and the pitfalls"}, or {"action": "patch", "name": "...", "old": "exact text in it", "new": "..."}, or {"action": "delete", "name": "..."}. Save one when they taught her a routine, when a task took more than one go and then worked, or when they corrected how she did something: fix the skill that covers it rather than adding another. Not one-off tasks, not attempts that never worked, and never "X doesn't work".
 words: speech-to-text mistakes they corrected, {"RightWord": ["what speech-to-text wrote"]}, only when they said or spelled the word again, like "no, I said Zostel", and only names, brands and technical words where what it wrote sounds like the right one ("jason" for JSON). Never everyday words: every "close" or "interpreting" they ever say would change too.
-Signs there's something to learn: they corrected her ("no", "not that", "I said", "I meant"), were annoyed, said "remember", or a task took several steps. Most reviews find nothing: then reply {"memory": [], "skills": [], "words": {}}."""
+Signs there's something to learn: they corrected her ("no", "not that", "I said", "I meant"), were annoyed, said "remember", or a task took several steps. Most reviews find nothing: then reply {"memory": [], "skills": [], "words": {}}.
+
+Hermes Agent's own rules for this (agent/background_review.py), where its tool names stand for the JSON above: memory with target "user" or "memory", and skills.
+Memory has """ + hermes_bits._MEMORY_ROUTING_BLOCK + hermes_bits._LESSON_LAYER_BLOCK + \
+    "Do NOT capture, as a skill or as a fact" + hermes_bits._DO_NOT_CAPTURE_BLOCK
 CORRECTION = re.compile(r"(?:no|nope|not that|wrong|that's wrong|i said|i meant|actually|i told you|you got it wrong|"
                         r"not this|that's not)\b")
 _learning = {"turns": 0, "last": 0.0, "lock": threading.Lock(), "overheard": collections.deque(maxlen=20)}
@@ -2026,16 +2067,20 @@ def learn_later(words, steps, failed, gate=False):
         _learning["overheard"].append(words)
         return
     _learning["turns"] += 1
-    worth = CORRECTION.match(plain(words)) or failed or len(steps) >= 3 or \
+    corrected = bool(CORRECTION.match(plain(words))) and gate != "cold"
+    worth = corrected or failed or len(steps) >= 3 or \
         any(s.get("do") in ("screen", "skill") for s in steps) or _learning["turns"] >= 6
-    if not worth or not settings.get("learning") or time.time() - _learning["last"] < 90:
+    # a correction is looked at straight away, so she has it right the next time you ask, a minute later or not
+    if not worth or not settings.get("learning") or (not corrected and time.time() - _learning["last"] < 90):
         return
     _learning["turns"], _learning["last"] = 0, time.time()
-    threading.Thread(target=review, daemon=True).start()
+    threading.Thread(target=review, kwargs={"wait": 0 if corrected else 20, "focus": words if corrected else ""},
+                     daemon=True).start()
 
 
-def review(wait=20):
-    """What to remember, a skill to save or fix, and words speech-to-text got wrong, from the last few turns."""
+def review(wait=20, focus=""):
+    """What to remember, a skill to save or fix, and words speech-to-text got wrong, from the last few turns. focus:
+    what they just said to correct her, looked at first, like Hermes Agent's /refine."""
     if not _learning["lock"].acquire(blocking=False):
         return
     try:
@@ -2057,7 +2102,9 @@ def review(wait=20):
                                         skills_block()) if b) or "Nothing yet."
         raw, plan, _, model = ask_plan([{"role": "system", "content": LEARN.replace("{name}", who) +
                                          "\n\nWhat she knows now:\n" + known},
-                                        {"role": "user", "content": "\n\n".join(lines)}],
+                                        {"role": "user", "content": "\n\n".join(lines) + (
+                                            f"\n\nThey just corrected her: \"{focus}\". Fix the fact or the skill "
+                                            f"it's about first, so she gets it right next time." if focus else "")}],
                                        deadline=45, hedge_after=30, cap=40, model=BACKUP_MODEL)  # see BACKGROUND
         for line in apply_learning(plan, [said or "" for _, said, _ in turns]):
             print(f"  learned: {line}")
@@ -2071,6 +2118,7 @@ def apply_learning(plan, said=()):
     """Puts what a review found into her memory, skills and dictionary. Returns a line for each, for the log.
     said: what they said in the turns it looked at, oldest first, which a word fix has to fit (see misheard)."""
     out = []
+    before = journal_start()
     for m in [m for m in (plan.get("memory") or []) if isinstance(m, dict)][:3]:
         action = str(m.get("action") or "add")
         r = hermes_memory.memory_tool(MEMORY, action, "memory" if m.get("target") == "memory" else "user",
@@ -2079,13 +2127,94 @@ def apply_learning(plan, said=()):
                    ("" if r.get("success") else f" (not kept: {str(r.get('error'))[:80]})"))
     for s in [s for s in (plan.get("skills") or []) if isinstance(s, dict)][:2]:
         try:
-            out.append("skill " + learn_skill(s))
+            journal_skill(before, s.get("name"))
+            out.append("skill " + learn_skill(s, agent=True))
         except RuntimeError as exc:
             out.append(f"skill {s.get('name')} not kept: {exc}")
     words = plan.get("words") if isinstance(plan.get("words"), dict) else {}
     if words:
         out.append(learn_words(words, said))
+    journal_end(before, out)
     return out
+
+
+# Undo for what she learned in the background: you declined being asked before she keeps something, so each review's
+# changes are kept here instead, as they were before, and "forget what you just learned" puts them back. Hermes asks
+# first for a background replace or remove (tools/memory_tool.py); this is the other way round.
+UNDO_PATH = os.path.join(win.APPDATA_DIR, "memories", ".undo.jsonl")
+UNDO_KEEP = 20
+UNDO_ASKED = re.compile(r"(?:undo|forget|unlearn|take back) (?:what|everything) you (?:just )?(?:learned|learnt|"
+                        r"saved|remembered|kept)(?: just now)?|unlearn that")
+
+
+def _memory_files():
+    return {name: os.path.join(str(hermes_memory.get_memory_dir()), name) for name in ("USER.md", "MEMORY.md")}
+
+
+def journal_start():
+    """How her memory files are now, before a review or the day's summary changes them."""
+    out = {"files": {}, "skills": {}}
+    for name, path in _memory_files().items():
+        try:
+            with open(path, encoding="utf-8") as f:
+                out["files"][name] = f.read()
+        except OSError:
+            out["files"][name] = None
+    return out
+
+
+def journal_skill(before, name):
+    """A skill as it is now, before the review changes it: None if it's new."""
+    name = re.sub(r"[^a-z0-9._-]+", "-", str(name or "").lower()).strip("-.")[:64]
+    path = skills.find_skill(name) if name else None
+    if name and name not in before["skills"]:
+        before["skills"][name] = path.read_text(encoding="utf-8") if path else None
+
+
+def journal_end(before, said):
+    """Keeps what changed, for undo."""
+    now = journal_start()["files"]
+    files = {n: t for n, t in before["files"].items() if now.get(n) != t}
+    if not files and not before["skills"]:
+        return
+    os.makedirs(os.path.dirname(UNDO_PATH), exist_ok=True)
+    try:
+        with open(UNDO_PATH, encoding="utf-8") as f:
+            kept = f.readlines()[-(UNDO_KEEP - 1):]
+    except OSError:
+        kept = []
+    kept.append(json.dumps({"when": round(time.time()), "files": files, "skills": before["skills"],
+                            "learned": [str(x) for x in said][:6]}, ensure_ascii=False) + "\n")
+    with open(UNDO_PATH, "w", encoding="utf-8") as f:
+        f.writelines(kept)
+
+
+def undo_learning():
+    """Puts back what the last review or day's summary changed. Returns what it had learned, or None if nothing."""
+    try:
+        with open(UNDO_PATH, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    if not lines:
+        return None
+    last = json.loads(lines[-1])
+    for name, text in last["files"].items():
+        path = _memory_files()[name]
+        if text is None:
+            with contextlib.suppress(OSError):
+                os.remove(path)
+        else:
+            hermes_memory._compat.atomic_write_text(path, text)
+    for name, text in last["skills"].items():
+        if text is None:
+            skills.delete_skill(name, really=True)
+        elif skills.find_skill(name):
+            hermes_memory._compat.atomic_write_text(skills.find_skill(name), text)
+    with open(UNDO_PATH, "w", encoding="utf-8") as f:
+        f.writelines(lines[:-1])
+    _skill_cache[0] = 0.0
+    return last.get("learned") or ["something"]
 
 
 def _squash(text):
@@ -2402,15 +2531,17 @@ def run_info(steps, links=False):
                             "headlines": untrusted(web.news(s.get("topic"), links=links))})
             elif do == "skill_view":
                 out.append({"skill_view": s.get("name"), "result": skills.skill_view(str(s.get("name") or ""))})
+                skills.used(str(s.get("name") or ""))
             else:
                 query, day = str(s.get("query") or ""), _day(s.get("day"))
                 if not query.strip() and not day:
                     day = _day("today")
-                found = history.search(query, day, limit=25)
+                found = history.search(query, day, limit=25, after=s.get("after"))
                 if not found and day:  # the words didn't match anything that day, so all of the day
                     found = history.search("", day, limit=25)
                 result = {"recall": {"query": query, "day": day},
-                          "found": [{**f, "you": f["you"][:200], "jev": (f["jev"] or "")[:200]} for f in found] or "nothing"}
+                          "found": [{**f, "you": f["you"][:200], "jev": (f["jev"] or "")[:200]} for f in found[:12]]
+                          or "nothing"}
                 summary = history.summary(day) if day else ""
                 if summary:
                     result["summary"] = summary
@@ -2499,7 +2630,7 @@ def think(text, gate, notify=None, sure=1.0):
     """Ask the answer model what to do. It can look things up on the PC and in past conversations first, up to
     ROUNDS times, then it plans. sure: how sure speech-to-text was of the words. Returns a plan, or None if it
     decided this wasn't for her."""
-    known = skills_block()
+    known = skills_block(text)
     system = soul() + "\n\n" + PROMPT + ("\n\n" + known if known else "") + memory_block() + context() \
         + (COLD_NOTE + room_before() if gate == "cold" else GATE_NOTE if gate else "")
     messages = [{"role": "system", "content": system}]
@@ -4189,12 +4320,38 @@ def summarize_days():
                 break  # try again next time round
             history.mark_summarized(day, str(data.get("summary") or ""))
             print(f"  summed up {day}")
+            before, kept = journal_start(), []
             for fact in (data.get("facts") or [])[:3]:
                 if isinstance(fact, str) and fact.strip():
                     result = hermes_memory.memory_tool(MEMORY, "add", "user", fact.strip())
                     print(f"  remembered from {day}: {fact.strip()!r}"
                           + ("" if result.get("success") else f" (not kept: {result.get('error')})"))
+                    kept.append(f"from {day}: {fact.strip()}")
+            journal_end(before, kept)
+        tidy_skills()
         time.sleep(3 * 3600)
+
+
+def tidy_skills():
+    """Hermes Agent's curator, its no-model part (curator.apply_automatic_transitions): once a week, after 2 hours
+    without a turn, skills she wrote herself and hasn't used for 14 days go stale, and after 30 are archived to
+    skills\\.archive, never deleted. Skills you taught her, and pinned ones, aren't touched."""
+    try:
+        last = history.recent(1, 10 ** 9)
+        idle = (time.time() - last[-1][0]) / 3600 if last else 999
+        if not curator.should_run_now() or idle < curator.get_min_idle_hours():
+            return
+        t = time.time()
+        counts = curator.apply_automatic_transitions()
+        state = curator.load_state()
+        state.update(last_run_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                     last_run_duration_seconds=round(time.time() - t, 3), run_count=int(state.get("run_count") or 0) + 1,
+                     last_run_summary=", ".join(f"{k} {v}" for k, v in counts.items() if v) or "nothing to do")
+        curator.save_state(state)
+        _skill_cache[0] = 0.0
+        print(f"  tidied her skills: {state['last_run_summary']}")
+    except Exception as exc:
+        print(f"  couldn't tidy her skills: {exc!r}")
 
 
 # --------------------------------------------------------------------------- Mic + push to talk
@@ -4349,8 +4506,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
 
     if voiceid.mode() != "off":
         threading.Thread(target=load_speaker, daemon=True).start()  # beside the rest, so starting isn't slower
-    if decider.mode() != "off" and decider.available():  # its model, ready before the first turn without her name
-        threading.Thread(target=lambda: decider.get().encode("hello"), daemon=True).start()
+    if decider.available():  # its model, ready before the first turn, and the skills' numbers worked out
+        threading.Thread(target=lambda: relevant_skills("hello", (routines(), _skill_cache[1])[1]),
+                         daemon=True).start()
 
     def voice_print(audio):
         if speaker[0] is None or (voiceid.mode() == "off" and enrolling[0] is None):
@@ -4382,6 +4540,11 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                     result = voice_setup("learn")
                 elif VOICE_ONLY.fullmatch(said) or VOICE_ALL.fullmatch(said):
                     result = voice_setup("only" if VOICE_ONLY.fullmatch(said) else "all")
+                elif not gate and UNDO_ASKED.fullmatch(plain(said)):
+                    undone = undo_learning()
+                    say(f"Okay, I've forgotten that: {undone[0]}." if undone else
+                        "There's nothing I've learned on my own lately to forget.", notify)
+                    result = True
                 else:
                     result = "dictate" if not gate and DICTATE_START.match(said) else \
                         handle(text, words, stt_ms, notify, gate)

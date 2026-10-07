@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 
+from hermes_memory.hermes_bits import _or_relaxed_query, _sanitize_fts5_query
 from winplatform import APPDATA_DIR
 
 DB = os.path.join(APPDATA_DIR, "history.db")
@@ -25,6 +26,12 @@ def _db():
     con = sqlite3.connect(DB, timeout=5)
     con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS turns USING fts5(said, did, reply, plan UNINDEXED, day UNINDEXED, "
                 "ts UNINDEXED, tokenize='porter unicode61')")
+    # Hermes Agent's second index, by pieces of words (hermes_state_common.py messages_fts_trigram): "careerid"
+    # finds "CareerID.in", for when the whole words found nothing. Filled in from turns the first time
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE name = 'turns_tri'").fetchone():
+        with con:
+            con.execute("CREATE VIRTUAL TABLE turns_tri USING fts5(said, reply, tokenize='trigram')")
+            con.execute("INSERT INTO turns_tri (rowid, said, reply) SELECT rowid, said, reply FROM turns")
     return con
 
 
@@ -41,8 +48,9 @@ def add(said, did="", reply="", plan=""):
         con = _db()
         try:
             with con:
-                con.execute("INSERT INTO turns (said, did, reply, plan, day, ts) VALUES (?, ?, ?, ?, ?, ?)",
-                            (said, did, reply, plan, day, ts))
+                cur = con.execute("INSERT INTO turns (said, did, reply, plan, day, ts) VALUES (?, ?, ?, ?, ?, ?)",
+                                  (said, did, reply, plan, day, ts))
+                con.execute("INSERT INTO turns_tri (rowid, said, reply) VALUES (?, ?, ?)", (cur.lastrowid, said, reply))
         finally:
             con.close()
         os.makedirs(DAYS_DIR, exist_ok=True)
@@ -67,29 +75,73 @@ def recent(n=8, within=1800):
     return [(float(ts), said, plan) for ts, said, plan in reversed(rows)]
 
 
-def search(query="", day=None, limit=12):
-    """Past turns that match the words in query, best first, and/or everything on one day (YYYY-MM-DD).
-    Returns [{"when", "you", "jev", "did"}]."""
+AGO = re.compile(r"(\d+)\s*([hdw])")  # "7d", "24h", "2w", as Hermes' session_search takes them
+
+
+def _since(after):
+    """A time from "7d" / "24h" / "2w" or a YYYY-MM-DD day, or None."""
+    after = str(after or "").strip().lower()
+    m = AGO.fullmatch(after)
+    if m:
+        return time.time() - int(m[1]) * {"h": 3600, "d": 86400, "w": 7 * 86400}[m[2]]
+    try:
+        return time.mktime(time.strptime(after, "%Y-%m-%d"))
+    except ValueError:
+        return None
+
+
+def search(query="", day=None, limit=12, after=None, around=1):
+    """Past turns that match the words in query, best first, and/or everything on one day (YYYY-MM-DD), the way
+    Hermes Agent's session_search looks: its query cleaner (hermes_state_search.py), every word first, then any of
+    them, then pieces of words (turns_tri). after: only since then ("7d", "24h", "2w" or a day). around: the turns
+    either side of the best few hits, so a hit has what led to it. Returns [{"when", "you", "jev", "did", "near"?}]."""
     words = [w for w in re.findall(r"\w+", (query or "").lower()) if w not in STOP and len(w) > 1]
-    sql, args = "SELECT ts, said, did, reply FROM turns", []
-    where = []
-    if words:  # each word quoted, so nothing she heard can be read as FTS5 syntax
-        where.append("turns MATCH ?")
-        args.append(" OR ".join(f'"{w}"*' for w in words))
+    since = _since(after)
+    where, args = [], []
     if day:
-        where.append("day = ?")
+        where.append("t.day = ?")
         args.append(day)
-    if not where:
+    if since:
+        where.append("CAST(t.ts AS REAL) >= ?")
+        args.append(since)
+    if not words and not where:
         return []
-    sql += " WHERE " + " AND ".join(where) + (" ORDER BY bm25(turns)" if words else " ORDER BY ts") + " LIMIT ?"
-    args.append(limit if words else max(limit, 40))
     with _lock:
         con = _db()
         try:
-            rows = con.execute(sql, args).fetchall()
+            rows = []
+            if words:
+                every = _sanitize_fts5_query(" ".join(words))  # each word stays a word, nothing read as FTS5 syntax
+                every = " ".join(f'"{w}"' for w in every.replace('"', " ").split())
+                prefix = lambda q: re.sub(r'"([^"]+)"', r'""*', q) if q else q  # "lof" finds "lofi"
+                for table, match in (("turns", prefix(every)), ("turns", prefix(_or_relaxed_query(every))),
+                                     ("turns_tri", " OR ".join(f'"{w}"' for w in words if len(w) >= 3))):
+                    if not match:
+                        continue
+                    rows = con.execute(
+                        f"SELECT t.rowid, t.ts, t.said, t.did, t.reply FROM turns t "
+                        + (f"JOIN turns_tri x ON x.rowid = t.rowid WHERE turns_tri MATCH ?" if table == "turns_tri"
+                           else "WHERE turns MATCH ?")
+                        + "".join(f" AND {w}" for w in where)
+                        + f" ORDER BY bm25({table}) LIMIT ?", [match, *args, limit]).fetchall()
+                    if rows:
+                        break
+            else:
+                rows = con.execute("SELECT t.rowid, t.ts, t.said, t.did, t.reply FROM turns t WHERE "
+                                   + " AND ".join(where) + " ORDER BY t.ts LIMIT ?", [*args, max(limit, 40)]).fetchall()
+            out = []
+            for i, (rowid, ts, said, did, reply) in enumerate(rows):
+                hit = {"when": _when(float(ts)), "you": said, "jev": reply, "did": did}
+                if words and around and i < 3:
+                    near = con.execute("SELECT said, reply FROM turns WHERE rowid BETWEEN ? AND ? AND rowid != ? "
+                                       "AND abs(CAST(ts AS REAL) - ?) < 1800 ORDER BY rowid",
+                                       (rowid - around, rowid + around, rowid, float(ts))).fetchall()
+                    if near:
+                        hit["near"] = [{"you": a[:120], "jev": (b or "")[:120]} for a, b in near]
+                out.append(hit)
+            return out
         finally:
             con.close()
-    return [{"when": _when(float(ts)), "you": said, "jev": reply, "did": did} for ts, said, did, reply in rows]
 
 
 def _day_file(day):
@@ -142,6 +194,7 @@ def clear():
         try:
             with con:
                 con.execute("DELETE FROM turns")
+                con.execute("DELETE FROM turns_tri")
             con.execute("VACUUM")
         finally:
             con.close()

@@ -1,6 +1,6 @@
-# From Hermes Agent by Nous Research, tools/threat_patterns.py at commit 93782e9cc3b6
+# From Hermes Agent by Nous Research, tools/threat_patterns.py at commit 3569fba6a686e17f9208da7500de8bd20b4c82f9
 # https://github.com/NousResearch/hermes-agent, MIT License, see LICENSE in this folder.
-# Changed for Hey Jev only where marked "Hey Jev:", to stand alone outside Hermes.
+# Copied by sync_hermes.py; only the imports are changed, see UPSTREAM.json. Don't edit by hand.
 """Shared threat-pattern library (prompt injection / promptware / exfiltration) for
 ``agent/prompt_builder.py``, ``tools/memory_tool.py`` and ``agent/tool_dispatch_helpers.py``.
 Each pattern is ``(regex, pattern_id, scope)``; scope is cumulative: ``"all"`` everywhere,

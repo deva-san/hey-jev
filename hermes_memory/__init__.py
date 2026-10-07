@@ -8,9 +8,11 @@ rest of Hermes: the write-approval gate, background-review rules and metrics.
 import json
 from typing import Any, Dict, List, Optional
 
-from .memory_store import ENTRY_DELIMITER, MEMORY_BLOCK_HEADERS, MemoryStore, get_memory_dir, set_memory_dir
+from ._compat import get_hermes_home, get_memory_dir, set_home, set_memory_dir
+from .memory_store import ENTRY_DELIMITER, MEMORY_BLOCK_HEADERS, MemoryStore
 
-__all__ = ["ENTRY_DELIMITER", "MEMORY_BLOCK_HEADERS", "MemoryStore", "get_memory_dir", "set_memory_dir",
+__all__ = ["ENTRY_DELIMITER", "MEMORY_BLOCK_HEADERS", "MemoryStore", "get_hermes_home", "get_memory_dir", "set_home",
+           "set_memory_dir",
            "memory_tool"]
 
 _STORE_ACTIONS = {

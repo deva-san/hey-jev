@@ -37,6 +37,7 @@ TABS = (("home", "Home"), ("tasks", "Tasks"), ("contacts", "Contacts"), ("dict",
         ("hist", "Dictation history"), ("mem", "Memory"), ("priv", "Privacy"), ("settings", "Settings"),
         ("keys", "Keys"))
 hermes_memory.set_memory_dir(os.path.join(win.APPDATA_DIR, "memories"))  # the same places siri.py keeps them
+hermes_memory.set_home(win.APPDATA_DIR)
 skills.set_skills_dir(os.path.join(win.APPDATA_DIR, "skills"))
 NOTES_DIR = os.path.join(win.APPDATA_DIR, "notes")
 # What the window says she's doing, as the popup shows it (see bubble.LOOKS)
@@ -888,7 +889,7 @@ class AssistantWindow:
             return
         target, entry = self.memories[int(sel[0])]
         if target == "skill":
-            result = skills.delete_skill(entry["dir"])
+            result = skills.delete_skill(entry["dir"], really=True)  # you asked: gone, not archived
         else:
             result = hermes_memory.memory_tool(hermes_memory.MemoryStore(), "remove", target, old_text=entry)
         if result.get("success"):

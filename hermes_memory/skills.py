@@ -4,7 +4,9 @@ in the agentskills.io format Hermes Agent uses.
 
 The rules and checks are Hermes' tools/skill_manager_tool.py, tools/skills_tool.py, agent/skill_utils.py and
 agent/prompt_builder.py (MIT, see LICENSE), cut down to what Hey Jev needs. Changes are marked "Hey Jev:". Left
-out: categories, the skills hub, pins, the curator, linting and supporting files.
+out: categories, the skills hub, linting and supporting files. Hermes' own usage tracking and curator are copied in
+whole (skill_usage.py, curator.py): a skill she wrote herself that goes unused is marked stale after 14 days and
+archived after 30, never deleted; one you taught her is never touched.
 
 Hey Jev: a skill can also have `triggers`, phrases that start it, and a ```json plan of steps in its body, so a
 routine you taught her ("when I say work mode, ...") runs straight away, without asking the model.
@@ -15,7 +17,9 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .memory_store import atomic_write_text
+from . import skill_usage
+from ._compat import atomic_write_text
+from .hermes_bits import SKILL_PROMPT_DESC_LIMIT, extract_skill_description
 from .threat_patterns import first_threat_message
 
 MAX_NAME_LENGTH = 64
@@ -53,7 +57,14 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     for line in yaml_content.strip().split("\n"):
         if ":" in line:
             key, value = line.split(":", 1)
-            frontmatter[key.strip()] = value.strip().strip("'\"")  # Hey Jev: quotes off
+            value = value.strip()
+            if value[:1] in ('"', "["):  # Hey Jev: written as JSON by build_content, which YAML reads the same
+                try:
+                    frontmatter[key.strip()] = json.loads(value)
+                    continue
+                except ValueError:
+                    pass
+            frontmatter[key.strip()] = value.strip("'\"")  # Hey Jev: quotes off
     return frontmatter, body
 
 
@@ -108,7 +119,8 @@ def find_skill(name: str) -> Optional[Path]:
     return path if _validate_name(name) is None and path.exists() else None
 
 
-def create_skill(name: str, content: str) -> Dict[str, Any]:
+def create_skill(name: str, content: str, agent_created: bool = False) -> Dict[str, Any]:
+    """agent_created: her learning review wrote it, so the curator looks after it; one you taught her, it doesn't."""
     if err := (_validate_name(name) or _validate_frontmatter(content) or _validate_content_size(content)
                or _security_scan(content)):
         return _err(err)
@@ -117,7 +129,16 @@ def create_skill(name: str, content: str) -> Dict[str, Any]:
     skill_dir = SKILLS_DIR / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_text(skill_dir / "SKILL.md", content, tmp_prefix=".skill_")
+    _usage(skill_usage.record_created, name, agent_created=agent_created)
     return {"success": True, "message": f"Skill '{name}' created."}
+
+
+def _usage(record, name, **kw):
+    """Hermes' usage tracking (skill_usage.py), never in the way of the skill itself."""
+    try:
+        record(name, **kw)
+    except Exception:
+        pass
 
 
 def edit_skill(name: str, content: str) -> Dict[str, Any]:
@@ -128,6 +149,7 @@ def edit_skill(name: str, content: str) -> Dict[str, Any]:
     if not path:
         return _err(f"Skill '{name}' not found.")
     atomic_write_text(path, content, tmp_prefix=".skill_")
+    _usage(skill_usage.bump_patch, name, action="edit")
     return {"success": True, "message": f"Skill '{name}' updated (full rewrite)."}
 
 
@@ -148,15 +170,31 @@ def patch_skill(name: str, old_string: str, new_string: str) -> Dict[str, Any]:
     if err := _security_scan(new_content):
         return _err(err)
     atomic_write_text(path, new_content, tmp_prefix=".skill_")
+    _usage(skill_usage.bump_patch, name)
     return {"success": True, "message": f"Patched SKILL.md in skill '{name}'."}
 
 
-def delete_skill(name: str) -> Dict[str, Any]:
+def delete_skill(name: str, really: bool = False) -> Dict[str, Any]:
+    """Hey Jev: archived (skills\\.archive, Hermes' way, restorable), unless really: forgotten for good, as from the
+    Memory tab's Forget this."""
     path = find_skill(name)
     if not path:
         return _err(f"Skill '{name}' not found.")
+    if not really:
+        try:
+            ok, _ = skill_usage.archive_skill(name)
+            if ok:
+                return {"success": True, "message": f"Skill '{name}' archived."}
+        except Exception:
+            pass
     shutil.rmtree(path.parent)
+    _usage(skill_usage.forget, name)
     return {"success": True, "message": f"Skill '{name}' deleted."}
+
+
+def used(name: str) -> None:
+    """A skill was used (a routine ran, or its notes went to the model): it isn't stale."""
+    _usage(skill_usage.bump_use, name)
 
 
 # --- Catalog and viewing (tools/skills_tool.py) -------------------------------
@@ -169,10 +207,12 @@ def list_skills() -> List[Dict[str, Any]]:
             fm, body = parse_frontmatter(skill_md.read_text(encoding="utf-8-sig"))
         except (OSError, UnicodeDecodeError):
             continue
+        triggers = fm.get("triggers") or ""
+        triggers = triggers if isinstance(triggers, list) else str(triggers).split(",")  # Hey Jev: old comma lists
         out.append({"name": fm.get("name") or skill_md.parent.name, "dir": skill_md.parent.name,
                     "description": str(fm.get("description") or ""),
-                    "triggers": [t.strip() for t in str(fm.get("triggers") or "").split(",") if t.strip()],
-                    "plan": plan_of(body)})
+                    "triggers": [str(t).strip() for t in triggers if str(t).strip()],
+                    "plan": plan_of(body), "notes": _PLAN_RE.sub("", body).strip()})
     return out
 
 
@@ -204,12 +244,21 @@ def plan_of(body: str) -> Optional[Dict[str, Any]]:
 
 
 def build_content(name: str, description: str, notes: str = "", triggers=(), steps=None, say: str = "") -> str:
-    """A SKILL.md in Hermes' format from the parts the model sends."""
-    head = [f"name: {name}", f"description: {' '.join(str(description).split())}"]
-    triggers = [" ".join(str(t).split()).replace(",", " ") for t in (triggers or []) if str(t).strip()]
+    """A SKILL.md in Hermes' format from the parts the model sends. Hey Jev: each value written as JSON, which YAML
+    reads the same way, so Hermes' parser takes it whatever it holds (a bare "on" is a boolean to YAML 1.1); the
+    description cut to Hermes' 60 letters for a new skill; triggers under "When to Use", where Hermes keeps them."""
+    description = " ".join(str(description).split())
+    if len(description) > SKILL_PROMPT_DESC_LIMIT:
+        description = description[:SKILL_PROMPT_DESC_LIMIT].rsplit(" ", 1)[0].rstrip(",.;:") or \
+            description[:SKILL_PROMPT_DESC_LIMIT]
+    head = [f"name: {json.dumps(name)}", f"description: {json.dumps(description, ensure_ascii=False)}",
+            'platforms: ["windows"]']
+    triggers = [" ".join(str(t).split()) for t in (triggers or []) if str(t).strip()]
     if triggers:
-        head.append(f"triggers: {', '.join(triggers)}")
+        head.append(f"triggers: {json.dumps(triggers, ensure_ascii=False)}")
     body = (notes or description).strip()
+    if triggers:
+        body = "## When to Use\n" + "\n".join(f'- "{t}"' for t in triggers) + "\n\n" + body
     if steps:
         body += "\n\n```json\n" + json.dumps({"steps": steps, "say": say or ""}, ensure_ascii=False) + "\n```"
     return "---\n" + "\n".join(head) + "\n---\n" + body + "\n"
@@ -217,18 +266,26 @@ def build_content(name: str, description: str, notes: str = "", triggers=(), ste
 
 # --- The system prompt (agent/prompt_builder.py, build_skills_system_prompt) ---
 
-def system_prompt_block(entries: Optional[List[Dict[str, Any]]] = None) -> str:
-    """The skills index for her prompt. Hey Jev: Hermes' wording, with her own steps for skill_view."""
+DETAIL_CHARS = 900  # the most of one skill's notes written out in her prompt
+
+
+def system_prompt_block(entries: Optional[List[Dict[str, Any]]] = None, detail=()) -> str:
+    """The skills index for her prompt. Hey Jev: Hermes' wording and its 60-letter descriptions; the skills in detail
+    (the ones that fit this request, see siri.skills_block) are written out in full, so the model needn't ask for
+    them with skill_view, a whole extra round trip; the rest by name and description."""
     entries = list_skills() if entries is None else entries
     if not entries:
         return ""
-    lines = []
+    lines, full = [], []
     for e in entries:
         said = f" (the user says: {', '.join(e['triggers'])})" if e["triggers"] else ""  # Hey Jev: no fixed name
-        lines.append(f"    - {e['dir']}: {e['description']}{said}")
+        lines.append(f"    - {e['dir']}: {extract_skill_description({'description': e['description']})}{said}")
+        if e["dir"] in detail and e.get("notes"):
+            full.append(f"### {e['dir']}\n{e['notes'][:DETAIL_CHARS]}")
     return ("## Skills\n"
             "Before replying, scan the skills below. If a skill matches or is even partially relevant to the task, "
-            "load it with {\"do\":\"skill_view\",\"name\":\"...\"} and follow its instructions. Skills encode the "
-            "user's preferred approach and what works on this PC. If a skill you loaded was missing steps or wrong, "
-            "fix it with a skill patch before finishing.\n"
-            "<available_skills>\n" + "\n".join(lines) + "\n</available_skills>")
+            "follow it: the ones that fit this request are written out after the list, load any other with "
+            "{\"do\":\"skill_view\",\"name\":\"...\"}. Skills encode the user's preferred approach and what works on "
+            "this PC. If a skill was missing steps or wrong, fix it with a skill patch before finishing.\n"
+            "<available_skills>\n" + "\n".join(lines) + "\n</available_skills>"
+            + ("\n\n" + "\n\n".join(full) if full else ""))
