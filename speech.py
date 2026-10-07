@@ -378,6 +378,7 @@ class Listener:
         self.speech_start = None  # where the speech going on now began, while someone is talking
         self.session = None  # speech-to-text for the turn going on now
         self.turn_start = self.onset = self.voice = 0  # where the turn's audio starts, its speech, and the last of it
+        self.cut = 0  # where the last turn cut at MAX_TURN ended, so the next one doesn't hear any of it again
         self.chance, self.turn_ms, self.words = None, 0, ""
         self.ended = (None, 0.0)
 
@@ -446,7 +447,7 @@ class Listener:
                 return
             # a turn begins, with what came just before it
             self.onset = self.pos - self.run * Voice.WINDOW
-            self.turn_start = max(self.recent_start, self.onset - int(self.PRE_ROLL * RATE))
+            self.turn_start = max(self.recent_start, self.cut, self.onset - int(self.PRE_ROLL * RATE))
             self.session, self.chance, self.turn_ms = self.ears.session(), None, 0
             # Nemotron needs a moment of quiet before the speech, or fast speech loses its first word: "Open
             # Notepad" came out as "Notepad", "When will Gemini..." as "Will Gemini...", 4 of 9 sentences said
@@ -475,6 +476,9 @@ class Listener:
         if talking:
             long_for = self.MAX_TURN_HERS if self._hers() else self.MAX_TURN
             if (self.pos - self.turn_start) / RATE >= long_for:
+                # the next turn starts from here: with the speech still counted from before, a TV that never paused
+                # started a new turn on every block, each the same 15 s again, 102 in a row in the log
+                self.run, self.cut = 0, self.pos
                 self._end()
             return
         spoke = (self.voice - self.onset) / RATE  # seconds of the turn with speech in
