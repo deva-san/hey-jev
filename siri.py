@@ -2631,6 +2631,10 @@ def do_step(step):
             open_page(SITES[page][1], browser, profile)
             note_focus(page)
             return name
+        folder = win.SHELL_NAMES.get(re.sub(r"^the | folder$", "", key_of(name)))
+        if do == "open" and folder:  # "Recycle Bin" isn't an app, she searched Google for one
+            win.open_folder(folder)
+            return name
         app = find_app(name)
         if do == "open" and APP_LOOKUP.get(key_of(name)) in BROWSERS:  # in a profile, if they named one
             note_focus(APP_LOOKUP.get(key_of(name)))
@@ -2648,6 +2652,11 @@ def do_step(step):
         return app.name
     if do == "website":
         url = str(step.get("url") or "").strip()
+        if re.match(r"(?:\w+:/*)?[a-z]:[\\/]", url, re.I):  # a path on this PC: "C:/$Recycle.Bin" went to the browser
+            if "$recycle.bin" not in url.lower():
+                raise RuntimeError("That's a folder on this PC, not a website")
+            win.open_folder("shell:RecycleBinFolder")
+            return "recycle bin"
         if not re.match(r"https?://", url, re.I):  # web addresses only, never a file or a program
             url = "https://" + re.sub(r"^[a-z][\w+.-]*:/*", "", url, flags=re.I)
         open_page(url, browser, profile)

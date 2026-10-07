@@ -1289,6 +1289,10 @@ def show_desktop():
 
 SHELL_FOLDERS = {"shell:MyComputerFolder", "shell:RecycleBinFolder", "shell:Downloads", "shell:Personal",
                  "shell:My Pictures", "shell:My Music", "shell:My Video", "shell:Desktop"}
+# What they're called, for an "open" step: a model planned "open recycle bin" as an app, which no Start menu has
+SHELL_NAMES = {"recycle bin": "shell:RecycleBinFolder", "this pc": "shell:MyComputerFolder",
+               "my computer": "shell:MyComputerFolder", "downloads": "shell:Downloads", "documents": "shell:Personal",
+               "my documents": "shell:Personal", "pictures": "shell:My Pictures"}
 
 
 def open_folder(path_or_uri):

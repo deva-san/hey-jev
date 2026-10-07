@@ -73,6 +73,37 @@ class RamFigures(unittest.TestCase):
         self.assertLess(abs(ram - mem.uss), (mem.rss - mem.uss) / 2)
 
 
+class Folders(unittest.TestCase):
+    def opened(self, step):
+        folders = []
+        with mock.patch.object(siri.win, "open_folder", folders.append):
+            siri.do_step(step)
+        return folders
+
+    def test_open_recycle_bin_planned_as_an_app_opens_it(self):
+        """The model planned {"do": "open", "app": "Recycle Bin"}: "I couldn't find an app called Recycle Bin"."""
+        self.assertEqual(self.opened({"do": "open", "app": "Recycle Bin"}), ["shell:RecycleBinFolder"])
+        self.assertEqual(self.opened({"do": "open", "app": "the Downloads folder"}), ["shell:Downloads"])
+        for uri in winplatform.SHELL_NAMES.values():
+            self.assertIn(uri, winplatform.SHELL_FOLDERS)  # open_folder only opens those
+
+    def test_recycle_bin_as_a_website_opens_the_recycle_bin(self):
+        """Next it planned the website https://C:/$Recycle.Bin/, and she opened that in Chrome."""
+        self.assertEqual(self.opened({"do": "website", "url": "https://C:/$Recycle.Bin/"}), ["shell:RecycleBinFolder"])
+
+    def test_a_path_on_this_pc_is_no_website(self):
+        before = len(TRIPPED)
+        with self.assertRaisesRegex(RuntimeError, "on this PC"):
+            siri.do_step({"do": "website", "url": "C:\\Users\\Public"})
+        with self.assertRaisesRegex(RuntimeError, "on this PC"):
+            siri.do_step({"do": "website", "url": "file:///D:/films"})
+        self.assertEqual(len(TRIPPED), before)
+
+    def test_an_app_is_still_an_app(self):
+        with self.assertRaisesRegex(RuntimeError, "tripwire: win.open_app"):
+            siri.do_step({"do": "open", "app": "Notepad"})
+
+
 class Voice(unittest.TestCase):
     def test_a_line_she_says_now_waits_seconds_for_fish_not_a_minute(self):
         """The mic is paused while she talks, and Fish once took 17 s to start: with 60 s she was silent and deaf."""
