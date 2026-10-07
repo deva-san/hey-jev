@@ -9,7 +9,7 @@ import numpy as np, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
 import fast_intent, hermes_memory, history, installer, messaging, opencode, settings, speech, sysinfo, tasks as tasking, vision, watch, web, winplatform as win
 from hermes_memory import skills
-from hermes_memory.threat_patterns import first_threat_message
+from hermes_memory.threat_patterns import INVISIBLE_CHARS, first_threat_message
 from secrets_store import get_secret, missing_secrets
 from dictation import Dictation, START as DICTATE_START, USER_VOCAB, fix_vocab, read_vocab, save_vocab
 
@@ -939,10 +939,22 @@ def finish_asked(words):
     if time.time() > ASKED["until"] or not ASKED["alias"]:
         return None
     app, alias, text = ASKED["app"], ASKED["alias"], ASKED["text"]
-    said = " ".join(str(words).split())
-    want = messaging.needs_of(app)
-    handle = (_digits_said(said) or said) if want == "number" else said.strip().lstrip("@").split()[-1:][0] \
-        if said.strip() else ""
+    # the whole reply is the number or username, never a word picked out of it: the last word of "Cancel that"
+    # would be saved as bittu's Telegram username, for every message to bittu from then on. "It's" only before @, +
+    # or digits: "It's done" isn't one
+    said = re.sub(r"^(?:(?:it'?s|it is)\s+(?=[@+\d]|plus\b)|(?:(?:their|his|her|the) )?(?:phone |whatsapp |telegram )?"
+                  r"(?:number|username) is\s+)", "", " ".join(str(words).split()).strip(" .!?"), flags=re.I)
+    if messaging.needs_of(app) == "number":
+        handle = said if re.fullmatch(r"\+?[\d\s(),.-]+", said) else _digits_said(said)
+        digits = re.sub(r"\D", "", handle)
+        if re.match(r"(?:\+|plus\b|00)", said, re.I):
+            handle = digits[2:] if said.startswith("00") else digits
+        # "98765 43210": WhatsApp would read it as +98. Under 7 digits isn't a number at all: "Two." or "10 30"
+        elif len(digits) >= 7 and (len(digits) <= 10 or digits[0] == "0"):
+            return make_plan(say="I need the country code too. Say the number again, starting with plus.")
+    else:  # nor "Pause" or "Next" said to her while music plays, unless it comes with its @
+        handle = said.lstrip("@") if re.fullmatch(r"@?\w+", said) and not side_talk(said) \
+            and not NO.fullmatch(plain(said)) and not COMMAND.fullmatch(said) else ""
     try:
         saved = messaging.save_contact(alias, app, handle)
     except (ValueError, RuntimeError):
@@ -1183,6 +1195,11 @@ def routines():
         except Exception as exc:
             print(f"  couldn't read her skills: {exc!r}")
             found = []
+        # only steps that act, whatever is in the file: learn_skill checks a new skill, but a patch or a hand edit
+        # could put a command line or a new number for Mum there, and a routine runs with no model and no question
+        for s in found:
+            steps = [x for x in (s["plan"] or {}).get("steps") or [] if x["do"] in ROUTINE_STEPS]
+            s["plan"] = {**s["plan"], "steps": steps} if steps else None
         _skill_cache[:] = [time.time(), found]
     return [(plain(t), s) for s in _skill_cache[1] if s["plan"] for t in s["triggers"]]
 
@@ -1545,6 +1562,13 @@ EDIT_WORDS = re.compile(r"\b(?:writ|typ|add|put|replac|chang|delet|eras|remov|pr
 ASKS_FOR = {"type": EDIT_WORDS, "keys": EDIT_WORDS, "close": re.compile(r"\b(?:close|quit|exit|kill|shut)", re.I),
             "minimise": re.compile(r"\b(?:minimi[sz]e|hide)", re.I), "lock": re.compile(r"\block", re.I),
             "sleep": re.compile(r"\bsleep", re.I)}
+# After reading the web or messages, only these go ahead without a yes, whatever the words: they show, play or look
+# things up, or ask for themselves later (a message, an install, a command's approval). Words can't count there:
+# "look up how to make biryani" would let a page's typing through, "make" being an edit word, and nothing would stop
+# a message from having her save its own number as Mum's
+READ_SAFE = {"open", "website", "youtube", "google", "media", "volume", "scroll", "new_tab", "timer", "note",
+             "open_notes", "research", "window", "screenshot", "open_folder", "abort_shutdown", "dictate", "message",
+             "install", "command"}
 # Shutting down or restarting always asks first, whoever planned it, and only runs straight after a spoken yes
 POWER_STEPS = {"shutdown", "restart"}
 POWER_OK = {"until": 0.0}
@@ -2112,6 +2136,22 @@ def _day(day):
     return day if re.fullmatch(r"\d{4}-\d\d-\d\d", day) else None
 
 
+def untrusted(found):
+    """Messages, search results and headlines with each one that tries to give her orders left out, the way web.read
+    leaves out such a page: anyone can send you a message or title a story, sender and title included."""
+    if isinstance(found, list):
+        return [untrusted(f) for f in found]
+    if isinstance(found, dict) and any(isinstance(v, (list, dict)) for v in found.values()):
+        return {k: untrusted(v) for k, v in found.items()}
+    # Hermes' plain injection phrases, with invisible characters taken out rather than counted: a facepalm emoji is
+    # joined with one, and the wider list for context files left out "Heavy rain wreaks havoc in Kerala" (a hacking
+    # tool's name) and "I'll check in with you" (malware calling home)
+    if isinstance(found, dict) and first_threat_message("".join(c for c in " ".join(map(str, found.values()))
+                                                                if c not in INVISIBLE_CHARS), scope="all"):
+        return {"left out": "it tries to give instructions"}
+    return found
+
+
 def run_info(steps, links=False):
     """The results of lookup, recall, web, read, weather, news and skill_view steps, as JSON for the model. links:
     news stories come with their links, so research can read them."""
@@ -2122,19 +2162,20 @@ def run_info(steps, links=False):
             if do == "lookup":
                 what = str(s.get("what") or "").lower()
                 if what in ("messages", "notifications"):  # on this PC, sent to the model only because they asked
-                    result = (watch.recent(12, what == "messages") or "nothing new") if settings.get("notifications") \
-                        else "Reading notifications is turned off in Settings"
+                    result = (untrusted(watch.recent(12, what == "messages")) or "nothing new") \
+                        if settings.get("notifications") else "Reading notifications is turned off in Settings"
                 else:
                     result = sysinfo.lookup(what)
                 out.append({"lookup": what, "result": result})
             elif do == "web":
-                out.append({"web": s.get("query"), "results": web.search(s.get("query"), links)})
+                out.append({"web": s.get("query"), "results": untrusted(web.search(s.get("query"), links))})
             elif do == "read":
                 out.append({"read": s.get("url"), "page": web.read(s.get("url"))})
             elif do == "weather":
                 out.append({"weather": s.get("place") or "here", "result": web.weather(s.get("place"))})
             elif do == "news":
-                out.append({"news": s.get("topic") or "top stories", "headlines": web.news(s.get("topic"), links=links)})
+                out.append({"news": s.get("topic") or "top stories",
+                            "headlines": untrusted(web.news(s.get("topic"), links=links))})
             elif do == "skill_view":
                 out.append({"skill_view": s.get("name"), "result": skills.skill_view(str(s.get("name") or ""))})
             else:
@@ -2177,30 +2218,56 @@ def confirm_question(step):
         return f"Should I press {pretty_keys(step.get('keys'))}?"
     if do == "screen":
         return say_line("screen_ask")
+    action, on = str(step.get("action") or "").lower(), step.get("on")
+    if do == "contact":  # the number itself, so a yes can't save a stranger's as Mum's
+        who = " ".join(str(step.get("alias") or "them").split())[:40]
+        handle = str(step.get("number") or step.get("username") or step.get("id") or "").strip()[:40]
+        if re.fullmatch(r"[\d\s()+.-]+", handle):  # digit by digit: she read 914035072560 as one big number once
+            handle = " ".join(re.sub(r"\D", "", handle))
+        where =messaging.say_of(messaging.app_key(step.get("app")) or step.get("app"))
+        return f"Should I forget {who}?" if action == "remove" else f"Should I save {handle} as {who} on {where}?"
+    if do == "skill":
+        name = str(step.get("name") or "that").replace("-", " ")
+        return {"delete": f"Should I delete the {name} skill?", "patch": f"Should I change the {name} skill?"}.get(
+            action, f"Should I save {name} as a skill?")
+    if do == "memory":
+        content = " ".join(str(step.get("content") or "").split())
+        return f"Should I remember “{content}”?" if action in ("", "add") and 0 < len(content) <= 60 \
+            else "Should I change what I remember?"
+    if do == "task_control":
+        return f"Should I {action or 'change'} task {step.get('id')}?"
+    if do == "dark_mode":
+        return "Should I switch dark mode?" if on in (None, "toggle") else \
+            f"Should I turn dark mode {'on' if on else 'off'}?"
     return {"close": f"Should I close {app}?", "minimise": f"Should I minimise {app}?", "lock": "Should I lock the PC?",
             "sleep": "Should I put the PC to sleep?", "shutdown": "Should I shut down the computer?",
-            "restart": "Should I restart the computer?"}.get(do, f"Should I {do}?")
+            "restart": "Should I restart the computer?", "schedule": "Should I schedule that?",
+            "cancel_timers": "Should I cancel your timers and reminders?"}.get(do, "Should I go ahead with that?")
 
 
-def needs_asking(steps, text):
+def needs_asking(steps, text, read=False):
     """The first step that changes things which these words, said without her name, didn't ask for, else None.
     Closing or minimising an app needs the words to start with it ("close it") or to name the app: a model planned
     closing Kiro for "Yeah, do you open close?" in the middle of a phone call. Looking at the screen needs her name,
-    or her to have looked in the last minute, as in "now click the second one"."""
+    or her to have looked in the last minute, as in "now click the second one". read: after reading the web or
+    messages, every step outside READ_SAFE asks, whatever the words. A yes runs the whole plan, so with a shutdown or
+    restart in it that's the one asked about, or a yes to "Should I type that?" would let it through unasked."""
     t = plain(text)
     for s in steps:
         do = s["do"]
         if do == "screen":
             ask = time.time() - LAST_SCREEN[0] > 60
+        elif do == "keys" and combo(s.get("keys")) in SAFE_KEYS:
+            ask = False
+        elif read:
+            ask = do not in READ_SAFE
         elif do in ("close", "minimise"):
             named = set(key_of(s.get("app") or "").split()) & set(t.split())
             ask = not (ASKS_FOR[do].match(t) or (named and ASKS_FOR[do].search(t)))
-        elif do == "keys" and combo(s.get("keys")) in SAFE_KEYS:
-            ask = False
         else:
             ask = do in ASKS_FOR and not ASKS_FOR[do].search(text)
         if ask:
-            return s
+            return next((p for p in steps if p["do"] in POWER_STEPS), s)
     return None
 
 
@@ -2271,9 +2338,10 @@ def think(text, gate, notify=None, sure=1.0):
     if needs_task and not any(s.get("do") in ("command", "schedule", "task_control") for s in plan["steps"]) \
             and re.search(r"\b(?:done|scheduled|queued|running|started|i(?:'ll| will)|will run)\b", str(plan.get("say") or ""), re.I):
         return make_plan(say="I couldn't add that task. Say the folder and time again.")
-    # without her name, or after reading the web or messages, which could try to steer her: changes the words
-    # didn't ask for get a yes or no first
-    risky = needs_asking(plan["steps"], text) if gate or used & {"web", "read", "news", "lookup"} else None
+    # without her name, changes the words didn't ask for get a yes or no first, and after reading the web or
+    # messages, which could try to steer her, any change does
+    read = bool(used & {"web", "read", "news", "lookup"})
+    risky = needs_asking(plan["steps"], text, read) if gate or read else None
     if risky:  # the words didn't ask for this: ask first
         print(f"  (no name and not asked for, asking first: {json.dumps(plan['steps'])})")
         return {"steps": [], "say": confirm_question(risky), "confirm": plan}
@@ -2858,9 +2926,19 @@ def set_volume(to, app=None):
     return f"{app or 'system'} {to}"
 
 
-def not_into_shell():
-    if os.path.basename(win.foreground_exe()).lower() in SHELLS:
+# Enter sends in these, so it's never pressed there: "type on my way and press enter" would send it to whichever chat
+# was open, with no read-back and no yes. A message goes only through message_send
+CHATS = {"whatsapp.exe", "whatsapp.root.exe", "telegram.exe", "signal.exe", "slack.exe", "discord.exe", "ms-teams.exe",
+         "teams.exe", "skype.exe", "element.exe", "viber.exe", "wechat.exe", "messenger.exe", "zulip.exe",
+         "mattermost.exe"}
+
+
+def not_into_shell(keys=()):
+    front = os.path.basename(win.foreground_exe()).lower()
+    if front in SHELLS:
         raise RuntimeError("I don't type into command windows")
+    if keys and keys[-1] == "enter" and front in CHATS:
+        raise RuntimeError("I only send a message after reading it back to you, so say message and who it's to")
 
 
 def press_keys(combo):
@@ -2873,7 +2951,7 @@ def press_keys(combo):
         if not part or (len(part) > 1 and not hasattr(Key, part)):
             raise RuntimeError(f"There's no {part or 'such'} key")
         names.append(part)
-    not_into_shell()
+    not_into_shell(names)
     win.press(*names)
 
 

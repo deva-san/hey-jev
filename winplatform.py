@@ -13,6 +13,7 @@ import time
 import winreg
 from ctypes import wintypes
 from functools import lru_cache
+from urllib.parse import quote
 
 # --------------------------------------------------------------------------- paths
 APPDATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Hey Jev")
@@ -719,7 +720,12 @@ def default_browser_progid():
 
 
 def open_url(url, app=None):
-    """Open a website, in a given browser if there is one, otherwise in the default browser."""
+    """Open a website, in a given browser if there is one, otherwise in the default browser. Web addresses only, with
+    quotes, spaces and control characters percent-encoded: a quote in a planned address ended the quoted argument
+    below, and the rest went to the browser as switches (Electron's CVE-2018-1000006 trick)."""
+    url = quote(str(url or "").strip(), safe=":/?#[]@!$&'()*+,;=%~")
+    if not re.match(r"https?://", url, re.I):  # never a file or a program, which os.startfile would run
+        raise RuntimeError("I only open web addresses")
     if app:
         windows = app_windows(app)
         exe = window_exe(windows[0]) if windows else ""
