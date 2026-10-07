@@ -93,6 +93,15 @@ class Schedules(unittest.TestCase):
         for repeat, hour in (("every morning at 8", 8), ("every night at 10", 22), ("everyday at 9", 9)):
             self.assertEqual(self.due(repeat=repeat)[1], {"kind": "daily", "hour": hour, "minute": 0}, repeat)
 
+    def test_relative_times_are_never_a_clock(self):
+        """'in 15 mins' was 3 PM, 'after 10 minutes' 10 AM and 'at ten thirty' 10:00."""
+        for when, secs in (("in 15 mins", 900), ("in 2 hrs", 7200), ("after 10 minutes", 600), ("in 45 min", 2700)):
+            self.assertEqual(self.due(when)[0], WED_7PM + secs, when)
+        self.assertEqual(self.due("at ten thirty")[0], at(8, 10, 30))
+        self.assertEqual(self.due("after 8 pm")[0], at(7, 20))  # a clock, as before
+        with self.assertRaises(ValueError):
+            self.due("in 5 fortnights")  # not 5 AM
+
     def test_reminder_tonight_is_local(self):
         plan = siri.quick("remind me tonight at 8 to call mum")
         step = plan["steps"][0]

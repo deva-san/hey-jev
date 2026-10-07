@@ -243,8 +243,10 @@ def _spoken(text):
     these were refused."""
     t = re.sub(r"\bhalf an? hour\b", "30 minutes", str(text).lower())
     t = re.sub(r"\bhourly\b", "every hour", t)
+    t = re.sub(r"\b(sec|min|hr)s?\b", lambda m: {"sec": "second", "min": "minute", "hr": "hour"}[m[1]], t)  # "in 15 mins"
     t = re.sub(r"\b(?:(twenty|thirty|forty|fifty)[ -])?(" + "|".join(NUMBERS) + r")\b",
                lambda m: str(NUMBERS.get(m[1], 0) + NUMBERS[m[2]]), t)
+    t = re.sub(r"\bat (\d{1,2}) ([0-5]\d)\b", r"at \1:\2", t)  # "at ten thirty" was 10:00
     t = re.sub(r"\ban? (second|minute|hour|day)\b", r"1 \1", t)
     t = re.sub(r"\bevery (second|minute|hour)\b", r"every 1 \1", t)  # "every day" stays: daily, at a time
     return re.sub(r"\b(\d+)(?: and a half)? (second|minute|hour|day)s?(?: and a half)?\b",
@@ -326,11 +328,11 @@ def normalize_schedule(when=None, repeat=None, now=None):
             except ValueError:
                 pass
         text = _spoken(text)
-        m = re.search(r"\bin\s+((?:\d+(?:\.\d+)?\s+(?:second|minute|hour|day)s?\b(?:\s+and)?\s*)+)", text)
+        m = re.search(r"\b(?:in|after)\s+((?:\d+(?:\.\d+)?\s+(?:second|minute|hour|day)s?\b(?:\s+and)?\s*)+)", text)
         if due is None and m:  # "in 1 hour 30 minutes" is both, and "in 1.5 hours" was 1 AM
             due = now_dt.timestamp() + sum(float(n) * UNITS[u] for n, u in
                                            re.findall(r"(\d+(?:\.\d+)?)\s+(second|minute|hour|day)", m[1]))
-        clock = _clock(text)
+        clock = None if re.search(r"\bin \d", text) else _clock(text)  # "in 5 fortnights" isn't 5 AM
         if due is None and clock:
             day = now_dt + dt.timedelta(days=1 if "tomorrow" in text.lower() else 0)
             if "tomorrow" in text and clock[0] < 5 and re.search(r"\bnight\b", text):
