@@ -1158,13 +1158,14 @@ MESSAGE_PATTERNS = [(re.compile(p, re.I), make) for p, make in (
 )]
 TASK_REQUEST = re.compile(r"\b(?:run (?:the )?tests?|git status|command|powershell|schedule|every (?:day|monday|tuesday|"
                           r"wednesday|thursday|friday|saturday|sunday|\d+)|daily|weekly|tomorrow at|remind me at)\b", re.I)
-SCHEDULE_TIME = r"\d{1,2}(?::\d\d)?\s*(?:am|pm)?"
+SCHEDULE_TIME = r"(?:\d{1,2}(?::\d\d)?\s*(?:am|pm)?|midnight|noon)"
 SCHEDULE_NUMBER = r"(?:\d+|one|two|three|four|five|ten|fifteen|thirty)"
 SCHEDULE_DAY = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
 REPEAT_PREFIX = re.compile(rf"^(?P<repeat>(?:every (?:(?:{SCHEDULE_NUMBER}) (?:minutes?|hours?|days?)|"
                            rf"(?:{SCHEDULE_DAY}) at {SCHEDULE_TIME}|day at {SCHEDULE_TIME})|"
                            rf"daily at {SCHEDULE_TIME})) (?P<action>.+)$", re.I)
-WHEN = rf"(?:tomorrow at {SCHEDULE_TIME}|(?:on )?{SCHEDULE_DAY} at {SCHEDULE_TIME}|at {SCHEDULE_TIME})"
+WHEN = (rf"(?:(?:(?:tomorrow|today)(?: morning| afternoon| evening| night)?|tonight|this (?:morning|afternoon|evening))"
+        rf" at {SCHEDULE_TIME}|(?:on )?{SCHEDULE_DAY} at {SCHEDULE_TIME}|at {SCHEDULE_TIME}(?: tonight| today| tomorrow)?)")
 
 
 def scheduled_payload(action):

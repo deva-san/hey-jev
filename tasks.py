@@ -225,18 +225,37 @@ class Store:
 # --------------------------------------------------------------------------- schedules
 WEEKDAYS = {name: i for i, name in enumerate(("monday", "tuesday", "wednesday", "thursday", "friday",
                                                "saturday", "sunday"))}
-NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
-           "eight": 8, "nine": 9, "ten": 10, "twelve": 12, "fifteen": 15, "thirty": 30}
+NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+           "ten": 10, "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50}
 UNITS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
 
 
 def _number(text):
     text = str(text).lower()
-    return int(text) if text.isdigit() else NUMBERS.get(text)
+    return float(text) if re.fullmatch(r"\d+(?:\.\d+)?", text) else NUMBERS.get(text)
+
+
+def _spoken(text):
+    """Times as people say them, the way the patterns below read them: 'in half an hour' -> 'in 30 minutes', 'in an
+    hour and a half' -> 'in 1.5 hours', 'every hour' or 'hourly' -> 'every 1 hour', 'twenty five' -> '25'. All of
+    these were refused."""
+    t = re.sub(r"\bhalf an? hour\b", "30 minutes", str(text).lower())
+    t = re.sub(r"\bhourly\b", "every hour", t)
+    t = re.sub(r"\b(?:(twenty|thirty|forty|fifty)[ -])?(" + "|".join(NUMBERS) + r")\b",
+               lambda m: str(NUMBERS.get(m[1], 0) + NUMBERS[m[2]]), t)
+    t = re.sub(r"\ban? (second|minute|hour|day)\b", r"1 \1", t)
+    t = re.sub(r"\bevery (second|minute|hour)\b", r"every 1 \1", t)  # "every day" stays: daily, at a time
+    return re.sub(r"\b(\d+)(?: and a half)? (second|minute|hour|day)s?(?: and a half)?\b",
+                  lambda m: f"{m[1]}.5 {m[2]}s" if "half" in m[0] else m[0], t)
 
 
 def _clock(text):
-    m = re.search(r"\b(\d{1,2})(?::(\d\d))?\s*(am|pm)?\b", str(text), re.I)
+    text = str(text).lower()
+    if re.search(r"\bmidnight\b", text):
+        return 0, 0
+    if re.search(r"\b(?:noon|midday)\b", text):
+        return 12, 0
+    m = re.search(r"\b(\d{1,2})(?::(\d\d))?\s*(am|pm)?\b", text)
     if not m:
         return None
     hour, minute, meridiem = int(m[1]), int(m[2] or 0), (m[3] or "").lower()
@@ -244,6 +263,8 @@ def _clock(text):
         if not 1 <= hour <= 12:
             return None
         hour = hour % 12 + (12 if meridiem == "pm" else 0)
+    elif 0 < hour < 12 and re.search(r"\b(?:tonight|night|evening|afternoon)\b", text):
+        hour += 12  # "tonight at 8" was 8 the next morning
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
         return None
     return hour, minute
@@ -272,10 +293,10 @@ def normalize_schedule(when=None, repeat=None, now=None):
                 if kind == "weekly":
                     spec["weekday"] = weekday
     elif r:
-        text = str(r).lower().strip()
-        m = re.search(r"every\s+(\d+|" + "|".join(NUMBERS) + r")\s+(seconds?|minutes?|hours?|days?)", text)
+        text = _spoken(r).strip()
+        m = re.search(r"every\s+(\d+(?:\.\d+)?|" + "|".join(NUMBERS) + r")\s+(seconds?|minutes?|hours?|days?)", text)
         if m:
-            seconds = _number(m[1]) * UNITS[m[2].rstrip("s")]
+            seconds = int(_number(m[1]) * UNITS[m[2].rstrip("s")])
             if seconds >= 60:
                 spec = {"kind": "interval", "seconds": seconds}
         else:
@@ -283,7 +304,7 @@ def normalize_schedule(when=None, repeat=None, now=None):
             weekday = next((i for name, i in WEEKDAYS.items() if name in text), None)
             if weekday is not None and clock:
                 spec = {"kind": "weekly", "weekday": weekday, "hour": clock[0], "minute": clock[1]}
-            elif ("daily" in text or "every day" in text) and clock:
+            elif clock and re.search(r"\b(?:daily|every)\b", text):  # "every day at 9", "every midnight"
                 spec = {"kind": "daily", "hour": clock[0], "minute": clock[1]}
     if repeat and spec is None:
         raise ValueError("I couldn't understand how often")
@@ -298,9 +319,11 @@ def normalize_schedule(when=None, repeat=None, now=None):
                 due = dt.datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
             except ValueError:
                 pass
-        m = re.search(r"\bin\s+(\d+|" + "|".join(NUMBERS) + r")\s+(seconds?|minutes?|hours?|days?)", text, re.I)
-        if due is None and m:
-            due = now_dt.timestamp() + _number(m[1]) * UNITS[m[2].lower().rstrip("s")]
+        text = _spoken(text)
+        m = re.search(r"\bin\s+((?:\d+(?:\.\d+)?\s+(?:second|minute|hour|day)s?\b(?:\s+and)?\s*)+)", text)
+        if due is None and m:  # "in 1 hour 30 minutes" is both, and "in 1.5 hours" was 1 AM
+            due = now_dt.timestamp() + sum(float(n) * UNITS[u] for n, u in
+                                           re.findall(r"(\d+(?:\.\d+)?)\s+(second|minute|hour|day)", m[1]))
         clock = _clock(text)
         if due is None and clock:
             day = now_dt + dt.timedelta(days=1 if "tomorrow" in text.lower() else 0)

@@ -46,5 +46,40 @@ class Durations(unittest.TestCase):
             self.assertEqual((step["when"], step["task"]["text"]), ("in 300 seconds", "call mum"), said)
 
 
+class Schedules(unittest.TestCase):
+    """P2: normalize_schedule read 'tonight at 8' as 8 tomorrow morning and refused everyday phrasings."""
+
+    def due(self, when="", repeat=None):
+        return tasks.normalize_schedule(when, repeat, WED_7PM)
+
+    def test_evening_words_mean_pm(self):
+        for when in ("tonight at 8", "this evening at 8", "at 8 tonight"):
+            self.assertEqual(self.due(when)[0], at(7, 20), when)
+        self.assertEqual(self.due("tomorrow evening at 7")[0], at(8, 19))
+        self.assertEqual(self.due("tomorrow at 6 PM")[0], at(8, 18))  # unchanged
+        self.assertEqual(self.due("this morning at 9")[0], at(8, 9))  # gone already: the next one
+
+    def test_spoken_relative_times(self):
+        for when, secs in (("in twenty minutes", 1200), ("in an hour", 3600), ("in half an hour", 1800),
+                           ("in a minute", 60), ("in twenty five minutes", 1500), ("in 2 hours", 7200)):
+            self.assertEqual(self.due(when)[0], WED_7PM + secs, when)
+
+    def test_midnight_and_noon(self):
+        self.assertEqual(self.due("at midnight")[0], at(8, 0))
+        self.assertEqual(self.due("tomorrow at noon")[0], at(8, 12))
+        due, spec = self.due(repeat="every midnight")
+        self.assertEqual((due, spec), (at(8, 0), {"kind": "daily", "hour": 0, "minute": 0}))
+        self.assertEqual(self.due(repeat="every day at midnight")[1], {"kind": "daily", "hour": 0, "minute": 0})
+
+    def test_iso_still_works(self):
+        self.assertEqual(self.due("2026-10-07T18:00:00")[0], at(7, 18))
+
+    def test_reminder_tonight_is_local(self):
+        plan = siri.quick("remind me tonight at 8 to call mum")
+        step = plan["steps"][0]
+        self.assertEqual((step["do"], step["task"]["text"]), ("schedule", "call mum"))
+        self.assertEqual(self.due(step["when"])[0], at(7, 20))
+
+
 if __name__ == "__main__":
     unittest.main()
