@@ -12,11 +12,12 @@ import html
 import ipaddress
 import json
 import re
+import socket
 import threading
 import time
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -26,6 +27,9 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
                     "Chrome/141.0 Safari/537.36", "Accept-Language": "en-IN,en;q=0.9"}
 S = requests.Session()
 MAX_PAGE = 1_500_000  # bytes of a page read at most, so a huge page can't hold her up
+# seconds a search waits for its sources, all together, before answering with what's come: each source's timeout
+# counts per read, and the waits used to add up, 11 to 13 s on 7 October. Research has the links to work out too
+SEARCH_WAIT = 5.0
 _cache = {}  # what was looked up lately: (kind, key) -> (when, result)
 
 
@@ -77,14 +81,20 @@ def search(query, links=False):
                     failed.append(key)
             threads.append(threading.Thread(target=run, daemon=True))
             threads[-1].start()
+        end = time.time() + (4 * SEARCH_WAIT if links else SEARCH_WAIT)
         for t in threads:
-            t.join(9)
+            t.join(max(0.0, end - time.time()))
+        late[:] = [t for t in threads if t.is_alive()]
         found = {k: out[k] for k in jobs if out.get(k)}
         if not found:
-            raise RuntimeError("I couldn't look it up, the internet may be down" if len(failed) == len(jobs) else
-                               "Nothing came up for that, try other words")
+            raise RuntimeError("I couldn't look it up, the internet may be down" if len(failed) + len(late) == len(jobs)
+                               else "Nothing came up for that, try other words")
         return found
-    return _cached("search", (query.lower(), links), 600, make)
+    late = []
+    found = _cached("search", (query.lower(), links), 600, make)
+    if late:  # a source that was slow this time isn't left out for the next ten minutes
+        _cache.pop(("search", (query.lower(), links)), None)
+    return found
 
 
 # --------------------------------------------------------------------------- reading a page
@@ -128,16 +138,32 @@ class _Reader(HTMLParser):
 
 
 def _public(url):
-    """Only web addresses on the internet, never this PC or the home network."""
+    """Only web addresses on the internet, never this PC or the home network. A name counts by where it points, since
+    names like 127.0.0.1.nip.io or localtest.me point straight back here; one that doesn't point anywhere doesn't."""
     p = urlparse(url)
     host = (p.hostname or "").lower()
     if p.scheme not in ("http", "https") or not host or host == "localhost" or host.endswith((".local", ".lan")):
         return False
     try:
-        ip = ipaddress.ip_address(host)
-        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved)
-    except ValueError:
-        return True
+        ips = [ipaddress.ip_address(str(a[4][0]).split("%")[0])
+               for a in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)]
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return bool(ips) and all(ip.is_global and not ip.is_multicast for ip in ips)
+
+
+def _get(url):
+    """A page, its redirects followed only to addresses on the internet. Each is checked before it's asked for:
+    requests would follow one to the router first, and only then could its address be checked."""
+    for _ in range(6):
+        r = S.get(url, headers=UA, timeout=10, stream=True, allow_redirects=False)
+        if not r.is_redirect:
+            return r
+        r.close()
+        url = urljoin(r.url, r.headers["location"])
+        if not _public(url):  # it sent her somewhere on this PC or the home network
+            raise RuntimeError("I only read pages on the internet")
+    raise requests.TooManyRedirects(f"more than 5 redirects from {url}")
 
 
 def _story(url):
@@ -172,10 +198,8 @@ def read(url, limit=5000):
 
     def make():
         try:
-            with S.get(url, headers=UA, timeout=10, stream=True) as r:
+            with _get(url) as r:
                 r.raise_for_status()
-                if not _public(r.url):  # it sent her somewhere on this PC or the home network
-                    raise RuntimeError("I only read pages on the internet")
                 data = b""
                 for chunk in r.iter_content(65536):
                     data += chunk

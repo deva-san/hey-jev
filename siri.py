@@ -1485,7 +1485,7 @@ Reply with one JSON object and nothing else: {"steps": [...], "say": "..."}
 {"do":"keys","keys":"ctrl+w"}  a shortcut in the app in front: ctrl+t new tab, ctrl+w close tab, alt+left back, f5 reload, f full screen on YouTube. Never the Windows key
 {"do":"type","text":"..."}  only when they ask you to write or type something: write the real text, it goes where the cursor is
 {"do":"new_tab"}  a new tab in their browser
-{"do":"timer","seconds":300,"label":"Tea","alert":"Hey, your tea's ready."}  a timer or a reminder, the alert is said when it ends
+{"do":"timer","seconds":300,"label":"Tea","alert":"Hey, your tea's ready."}  a timer or a reminder, the alert is said when it ends. Give it a label and alert only if they say what it's for
 {"do":"cancel_timers"}  {"do":"dark_mode","on":true}  {"do":"lock"}  {"do":"sleep"}  {"do":"shutdown"}  {"do":"restart"}  {"do":"abort_shutdown"}  {"do":"dictate"}  dictate writes down what they say next, until they say stop transcribing
 {"do":"screen","task":"click the second video on the page"}  look at their screen and do this, or answer it: what's on the screen, read or sum up this page, click, pick or fill in something you'd have to see. Write the task in full. It can come after steps that open something. Use it with "say" ""
 {"do":"memory","action":"add","target":"user","content":"Their website CareerID is careerid.in"}  save to your memory. action add, replace or remove. target user (who they are: names, sites, people, apps, likes, words) or memory (your own notes, like what works on this PC). replace and remove find the entry by "old_text", a few words from it
@@ -1557,6 +1557,17 @@ ROUNDS = 4  # how many times it can look things up before it has to answer: sear
 LOOKING = {"web": "Searching the web\u2026", "read": "Reading it\u2026", "weather": "Checking the weather\u2026",
            "news": "Getting the news\u2026", "skill_view": "Remembering how\u2026", "recall": "Remembering\u2026",
            "lookup": "Looking it up\u2026"}
+# Words that ask for a command or a schedule, at the start once plain() has taken "can you" off: "run the tests in
+# ...", "every Monday at 9 check my C drive", "git status in hey-jev". TASK_REQUEST anywhere also caught questions and
+# talk about one, "what's the PowerShell command to list files?", "I will schedule the call with Ravi", and forced a
+# second request on them
+TASK_ASKED = re.compile(r"(?:run|check|schedule|remind|research|set|start|queue|create|add|make|execute|do (?:that|it)|"
+                        r"every|daily|weekly|tomorrow|at|git)\b")
+# Overheard words that ask her to remember or forget something, or to note it ("I need you to remember ..."), not
+# someone saying "I remember ...", "I still remember", "we need to remember" or "do you remember": room talk put
+# "Nine to Kerawal" in her memory on 6 October
+REMEMBER = re.compile(r"^(?!.*\b(?:i|we|he|she|they|you)(?:'\w+)? (?:(?!(?<=\byou )to\b)[\w']+ ){0,2}"
+                      r"(?:remember|forget)\b).*\b(?:remember|forget|keep in mind|note (?:that|this|it|down))\b")
 HEDGE_AFTER = 2.5  # the free model usually answers in 1 to 3 s but now and then takes 8 or more, so then ask again
 # On her own prompt in October 2026: Ling 3.0 Flash Sante on Kilo 1.8 to 2.2 s (median of 5), space-bunny on
 # OpenCode 3.6 to 3.7 s. Cohere's North Mini Code, Step 3.7 Flash and Nemotron 3 Super were slower or timed out
@@ -1755,12 +1766,17 @@ words: speech-to-text mistakes they corrected, {"RightWord": ["what speech-to-te
 Signs there's something to learn: they corrected her ("no", "not that", "I said", "I meant"), were annoyed, said "remember", or a task took several steps. Most reviews find nothing: then reply {"memory": [], "skills": [], "words": {}}."""
 CORRECTION = re.compile(r"(?:no|nope|not that|wrong|that's wrong|i said|i meant|actually|i told you|you got it wrong|"
                         r"not this|that's not)\b")
-_learning = {"turns": 0, "last": 0.0, "lock": threading.Lock()}
+_learning = {"turns": 0, "last": 0.0, "lock": threading.Lock(), "overheard": collections.deque(maxlen=20)}
 
 
-def learn_later(words, steps, failed):
+def learn_later(words, steps, failed, gate=False):
     """Hermes Agent's learning loop, lightly: after a turn worth learning from (a correction, a task of several steps,
-    something that failed, or every 6 turns), a look back over the last few turns in the background."""
+    something that failed, or every 6 turns), a look back over the last few turns in the background. Words overheard
+    without her name that she only answered don't count, and the look back leaves them out: on 6 and 7 October room
+    talk she'd answered was put in her memory as facts about you."""
+    if gate == "cold" and not steps:
+        _learning["overheard"].append(words)
+        return
     _learning["turns"] += 1
     worth = CORRECTION.match(plain(words)) or failed or len(steps) >= 3 or \
         any(s.get("do") in ("screen", "skill") for s in steps) or _learning["turns"] >= 6
@@ -1777,7 +1793,7 @@ def review(wait=20):
     try:
         time.sleep(wait)  # after the next turn or two, so it sees how things went
         who = " ".join(str(settings.get("name") or "").split()) or "They"
-        lines, turns = [], history.recent(10, 1800)
+        lines, turns = [], [t for t in history.recent(10, 1800) if t[1] not in _learning["overheard"]]
         for _, said, plan_json in turns:
             try:
                 p = json.loads(plan_json or "{}")
@@ -1874,7 +1890,10 @@ def learn_words(words, said=()):
 def context():
     """What's going on now, for the model: the time, the app in front, what's playing, timers, the browser profiles
     and their own dictionary words."""
-    lines = [f"Now: {time.strftime('%A %d %B %Y')}, {clock()}. In front: {win.front_app_name() or 'nothing'}.",
+    off = time.localtime().tm_gmtoff // 60  # the zone too: it got New York's time wrong 2 times in 3 without it
+    zone = f"UTC{'-' if off < 0 else '+'}{abs(off) // 60:02d}:{abs(off) % 60:02d}"
+    lines = [f"Now: {time.strftime('%A %d %B %Y')}, {clock()} ({zone}, work other places' times out from it). "
+             f"In front: {win.front_app_name() or 'nothing'}.",
              f"Their apps: {', '.join(sorted(set(APP_SAY.values())))}."]  # so "open prone" can be Chrome
     if settings.get("name"):
         lines.append(f"Their name is {settings.get('name')}. Use it now and then, the way a person would, not in every "
@@ -1930,8 +1949,22 @@ def one_window(steps):
     return out
 
 
-TOOL_CALL = re.compile(r"<tool_call>\s*([\w.-]+)(.*?)(?:</tool_call>|\Z)", re.S)  # the end tag is left off now and then
-TOOL_ARG = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.S)
+# The end tag is left off now and then, or is </invoke>, so a call also ends where the next one starts: a "say" call
+# after the steps once went into them
+TOOL_CALL = re.compile(r"<tool_call>\s*([\w.-]+)(.*?)(?:</tool_call>|</invoke>|(?=<tool_call>)|\Z)", re.S)
+TOOL_ARG = re.compile(r"<arg_key>([^<]*)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.S)
+# Ling also writes them a line each: task="click the second video"</arg_value>, at times without the closing quote, or
+# task={"kind": "reminder", "text": "call Mum"}
+TOOL_ATTR = re.compile(r"^[ \t]*(\w+)[ \t]*=[ \t]*(.*?)[ \t]*(?:</arg_value>)?[ \t]*$", re.M)
+# Every step she can take: the ones PROMPT, RESEARCH and VISION_PROMPT list, and the rest do_step knows. Any other name
+# is a misreading, left out so she doesn't say "I can't Here yet": prose in a tool call once came out as {"do": "Here"},
+# and a broken one as {"do": "do"}
+KNOWN_STEPS = {"open", "close", "minimise", "website", "youtube", "google", "media", "volume", "scroll", "keys", "type",
+               "new_tab", "timer", "cancel_timers", "dark_mode", "lock", "sleep", "shutdown", "restart", "abort_shutdown",
+               "dictate", "screen", "memory", "lookup", "recall", "web", "read", "weather", "news", "skill_view",
+               "skill", "research", "note", "open_notes", "command", "schedule", "install", "message", "contact",
+               "task_control", "window", "open_folder", "screenshot", "message_send", "install_run", "task_queued",
+               "click", "wait"}
 
 
 def _arg(value):
@@ -1943,6 +1976,27 @@ def _arg(value):
         return value
 
 
+def _attr(value):
+    """A value written task="...": the text inside the quotes, even without the closing one. Else as _arg."""
+    value = value.strip()
+    if not value.startswith('"'):
+        return _arg(value)
+    value = value if len(value) > 1 and value.endswith('"') else value + '"'
+    try:
+        return json.loads(value)
+    except ValueError:
+        return value[1:-1]
+
+
+def _known(steps):
+    """The well-formed steps, mended (see _mend), without names there are no steps for."""
+    steps = [_mend(s) for s in steps if isinstance(s, dict) and isinstance(s.get("do"), str) and s["do"]]
+    unknown = [s["do"] for s in steps if s["do"] not in KNOWN_STEPS]
+    if unknown:
+        print(f"  no such steps, left out: {', '.join(unknown)}")
+    return one_window([s for s in steps if s["do"] in KNOWN_STEPS])
+
+
 def parse_plan(raw):
     """The model's JSON plan, with only well-formed steps. Plain words become something to say. JSON it got a bit
     wrong is mended ("x":73", once), else it's marked broken, so she never reads code out loud."""
@@ -1950,18 +2004,38 @@ def parse_plan(raw):
     calls = TOOL_CALL.findall(raw)
     if calls:  # Ling's own way of asking for a step: <tool_call>skill_view<arg_key>name</arg_key>...</tool_call>
         steps = []  # (a single step's JSON parses to a dict with "do" and no "steps", see below)
-        said = TOOL_CALL.sub("", raw).strip()
+        said = re.sub(r"</?\w+>", "", TOOL_CALL.sub("", raw)).strip()  # and a </tool_call> left after </invoke>
         for do, args in calls:
-            if "{" in args and "}" in args:  # <tool_call>do {"do": "memory", ...}</tool_call>: the plan itself
-                inner = parse_plan(args[args.index("{"):args.rindex("}") + 1])
+            pairs = TOOL_ARG.findall(args)  # a value can be JSON too: <arg_key>task</arg_key><arg_value>{"kind": ...
+            step = {"do": do, **({k.strip(): _arg(v) for k, v in pairs} if pairs else
+                                 {k: _attr(v) for k, v in TOOL_ATTR.findall(args)})}
+            text, known = re.sub(r"</?\w+>", "", args).strip(), _mend({"do": do})["do"] in KNOWN_STEPS
+            # <arg_key>steps</arg_key><arg_value>[...]: the plan itself. But a skill's steps are its own: "when I say
+            # work mode, ..." opened Gmail and set the volume on 7 October instead of saving the routine
+            if isinstance(step.get("steps"), list) and do != "skill":
+                steps += step["steps"]
+                said = said or str(step.get("say") or "")
+            elif do == "say":  # <tool_call>say Opening Chrome now.</invoke>, or text="...": what to say, not a step
+                said = said or " ".join(str(v) for k, v in step.items() if k != "do").strip() or text
+            elif len(step) > 1:
+                steps.append(step)
+            elif "{" in args and "}" in args:
+                body = args[args.index("{"):args.rindex("}") + 1]
+                try:
+                    inner = json.loads(body)
+                except ValueError:
+                    inner = None
+                if isinstance(inner, dict) and known and "do" not in inner and (do == "skill" or "steps" not in inner):
+                    steps.append({"do": do, **inner})  # <tool_call>schedule {"when": ...: its arguments, not a plan
+                    continue
+                inner = parse_plan(body)  # <tool_call>do {"do": "memory", ...}</tool_call>: the plan itself
                 steps += inner.get("steps") or []
                 said = said or str(inner.get("say") or "")
-                continue
-            step = {"do": do.strip()}
-            step.update({k.strip(): _arg(v) for k, v in TOOL_ARG.findall(args)})
-            steps.append(step)
-        return {"steps": one_window([_mend(s) for s in steps if isinstance(s, dict) and s.get("do")]),
-                "say": said if "{" not in said else ""}
+            elif known or not text:
+                steps.append(step)  # <tool_call>recall</tool_call>
+            else:  # prose wrapped in a tool call: <tool_call>Here are the top stories...</tool_call>
+                said = said or re.sub(r"</?\w+>", "", do + args).strip()
+        return {"steps": _known(steps), "say": said if "{" not in said else ""}
     if "{" in raw and "}" in raw:
         body = raw[raw.index("{"):raw.rindex("}") + 1]
         mended = re.sub(r",\s*([}\]])", r"\1", re.sub(r'(:\s*-?\d+(?:\.\d+)?)"(?=\s*[,}\]])', r"\1", body))
@@ -1997,7 +2071,7 @@ def parse_plan(raw):
     if plan.get("do") and "steps" not in plan:  # one step on its own: {"do": "skill_view", "name": "..."}
         plan = {"steps": [{k: v for k, v in plan.items() if k != "say"}], "say": plan.get("say") or ""}
     steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
-    plan["steps"] = one_window([_mend(s) for s in steps if isinstance(s, dict) and s.get("do")])
+    plan["steps"] = _known(steps)
     return plan
 
 
@@ -2009,14 +2083,25 @@ def _mend(step):
     return step
 
 
-def ask_plan(messages, **kw):
-    """(raw, plan, usage, model): ask_model and parse_plan, asking once more if the JSON came back broken."""
+def ask_plan(messages, again=True, deadline=DEADLINE, **kw):
+    """(raw, plan, usage, model): ask_model and parse_plan, asking once more, in the time that's left, if the JSON came
+    back broken, or with again if nothing did: no reply, or only steps there are none of. 6 of 102 live turns on
+    7 October came back empty after 2 to 19 s, and each would have been "Sorry, could you say that again?"."""
+    end, first = time.time() + deadline, None
     for attempt in (1, 2):
-        raw, usage, model = ask_model(messages, **kw)
+        try:
+            raw, usage, model = ask_model(messages, deadline=end - time.time(), **kw)
+        except Exception:
+            if first is None:
+                raise
+            return first  # the second try failed or ran out of time: the first answer it is
         plan = parse_plan(raw)
-        if not plan.get("broken") or attempt == 2:
+        empty = again and not plan["steps"] and not str(plan.get("say") or "").strip() and set(plan) <= {"steps", "say"}
+        if attempt == 2 or not (plan.get("broken") or empty) or end - time.time() < 3.0:
             return raw, plan, usage, model
-        print(f"  broken JSON from {model}, asking again: {raw[:120]!r}")
+        first = raw, plan, usage, model
+        print(f"  {'broken JSON' if plan.get('broken') else 'nothing to do or say'} from {model}, asking again: "
+              f"{raw[:120]!r}")
 
 
 def _day(day):
@@ -2134,22 +2219,31 @@ def think(text, gate, notify=None, sure=1.0):
     # said as an overheard line, not to her: asked straight, a model answered "Why are you so late today?" anyway
     messages.append({"role": "user", "content": (OVERHEARD if gate == "cold" else "") + text + unsure})
     used = set()  # what was looked up, for the asking-first rule below
-    needs_task, task_retry = bool(TASK_REQUEST.search(text)), False
+    needs_task, task_retry = bool(TASK_REQUEST.search(text) and TASK_ASKED.match(plain(text))), False
+    # "Google when is the next India match." is a question too, after the word Google, as _search reads it
+    googled = re.fullmatch(r"(?:google|search(?: google)?(?: for| about)?|look up) (?P<q>.+?)(?: on google)?",
+                           plain(text))
     for round_ in range(ROUNDS + 1):
         t = time.time()
-        raw, plan, usage, model = ask_plan(messages, deadline=DEADLINE if round_ == 0 else 14.0)
+        raw, plan, usage, model = ask_plan(messages, again=not gate, deadline=DEADLINE if round_ == 0 else 14.0)
+        if gate and str(plan.get("to") or "").strip().lower() not in ("", "you", "jev", "me", "assistant"):
+            plan["ignore"] = True  # {"to": "others"}, see COLD_NOTE
         task_steps = [s for s in plan["steps"] if s.get("do") in ("command", "schedule", "task_control")]
-        if needs_task and not task_steps and not plan.get("ignore") and not task_retry:
+        # never over "to others", or for overheard words at all: who they were for is the model's call. Not before its
+        # lookups either, or once it has answered from the weather or the web ("check the weather tomorrow at 6"), or
+        # while it asks which folder or time
+        if needs_task and not (task_steps or task_retry or plan.get("ignore") or gate == "cold") \
+                and not any(s["do"] in INFO for s in plan["steps"]) and not used & {"web", "read", "weather", "news"} \
+                and not str(plan.get("say") or "").rstrip().endswith("?"):
             task_retry = True
             messages += [{"role": "assistant", "content": raw},
                          {"role": "user", "content": "You didn't create the command or schedule. Use the fixed "
                           "command or schedule step now. If a required folder or time is missing, ask for that; never "
                           "claim it was scheduled or run without a step."}]
             continue
-        if gate and str(plan.get("to") or "").strip().lower() not in ("", "you", "jev", "me", "assistant"):
-            plan["ignore"] = True  # {"to": "others"}, see COLD_NOTE
         searches = [s for s in plan["steps"] if s.get("do") == "google"]
-        if searches and len(searches) == len(plan["steps"]) and round_ < ROUNDS and wants_spoken(text):
+        if searches and len(searches) == len(plan["steps"]) and round_ < ROUNDS \
+                and (wants_spoken(text) or bool(googled) and wants_spoken(googled["q"], text)):
             # a question, and all it planned was opening Google: look it up instead and answer out loud, which is what
             # Hari asked for. The model did that anyway 3 times in a row on 7 October
             plan["steps"] = [{"do": "web", "query": str(s.get("query") or text)} for s in searches[:1]]
@@ -2170,6 +2264,10 @@ def think(text, gate, notify=None, sure=1.0):
           f"{usage.get('completion_tokens', '?')} tokens  $0 (free)")
     if plan.get("ignore"):
         return None if gate else make_plan(say=say_line("not_caught"))
+    if gate == "cold" and any(s["do"] == "memory" for s in plan["steps"]) and not REMEMBER.search(plain(text)):
+        plan["steps"] = [s for s in plan["steps"] if s["do"] != "memory"]
+        if not plan["steps"]:  # and not "Okay, I'll remember that" without remembering it
+            return None
     if needs_task and not any(s.get("do") in ("command", "schedule", "task_control") for s in plan["steps"]) \
             and re.search(r"\b(?:done|scheduled|queued|running|started|i(?:'ll| will)|will run)\b", str(plan.get("say") or ""), re.I):
         return make_plan(say="I couldn't add that task. Say the folder and time again.")
@@ -3355,6 +3453,14 @@ def asked_last(within=FOLLOW_UP + 20):
         return False
 
 
+# How a model says out loud that the words weren't for her, instead of {"to": "others"}: 20 times on 6 and 7 October,
+# "That sounded like he was talking to someone else in the room", "That was to others, Hari, not to me". Not an answer
+# that only mentions someone else's: "It's someone else's number", "That's not for me to judge, but ..."
+NOT_FOR_ME = re.compile(r"\b(?:(?:for|to|like) someone else\b(?!')|to others|(?:not|wasn't|was not|isn't|is not) "
+                        r"(?:meant |a request |said )?(?:for|to) me\b(?! to\b)|(?:talking|speaking) to "
+                        r"(?:someone|a person|people|each other))\b", re.I)
+
+
 def let_go(plan):
     """Why to stay quiet about a plan for words said without her name, or None to go ahead. A plan she'd ask about
     first counts by the steps it would take."""
@@ -3364,6 +3470,9 @@ def let_go(plan):
         return "and nothing to do"
     if not steps and REPEAT_ASK.search(said):
         return "and it wasn't clear"
+    # but not "I thought you were talking to someone else, so I stayed quiet. What's up?"
+    if not steps and NOT_FOR_ME.search(said) and not re.search(r"\?|\byou were\b", said):
+        return "and it wasn't for her"
     # unless the mic is in speech mode, which takes what the PC plays out of it, so a video can't be heard as you
     if not (steps and all(s.get("do") in PLAYBACK for s in steps)) and media_playing() \
             and not (MIC[0] is not None and MIC[0].echo_cancelled):
@@ -3475,7 +3584,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
                     " ".join(spoken), json.dumps({**kept, "failed": failed} if failed else kept, ensure_ascii=False))
     except Exception as exc:
         print(f"  couldn't keep this turn: {exc!r}")
-    learn_later(words or text, [s for s in kept["steps"] if isinstance(s, dict)], failed)
+    learn_later(words or text, [s for s in kept["steps"] if isinstance(s, dict)], failed, gate)
     note = note or voice_error
     emit(notify, "Something went wrong" if note else "Ready", note or kept["say"] or describe(kept["steps"]) or "Done")
     if dictate:

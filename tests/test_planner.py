@@ -1,0 +1,491 @@
+"""The model path: parse_plan, ask_plan, think, let_go, the learning loop, and web.py's search and read. The model, the
+web and the PC are all stubbed: nothing goes online or acts."""
+import json
+import time
+import unittest
+from unittest.mock import patch
+from urllib.parse import urljoin
+
+from tests.support import siri
+
+import web  # noqa: E402
+
+
+class FakeModel:
+    """ask_model's stand-in: the replies in turn (the last one again once they run out), and what it was asked."""
+
+    def __init__(self, *replies):
+        self.replies, self.calls = list(replies), []
+
+    def __call__(self, messages, **kw):
+        self.calls.append(([dict(m) for m in messages], kw))
+        reply = self.replies[min(len(self.calls), len(self.replies)) - 1]
+        return reply, {"completion_tokens": 1}, "fake-model"
+
+
+class Turn(unittest.TestCase):
+    """think() with nothing around it: no skills, memory, history or PC context."""
+
+    def setUp(self):
+        # focused_on reads the real window in front: YouTube there makes every search a YouTube one
+        for name, value in (("skills_block", ""), ("memory_block", ""), ("context", ""), ("soul", "You are Jev."),
+                            ("focused_on", False)):
+            p = patch.object(siri, name, lambda *a, _v=value, **k: _v)
+            p.start()
+            self.addCleanup(p.stop)
+        p = patch.object(siri.history, "recent", lambda *a, **k: [])
+        p.start()
+        self.addCleanup(p.stop)
+        self.looked = []
+        p = patch.object(siri, "run_info", lambda steps, links=False: self.looked.append(steps) or "[]")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def think(self, text, gate, *replies):
+        self.model = FakeModel(*replies)
+        with patch.object(siri, "ask_model", self.model):
+            return siri.think(text, gate)
+
+    def asked_again(self):
+        return [m for m, _ in self.model.calls if any("didn't create the command" in str(x.get("content"))
+                                                      for x in m)]
+
+
+class CommandRetry(Turn):
+    """A11: the command/schedule retry is only for words that ask for one, and never overrides "to others"."""
+
+    def test_overheard_talk_about_a_schedule_is_let_go_in_one_request(self):
+        plan = self.think("I will schedule the call with Ravi for tomorrow at 5", "cold", '{"to": "others"}',
+                          '{"to": "you", "steps": [{"do": "schedule", "when": "tomorrow at 5 PM", "repeat": "", '
+                          '"description": "Call with Ravi", "task": {"kind": "reminder", "text": "call Ravi"}}]}')
+        self.assertIsNone(plan)
+        self.assertEqual(len(self.model.calls), 1)
+
+    def test_a_question_about_a_command_keeps_its_answer(self):
+        plan = self.think("what's the PowerShell command to list files", False,
+                          '{"steps": [], "say": "It\'s Get-ChildItem. I will spell it out if you like."}')
+        self.assertEqual(len(self.model.calls), 1)
+        self.assertEqual(plan["say"], "It's Get-ChildItem. I will spell it out if you like.")
+
+    def test_a_weather_question_with_tomorrow_at_gets_its_lookup(self):
+        plan = self.think("what will the weather be like tomorrow at 6", False,
+                          '{"steps": [{"do": "weather", "place": ""}], "say": ""}',
+                          '{"steps": [], "say": "Clear and about 24 degrees at 6."}')
+        self.assertEqual(self.looked, [[{"do": "weather", "place": ""}]])
+        self.assertEqual(self.asked_again(), [])
+        self.assertEqual(plan["say"], "Clear and about 24 degrees at 6.")
+
+    def test_checking_the_weather_tomorrow_at_keeps_its_answer(self):
+        plan = self.think("check the weather tomorrow at 6", False,
+                          '{"steps": [{"do": "weather", "place": ""}], "say": ""}',
+                          '{"steps": [], "say": "Clear and about 24 degrees at 6."}',
+                          '{"steps": [], "say": "I will check it again at 6."}')
+        self.assertEqual(self.asked_again(), [])
+        self.assertEqual(plan["say"], "Clear and about 24 degrees at 6.")
+
+    def test_a_look_at_the_pc_still_gets_the_retry(self):
+        plan = self.think("every Monday at 9 check my C drive", False,
+                          '{"steps": [{"do": "lookup", "what": "disk"}], "say": ""}',
+                          '{"steps": [], "say": "Your C drive has 40 GB free."}',
+                          '{"steps": [{"do": "schedule", "when": "", "repeat": "every Monday at 9 AM", "description": '
+                          '"Check C drive", "task": {"kind": "lookup", "what": "disk"}}], "say": ""}')
+        self.assertEqual(len(self.asked_again()), 1)
+        self.assertEqual(plan["steps"][0]["do"], "schedule")
+
+    def test_git_status_on_its_own_gets_the_retry(self):
+        plan = self.think("git status in hey-jev", False, '{"steps": [], "say": "I will check it."}',
+                          '{"steps": [{"do": "command", "command": "git status", "cwd": "C:\\\\hey-jev"}], "say": ""}')
+        self.assertEqual(len(self.asked_again()), 1)
+        self.assertEqual(plan["steps"][0]["do"], "command")
+
+    def test_a_named_request_to_schedule_still_gets_the_retry(self):
+        plan = self.think("remind me every day at 9 PM to take my medicine", False,
+                          '{"steps": [], "say": "Okay, I will remind you."}',
+                          '{"steps": [{"do": "schedule", "when": "", "repeat": "daily at 9 PM", "description": '
+                          '"Take medicine", "task": {"kind": "reminder", "text": "take my medicine"}}], "say": ""}')
+        self.assertEqual(len(self.asked_again()), 1)
+        self.assertEqual(plan["steps"][0]["do"], "schedule")
+
+
+class GoogleQuestion(Turn):
+    """A22: "Google when is ..." is a question, with or without a question mark."""
+
+    def test_google_question_without_a_question_mark_is_looked_up(self):
+        plan = self.think("Google when is the next India match.", False,
+                          '{"steps": [{"do": "google", "query": "next India match"}], "say": ""}',
+                          '{"steps": [], "say": "India play Australia on Friday."}')
+        self.assertEqual(self.looked, [[{"do": "web", "query": "next India match"}]])
+        self.assertEqual(plan, {"steps": [], "say": "India play Australia on Friday."})
+
+    def test_show_me_still_opens_google(self):
+        plan = self.think("Google show me pictures of the Taj Mahal", False,
+                          '{"steps": [{"do": "google", "query": "Taj Mahal pictures"}], "say": ""}')
+        self.assertEqual(self.looked, [])
+        self.assertEqual(plan["steps"], [{"do": "google", "query": "Taj Mahal pictures"}])
+
+
+class ToolCalls(unittest.TestCase):
+    """M1, M2, M3: the ways Ling writes a step as a <tool_call>, from the live runs on 7 October."""
+
+    def test_json_argument_is_an_argument_not_the_plan(self):
+        raw = ('<tool_call>schedule\n<arg_key>when</arg_key>\n<arg_value>2026-10-07T14:46:00</arg_value><arg_key>repeat'
+               '</arg_key>\n<arg_value></arg_value><arg_key>description</arg_key>\n<arg_value>Call Mum</arg_value>'
+               '<arg_key>task</arg_key>\n<arg_value>{"kind": "reminder", "text": "Call Mum"}</arg_value>\n</tool_call>')
+        self.assertEqual(siri.parse_plan(raw)["steps"], [
+            {"do": "schedule", "when": "2026-10-07T14:46:00", "repeat": "", "description": "Call Mum",
+             "task": {"kind": "reminder", "text": "Call Mum"}}])
+
+    def test_arguments_as_one_json_object(self):
+        raw = ('<tool_call>schedule\n{"when": "2026-10-07T14:51:00", "repeat": "", "description": "Call Mum", '
+               '"task": {"kind": "reminder", "text": "call Mum"}}</arg_value>')
+        self.assertEqual(siri.parse_plan(raw)["steps"], [
+            {"do": "schedule", "when": "2026-10-07T14:51:00", "repeat": "", "description": "Call Mum",
+             "task": {"kind": "reminder", "text": "call Mum"}}])
+
+    def test_attribute_style_arguments(self):
+        self.assertEqual(siri.parse_plan('<tool_call>screen\ntask="click the second video on the page"</arg_value>'
+                                         '</tool_call>')["steps"],
+                         [{"do": "screen", "task": "click the second video on the page"}])
+        self.assertEqual(siri.parse_plan('<tool_call>web\nquery="who won the 2024 T20 World Cup</arg_value>\n'
+                                         '</tool_call>')["steps"],
+                         [{"do": "web", "query": "who won the 2024 T20 World Cup"}])
+        self.assertEqual(siri.parse_plan('<tool_call>schedule\nwhen="2026-10-07T14:51:00"\ndescription="Call Mum"\n'
+                                         'task={"kind":"reminder","text":"call Mum"}\n</tool_call>')["steps"],
+                         [{"do": "schedule", "when": "2026-10-07T14:51:00", "description": "Call Mum",
+                           "task": {"kind": "reminder", "text": "call Mum"}}])
+
+    def test_a_say_tool_call_is_what_she_says(self):
+        raw = ('<tool_call>steps\n[\n  {"do": "open", "app": "Google Chrome"},\n  {"do": "website", "url": '
+               '"https://www.youtube.com"}\n]\n</invoke>\n<tool_call>say\nOpening Chrome and heading to YouTube now.\n'
+               '</invoke>')
+        self.assertEqual(siri.parse_plan(raw), {
+            "steps": [{"do": "open", "app": "Google Chrome"}, {"do": "website", "url": "https://www.youtube.com"}],
+            "say": "Opening Chrome and heading to YouTube now."})
+
+    def test_both_end_tags_are_not_said(self):
+        raw = ('<tool_call>open\n<arg_key>app</arg_key><arg_value>Notepad</arg_value>\n</invoke>\n</tool_call>\n'
+               '<tool_call>say\nOpening Notepad.\n</invoke>\n</tool_call>')
+        self.assertEqual(siri.parse_plan(raw), {"steps": [{"do": "open", "app": "Notepad"}], "say": "Opening Notepad."})
+
+    def test_steps_and_say_as_arguments(self):
+        raw = ('<tool_call>do\n<arg_key>steps</arg_key>\n<arg_value>[{"do": "open", "app": "Google Chrome"}, '
+               '{"do": "keys", "keys": "ctrl+t"}]</arg_value><arg_key>say</arg_key>\n<arg_value>Opening Chrome, Hari.'
+               '</arg_value>\n</tool_call>')
+        self.assertEqual(siri.parse_plan(raw), {
+            "steps": [{"do": "open", "app": "Google Chrome"}, {"do": "keys", "keys": "ctrl+t"}],
+            "say": "Opening Chrome, Hari."})
+
+    def test_a_skill_keeps_its_own_steps(self):
+        # "when I say work mode, ..." opened Gmail and set the volume on 7 October instead of saving the routine
+        skill = {"do": "skill", "action": "create", "name": "work-mode", "triggers": ["work mode"],
+                 "steps": [{"do": "open", "app": "Spotify"}], "say": "Work mode's on."}
+        for raw in ('<tool_call>skill\n<arg_key>action</arg_key>\n<arg_value>create</arg_value><arg_key>name'
+                    '</arg_key>\n<arg_value>work-mode</arg_value><arg_key>triggers</arg_key>\n<arg_value>["work mode"]'
+                    '</arg_value><arg_key>steps</arg_key>\n<arg_value>[{"do": "open", "app": "Spotify"}]</arg_value>'
+                    '<arg_key>say</arg_key>\n<arg_value>Work mode\'s on.</arg_value>\n</tool_call>',
+                    '<tool_call>skill\naction="create"\nname="work-mode"\ntriggers=["work mode"]\nsteps=[{"do": '
+                    '"open", "app": "Spotify"}]\nsay="Work mode\'s on."\n</tool_call>',
+                    '<tool_call>skill\n' + json.dumps({k: v for k, v in skill.items() if k != "do"}) + '</tool_call>'):
+            self.assertEqual(siri.parse_plan(raw), {"steps": [skill], "say": ""}, raw)
+
+    def test_what_a_say_call_says(self):
+        for raw in ('<tool_call>say\n<arg_key>text</arg_key>\n<arg_value>Hello, Hari.</arg_value>\n</tool_call>',
+                    '<tool_call>say\ntext="Hello, Hari."\n</tool_call>',
+                    '<tool_call>do\n{"say": "Hello, Hari."}\n</tool_call>'):
+            self.assertEqual(siri.parse_plan(raw), {"steps": [], "say": "Hello, Hari."}, raw)
+
+    def test_no_made_up_steps(self):
+        broken = ('<tool_call>do\n<arg_key>recall</arg_value><arg_key>day</arg_key>\n<arg_value>2026-10-06'
+                  '</arg_value>\n</tool_call>')
+        self.assertEqual(siri.parse_plan(broken)["steps"], [])
+        prose = siri.parse_plan("<tool_call>Here are the top AI stories: OpenAI shared new maths results.</tool_call>")
+        self.assertEqual(prose, {"steps": [], "say": "Here are the top AI stories: OpenAI shared new maths results."})
+        self.assertEqual(siri.parse_plan('{"steps": [{"do": "search", "query": "x"}, {"do": "new_tab"}], "say": ""}')
+                         ["steps"], [{"do": "new_tab"}])
+
+    def test_shapes_that_already_worked(self):
+        cases = {
+            '<tool_call>skill_view\n<arg_key>name</arg_key>\n<arg_value>chrome-search</arg_value>\n</tool_call>':
+                [{"do": "skill_view", "name": "chrome-search"}],
+            '<tool_call>do\n{"steps": [{"do": "youtube", "query": "CareerID", "play": true}]}\n</tool_call>':
+                [{"do": "youtube", "query": "CareerID", "play": True}],
+            '<tool_call>do\n<arg_key>do</arg_key>\n<arg_value>open</arg_value><arg_key>app</arg_key>\n<arg_value>'
+            'Google Chrome</arg_value>\n</tool_call>': [{"do": "open", "app": "Google Chrome"}],
+            '<tool_call>timer\n<arg_key>seconds</arg_key>\n<arg_value>300</arg_value>\n</tool_call>\n<tool_call>youtube'
+            '\n<arg_key>query</arg_key>\n<arg_value>lofi music</arg_value><arg_key>play</arg_key>\n<arg_value>true'
+            '</arg_value>\n</tool_call>': [{"do": "timer", "seconds": 300},
+                                           {"do": "youtube", "query": "lofi music", "play": True}],
+            '<tool_call>do\n{"do":"youtube","query":"Arijit Singh songs","play":true}\n{"do":"volume","to":"up"}\n'
+            '</arg_value>': [{"do": "youtube", "query": "Arijit Singh songs", "play": True},
+                             {"do": "volume", "to": "up"}],
+            '<tool_call>recall\n\n</tool_call>': [{"do": "recall"}],
+            '{"do": "open_google_chrome"}': [{"do": "open", "app": "google chrome"}],
+            '{"steps": [{"do": "click", "x": 5, "y": 6}, {"do": "wait", "seconds": 1}], "say": "", "done": false}':
+                [{"do": "click", "x": 5, "y": 6}, {"do": "wait", "seconds": 1}],
+        }
+        for raw, steps in cases.items():
+            self.assertEqual(siri.parse_plan(raw)["steps"], steps, raw)
+
+
+class AskAgain(unittest.TestCase):
+    """M4: an empty reply, or one with nothing she can do, is asked again once, in the time that's left."""
+
+    def ask(self, *replies, **kw):
+        self.model = FakeModel(*replies)
+        with patch.object(siri, "ask_model", self.model):
+            return siri.ask_plan([{"role": "user", "content": "who directed Iron Man 2?"}], **kw)
+
+    def test_an_empty_reply_is_asked_again(self):
+        raw, plan, _, _ = self.ask("", '{"steps": [], "say": "Jon Favreau."}', deadline=12.0)
+        self.assertEqual(plan["say"], "Jon Favreau.")
+        self.assertEqual(len(self.model.calls), 2)
+        self.assertLessEqual(self.model.calls[1][1]["deadline"], 12.0)  # the same deadline, not a new one
+
+    def test_only_made_up_steps_is_asked_again(self):
+        _, plan, _, _ = self.ask('{"steps": [{"do": "Here"}], "say": ""}', '{"steps": [{"do": "new_tab"}], "say": ""}')
+        self.assertEqual(plan["steps"], [{"do": "new_tab"}])
+
+    def test_not_again_without_time_or_when_asked_not_to(self):
+        self.ask("", '{"say": "late"}', deadline=2.0)
+        self.assertEqual(len(self.model.calls), 1)
+        self.ask("", '{"say": "late"}', again=False)
+        self.assertEqual(len(self.model.calls), 1)
+
+    def test_a_review_that_found_nothing_is_an_answer(self):
+        _, plan, _, _ = self.ask('{"memory": [], "skills": [], "words": {}}')
+        self.assertEqual(len(self.model.calls), 1)
+        self.assertEqual(plan["memory"], [])
+
+    def test_a_failed_retry_keeps_the_first_answer(self):
+        calls = []
+
+        def model(messages, **kw):
+            calls.append(kw)
+            if len(calls) > 1:
+                raise TimeoutError("no answer in 9 s")
+            return "", {}, "fake-model"
+        with patch.object(siri, "ask_model", model):
+            raw, plan, _, _ = siri.ask_plan([{"role": "user", "content": "hi"}])
+        self.assertEqual((raw, plan), ("", {"steps": [], "say": ""}))
+        self.assertEqual(len(calls), 2)
+
+    def test_think_asks_again_only_when_named(self):
+        with patch.object(siri, "ask_plan", wraps=siri.ask_plan) as ask, \
+                patch.object(siri, "ask_model", FakeModel('{"to": "others"}')), \
+                patch.object(siri.history, "recent", lambda *a, **k: []), \
+                patch.object(siri, "context", lambda: ""), patch.object(siri, "memory_block", lambda: ""):
+            siri.think("open the door for him", "cold")
+        self.assertIs(ask.call_args.kwargs["again"], False)
+
+
+class RoomTalk(unittest.TestCase):
+    """M6: a reply that only says the words weren't for her is let go, not said out loud."""
+
+    def setUp(self):
+        p = patch.object(siri, "media_playing", lambda: False)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_not_for_me_is_let_go(self):
+        for said in ("That sounded like he was talking to someone else in the room.",
+                     "That was to others, Hari \u2014 people talking near the PC, not to me.",
+                     "That sounded like someone talking to a person nearby, not a request for me.",
+                     "It\u2019s probably to someone nearby, not to me. The sentence is too garbled to summarise.",
+                     "That's for someone else, Harish \u2014 not me.", "That sounded like someone else, not me.",
+                     "That sounded like someone speaking nearby, not a request for me."):
+            self.assertTrue(siri.let_go({"steps": [], "say": said}), said)
+
+    def test_an_answer_is_not_let_go(self):
+        for plan in ({"steps": [], "say": "It's 5 PM."},
+                     {"steps": [], "say": "It was said to you, Hari. Your C drive is nearly full."},
+                     {"steps": [], "say": "I'm here now, Hari. I thought you were speaking to someone else, so I "
+                                          "stayed quiet. What's up?"},
+                     {"steps": [], "say": "Because you hadn't called me by name first, and I wasn't sure whether you "
+                                          "were speaking to me or talking to someone else."},
+                     {"steps": [], "say": "That's not for me to judge, but it got good reviews."},
+                     {"steps": [], "say": "It's someone else's number, not one I know."},
+                     {"steps": [], "say": "You can share it with someone else."},
+                     {"steps": [{"do": "open", "app": "Notepad"}], "say": "Opening it for someone else? Sure."}):
+            self.assertIsNone(siri.let_go(plan), plan)
+
+
+class Learning(Turn):
+    """M7: overheard room talk isn't learned from, and doesn't put facts in her memory."""
+
+    def test_overheard_i_remember_is_not_saved(self):
+        memory = {"do": "memory", "action": "add", "target": "user", "content": "Nine to Kerawal"}
+        plan = self.think("I remember nine to Kerawal", "cold",
+                          json.dumps({"to": "you", "steps": [memory], "say": "Okay, I'll remember that."}))
+        self.assertIsNone(plan)  # not "Okay, I'll remember that" with nothing remembered
+        plan = self.think("I remember Kerawal, open Notepad", "cold",
+                          json.dumps({"to": "you", "steps": [memory, {"do": "open", "app": "Notepad"}], "say": ""}))
+        self.assertEqual(plan["steps"], [{"do": "open", "app": "Notepad"}])
+
+    def test_overheard_remembering_in_other_words_is_not_saved(self):
+        memory = {"do": "memory", "action": "add", "target": "user", "content": "Nine to Kerawal"}
+        for said in ("I still remember nine to Kerawal", "I don't remember nine to Kerawal",
+                     "We'll never forget nine to Kerawal", "We need to remember nine to Kerawal",
+                     "Do you remember nine to Kerawal"):
+            self.assertIsNone(self.think(said, "cold", json.dumps({"to": "you", "steps": [memory], "say": "Noted."})),
+                              said)
+
+    def test_asked_to_keep_it_in_other_words_is_saved(self):
+        step = {"do": "memory", "action": "add", "target": "user", "content": "Their website is careerid.in"}
+        for said in ("note that my website is careerid.in", "keep in mind my website is careerid.in",
+                     "don't forget my website is careerid.in", "I need you to remember my website is careerid.in"):
+            plan = self.think(said, "cold", json.dumps({"to": "you", "steps": [step], "say": ""}))
+            self.assertEqual((plan or {}).get("steps"), [step], said)
+
+    def test_remember_said_without_her_name_is_saved(self):
+        step = {"do": "memory", "action": "add", "target": "user", "content": "Their website is careerid.in"}
+        plan = self.think("remember that my website is careerid.in", "cold",
+                          json.dumps({"to": "you", "steps": [step], "say": ""}))
+        self.assertEqual(plan["steps"], [step])
+        plan = self.think("my website is careerid.in", False, json.dumps({"steps": [step], "say": ""}))
+        self.assertEqual(plan["steps"], [step])  # with her name, as before
+
+    def test_an_overheard_chat_does_not_start_a_review(self):
+        started = []
+        with patch.object(siri, "review", lambda *a, **k: started.append(1)), \
+                patch.dict(siri._learning, turns=10, last=0.0):
+            siri.learn_later("What did he say to you", [], [], "cold")
+            time.sleep(0.05)
+            self.assertEqual(started, [])
+            siri.learn_later("open notepad and type hi then save it", [{"do": "open"}] * 3, [], False)
+            time.sleep(0.05)
+        self.assertEqual(started, [1])
+
+    def test_a_review_leaves_out_overheard_chat(self):
+        siri.learn_later("Who was that on the phone", [], [], "cold")
+        turns = [(time.time() - 30, "Who was that on the phone", '{"steps": [], "say": "Sounds like Ravi."}'),
+                 (time.time() - 20, "no, I said Zostel", '{"steps": [], "say": "Got it, Zostel."}'),
+                 (time.time() - 10, "open Zostel", '{"steps": [{"do": "website", "url": "https://zostel.com"}]}')]
+        model = FakeModel('{"memory": [], "skills": [], "words": {}}')
+        with patch.object(siri.history, "recent", lambda *a, **k: turns), patch.object(siri, "ask_model", model), \
+                patch.object(siri, "skills_block", lambda: ""):
+            siri.review(wait=0)
+        said = model.calls[0][0][-1]["content"]
+        self.assertIn("Zostel", said)
+        self.assertNotIn("on the phone", said)
+
+
+class WebSearch(unittest.TestCase):
+    """M5: the sources share one deadline, and what's there by then is the answer."""
+
+    def setUp(self):
+        web._cache.clear()
+        self.addCleanup(web._cache.clear)
+
+    def test_slow_sources_dont_hold_up_the_answer(self):
+        wiki = []
+
+        def slow(*a, **k):
+            time.sleep(2.0)
+            return {"text": "late", "url": ""}
+        with patch.object(web, "_instant", slow), patch.object(web, "news", slow), \
+                patch.object(web, "_wikipedia", lambda *a, **k: wiki.append(1) or [{"title": "Iron Man 2"}]), \
+                patch.object(web, "SEARCH_WAIT", 0.3, create=True):
+            t = time.time()
+            found = web.search("who directed iron man 2")
+            took = time.time() - t
+            self.assertLess(took, 1.5)
+            self.assertEqual(found, {"wikipedia": [{"title": "Iron Man 2"}]})
+            web.search("who directed iron man 2")  # what was late isn't left out for the next ten minutes
+        self.assertEqual(len(wiki), 2)
+
+
+class WebRead(unittest.TestCase):
+    """A20: names that point at this PC or the home network, and redirects to them, are never fetched."""
+
+    ADDRESSES = {"127.0.0.1.nip.io": "127.0.0.1", "192.168.1.1.nip.io": "192.168.1.1", "localtest.me": "::1",
+                 "example.com": "93.184.215.14", "en.wikipedia.org": "103.102.166.224", "192.168.1.1": "192.168.1.1"}
+
+    def setUp(self):
+        web._cache.clear()
+        self.addCleanup(web._cache.clear)
+        self.fetched = []
+
+        def lookup(host, *a, **k):
+            if host not in self.ADDRESSES:
+                raise OSError("no such host")
+            ip = self.ADDRESSES[host]
+            return [(2 if "." in ip else 23, 1, 6, "", (ip, 80))]
+        p = patch("socket.getaddrinfo", lookup)
+        p.start()
+        self.addCleanup(p.stop)
+
+    class Page:
+        def __init__(self, url, status=200, location=None, body=b"<html><title>Hi</title><p>" + b"words " * 20 + b"</p>"):
+            self.url, self.status_code, self.body = url, status, body
+            self.headers = {"content-type": "text/html", **({"location": location} if location else {})}
+            self.is_redirect, self.encoding = bool(location), "utf-8"
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, n):
+            yield self.body
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    def get(self, routes):
+        def get(url, allow_redirects=True, **kw):
+            while True:
+                self.fetched.append(url)
+                page = routes(url)
+                if allow_redirects and page.is_redirect:  # what requests does by itself
+                    url = urljoin(url, page.headers["location"])
+                    continue
+                return page
+        return get
+
+    def test_names_that_point_home_are_not_public(self):
+        for url in ("http://127.0.0.1.nip.io:8080/", "http://192.168.1.1.nip.io/admin", "http://localtest.me/",
+                    "http://nowhere.invalid/"):
+            self.assertFalse(web._public(url), url)
+        self.assertTrue(web._public("https://example.com/page"))
+
+    def test_a_redirect_home_is_not_followed(self):
+        def routes(url):
+            if "example.com" in url:
+                return self.Page(url, 302, "http://192.168.1.1/admin")
+            return self.Page(url, body=b"router admin page")
+        with patch.object(web.S, "get", self.get(routes)):
+            with self.assertRaisesRegex(RuntimeError, "only read pages on the internet"):
+                web.read("https://example.com/story")
+        self.assertEqual(self.fetched, ["https://example.com/story"])
+
+    def test_a_public_redirect_is_read(self):
+        def routes(url):
+            if url.endswith("/story"):
+                return self.Page(url, 301, "/wiki/Iron_Man_2")
+            return self.Page(url)
+        with patch.object(web.S, "get", self.get(routes)):
+            page = web.read("https://example.com/story")
+        self.assertEqual(page["url"], "https://example.com/wiki/Iron_Man_2")
+        self.assertIn("words", page["text"])
+
+
+class PromptBits(unittest.TestCase):
+    """M8: the clock says which time zone it is, and a plain timer doesn't get the example's tea."""
+
+    def test_now_has_its_time_zone(self):
+        with patch.object(siri.win, "front_app_name", lambda: "Google Chrome"), \
+                patch.object(siri.win, "media_session", lambda: None), \
+                patch.object(siri, "profile_names", lambda key: []):
+            self.assertRegex(siri.context(), r"Now: .*UTC[+-]\d\d:\d\d")
+
+    def test_timer_label_only_when_named(self):
+        line = next(l for l in siri.PROMPT.splitlines() if l.startswith('{"do":"timer"'))
+        self.assertIn("label and alert only", line)
+
+
+if __name__ == "__main__":
+    unittest.main()
