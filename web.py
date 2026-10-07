@@ -27,6 +27,9 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
                     "Chrome/141.0 Safari/537.36", "Accept-Language": "en-IN,en;q=0.9"}
 S = requests.Session()
 MAX_PAGE = 1_500_000  # bytes of a page read at most, so a huge page can't hold her up
+# seconds a search waits for its sources, all together, before answering with what's come: each source's timeout
+# counts per read, and the waits used to add up, 11 to 13 s on 7 October. Research has the links to work out too
+SEARCH_WAIT = 5.0
 _cache = {}  # what was looked up lately: (kind, key) -> (when, result)
 
 
@@ -78,14 +81,20 @@ def search(query, links=False):
                     failed.append(key)
             threads.append(threading.Thread(target=run, daemon=True))
             threads[-1].start()
+        end = time.time() + (4 * SEARCH_WAIT if links else SEARCH_WAIT)
         for t in threads:
-            t.join(9)
+            t.join(max(0.0, end - time.time()))
+        late[:] = [t for t in threads if t.is_alive()]
         found = {k: out[k] for k in jobs if out.get(k)}
         if not found:
-            raise RuntimeError("I couldn't look it up, the internet may be down" if len(failed) == len(jobs) else
-                               "Nothing came up for that, try other words")
+            raise RuntimeError("I couldn't look it up, the internet may be down" if len(failed) + len(late) == len(jobs)
+                               else "Nothing came up for that, try other words")
         return found
-    return _cached("search", (query.lower(), links), 600, make)
+    late = []
+    found = _cached("search", (query.lower(), links), 600, make)
+    if late:  # a source that was slow this time isn't left out for the next ten minutes
+        _cache.pop(("search", (query.lower(), links)), None)
+    return found
 
 
 # --------------------------------------------------------------------------- reading a page

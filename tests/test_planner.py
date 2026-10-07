@@ -49,6 +49,31 @@ class Turn(unittest.TestCase):
                                                       for x in m)]
 
 
+class WebSearch(unittest.TestCase):
+    """M5: the sources share one deadline, and what's there by then is the answer."""
+
+    def setUp(self):
+        web._cache.clear()
+        self.addCleanup(web._cache.clear)
+
+    def test_slow_sources_dont_hold_up_the_answer(self):
+        wiki = []
+
+        def slow(*a, **k):
+            time.sleep(2.0)
+            return {"text": "late", "url": ""}
+        with patch.object(web, "_instant", slow), patch.object(web, "news", slow), \
+                patch.object(web, "_wikipedia", lambda *a, **k: wiki.append(1) or [{"title": "Iron Man 2"}]), \
+                patch.object(web, "SEARCH_WAIT", 0.3, create=True):
+            t = time.time()
+            found = web.search("who directed iron man 2")
+            took = time.time() - t
+            self.assertLess(took, 1.5)
+            self.assertEqual(found, {"wikipedia": [{"title": "Iron Man 2"}]})
+            web.search("who directed iron man 2")  # what was late isn't left out for the next ten minutes
+        self.assertEqual(len(wiki), 2)
+
+
 class WebRead(unittest.TestCase):
     """A20: names that point at this PC or the home network, and redirects to them, are never fetched."""
 
