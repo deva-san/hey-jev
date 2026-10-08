@@ -809,6 +809,144 @@ def set_clipboard(text):
         user32.CloseClipboard()
 
 
+_sig(user32.GetClipboardData, [UINT], wintypes.HANDLE)
+_sig(user32.IsClipboardFormatAvailable, [UINT])
+
+
+def clipboard_text():
+    """The text on the clipboard, or None if there's none (or a picture or files instead)."""
+    if not user32.IsClipboardFormatAvailable(13) or not user32.OpenClipboard(None):
+        return None
+    try:
+        handle = user32.GetClipboardData(13)  # CF_UNICODETEXT
+        ptr = kernel32.GlobalLock(handle) if handle else None
+        if not ptr:
+            return None
+        try:
+            return ctypes.wstring_at(ptr)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
+_sig(user32.EnumClipboardFormats, [UINT], UINT)
+_sig(user32.GetClipboardSequenceNumber, [], DWORD)
+_sig(kernel32.GlobalSize, [ctypes.c_void_p], ctypes.c_size_t)
+_sig(user32.FindWindowExW, [HWND, HWND, wintypes.LPCWSTR, wintypes.LPCWSTR], HWND)
+GDI_FORMATS = {2, 3, 9, 14, 0x80, 0x82, 0x83, 0x8E}  # bitmaps, metafiles, palettes: handles, not memory to copy
+
+
+def clipboard_snapshot():
+    """Everything on the clipboard, format by format, to put back after borrowing it: text, a picture, files, and
+    the marks a password manager adds so Windows keeps it out of clipboard history. [] if it's empty or busy."""
+    for _ in range(20):
+        if user32.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
+        return []
+    out = []
+    try:
+        fmt = user32.EnumClipboardFormats(0)
+        while fmt:
+            if fmt not in GDI_FORMATS:  # Windows makes CF_BITMAP again from the CF_DIB beside it
+                handle = user32.GetClipboardData(fmt)
+                size = kernel32.GlobalSize(handle) if handle else 0
+                ptr = kernel32.GlobalLock(handle) if size else None
+                if ptr:
+                    try:
+                        out.append((fmt, ctypes.string_at(ptr, size)))
+                    finally:
+                        kernel32.GlobalUnlock(handle)
+            fmt = user32.EnumClipboardFormats(fmt)
+    finally:
+        user32.CloseClipboard()
+    return out
+
+
+def clipboard_restore(snapshot):
+    """Puts back what clipboard_snapshot took, or empties the clipboard if it was empty."""
+    for _ in range(20):
+        if user32.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
+        raise RuntimeError("Couldn't open the clipboard")
+    try:
+        user32.EmptyClipboard()
+        for fmt, data in snapshot:
+            handle = kernel32.GlobalAlloc(0x0042, max(1, len(data)))
+            ptr = kernel32.GlobalLock(handle)
+            ctypes.memmove(ptr, data, len(data))
+            kernel32.GlobalUnlock(handle)
+            if not user32.SetClipboardData(fmt, handle):
+                kernel32.GlobalFree(handle)
+    finally:
+        user32.CloseClipboard()
+
+
+def clipboard_sequence():
+    """A number Windows moves on at every change to the clipboard."""
+    return user32.GetClipboardSequenceNumber()
+
+
+def set_clipboard_files(paths):
+    """Files on the clipboard, as File Explorer's Copy puts them (CF_HDROP), so Ctrl+V pastes them into a chat."""
+    files = ("\0".join(str(p) for p in paths) + "\0\0").encode("utf-16-le")
+    # DROPFILES: where the names start (20 bytes on), a point and a flag nobody reads, and wide names
+    data = (20).to_bytes(4, "little") + bytes(12) + (1).to_bytes(4, "little") + files
+    for _ in range(20):
+        if user32.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
+        raise RuntimeError("Couldn't open the clipboard")
+    try:
+        user32.EmptyClipboard()
+        handle = kernel32.GlobalAlloc(0x0042, len(data))  # GMEM_MOVEABLE | GMEM_ZEROINIT
+        ptr = kernel32.GlobalLock(handle)
+        ctypes.memmove(ptr, data, len(data))
+        kernel32.GlobalUnlock(handle)
+        if not user32.SetClipboardData(15, handle):  # CF_HDROP
+            kernel32.GlobalFree(handle)
+            raise RuntimeError("Couldn't put the files on the clipboard")
+    finally:
+        user32.CloseClipboard()
+
+
+def selected_files():
+    """The files selected in the File Explorer window in front, as full paths: [] if none are, or another app is in
+    front. Folders aren't files."""
+    front = user32.GetForegroundWindow()
+    if not front or _class_name(front) != "CabinetWClass":
+        return []
+    _com()
+    import comtypes.client
+    shell = comtypes.client.CreateObject("Shell.Application", dynamic=True)
+    windows, tabs = shell.Windows(), []
+    for i in range(windows.Count):
+        try:
+            window = windows.Item(i)
+            if window is not None and int(window.HWND) == front:
+                tabs.append(window)  # each tab of a Windows 11 File Explorer window is one, all with its handle
+        except Exception:
+            continue
+    if len(tabs) > 1:  # the tab in front: the window's title is its name ("Downloads - File Explorer")
+        title = window_title(front)
+        tabs = [t for t in tabs if title.startswith(str(t.LocationName) + " - ") or title == str(t.LocationName)]
+        if len(tabs) != 1:
+            raise RuntimeError("I can't tell which File Explorer tab you mean. Select the file in a window with one tab")
+    for window in tabs:
+        try:
+            items = window.Document.SelectedItems()
+            paths = [items.Item(j).Path for j in range(items.Count)]
+            return [p for p in paths if os.path.isfile(p)]
+        except Exception:
+            continue
+    return []
+
+
 def paste(text):
     set_clipboard(text)  # stays on the clipboard too, in case the paste misses
     time.sleep(0.2)

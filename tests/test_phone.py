@@ -3,6 +3,7 @@ questions answered only by a tap there, and a yes at the PC never answering a ph
 import asyncio
 import datetime
 import json
+import os
 import time
 import unittest
 from types import SimpleNamespace
@@ -272,8 +273,12 @@ class Pictures(unittest.TestCase):
         upd, _, got = self.photo_update("which is cheaper")
         with mock.patch.dict(siri.settings._load(), {"telegram_owner": 7}):
             asyncio.run(bot._message(upd, Context()))
-        self.assertEqual(seen, [("which is cheaper", 7, [(b"jpeg picture", "image/jpeg")])])
-        self.assertEqual(got, [900])  # the biggest up to PICTURE_SIDE, not the 2560 original
+        (text, chat, pictures, files), = seen
+        self.assertEqual((text, chat, pictures), ("which is cheaper", 7, [(b"jpeg picture", "image/jpeg")]))
+        self.assertEqual(got, [2560, 900])  # kept at its biggest to send on, looked at up to PICTURE_SIDE
+        self.assertTrue(files[0].startswith(telegram_bot.files_dir()) and files[0].endswith(".jpg"))
+        with open(files[0], "rb") as f:
+            self.assertEqual(f.read(), b"jpeg picture")
 
     def test_a_stranger_s_photo_is_never_downloaded(self):
         bot = telegram_bot.Bot(on_message=lambda *a: None, on_tap=None)
@@ -298,25 +303,49 @@ class Pictures(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertEqual((seen[0][0], len(seen[0][2])), ("which is cheaper", 3))
 
-    def test_videos_gifs_and_other_files_are_said_so_never_answered_as_text(self):
-        for field, value in (("video", object()), ("animation", object()), ("sticker", object()),
-                             ("document", SimpleNamespace(mime_type="image/heic", file_size=10))):
+    def test_gifs_and_stickers_are_said_so_never_answered_as_text(self):
+        for field in ("animation", "sticker", "video_note"):
             seen = []
             bot = telegram_bot.Bot(on_message=lambda *a: seen.append(a), on_tap=None)
             upd, replies = update("and what about this one?")
-            setattr(upd.effective_message, field, value)
+            setattr(upd.effective_message, field, object())
             self.send_in(bot, upd)
             self.assertEqual(seen, [], field)
-            self.assertIn("Send it as a photo", replies[0], field)
+            self.assertIn("not GIFs or stickers", replies[0], field)
 
-    def test_a_big_picture_file_is_sent_back_as_a_photo(self):
+    @staticmethod
+    def file(name, kind, size):
+        async def download():
+            return bytearray(b"the file")
+
+        async def get_file():
+            return SimpleNamespace(download_as_bytearray=download)
+        return SimpleNamespace(file_name=name, mime_type=kind, file_size=size, get_file=get_file)
+
+    def test_files_and_videos_are_kept_to_send_on_but_not_looked_at(self):
+        for field, item in (("document", self.file("report.pdf", "application/pdf", 2000)),
+                            ("document", self.file("big photo.jpg", "image/jpeg", 6 * 1024 * 1024)),
+                            ("document", self.file("x.heic", "image/heic", 10)),
+                            ("video", self.file(None, "video/mp4", 5000))):
+            seen = []
+            bot = telegram_bot.Bot(on_message=lambda *a: seen.append(a), on_tap=None)
+            upd, _ = update("send this to amma")
+            setattr(upd.effective_message, field, item)
+            self.send_in(bot, upd)
+            (text, chat, pictures, files), = seen
+            self.assertEqual((text, pictures), ("send this to amma", []), item.file_name)
+            self.assertTrue(os.path.isfile(files[0]), item.file_name)
+            if item.file_name:
+                self.assertEqual(os.path.basename(files[0]), item.file_name)
+
+    def test_over_twenty_mb_is_said_so(self):
         seen = []
         bot = telegram_bot.Bot(on_message=lambda *a: seen.append(a), on_tap=None)
-        upd, replies = update("compare")
-        upd.effective_message.document = SimpleNamespace(mime_type="image/jpeg", file_size=6 * 1024 * 1024)
+        upd, replies = update("send this to amma")
+        upd.effective_message.document = self.file("film.mp4", "video/mp4", 30 * 1024 * 1024)
         self.send_in(bot, upd)
         self.assertEqual(seen, [])
-        self.assertIn("as a photo", replies[0])
+        self.assertIn("over 20 MB", replies[0])
 
     def test_the_model_sees_it_on_the_phone_only(self):
         siri.PHONE_PICTURES[7] = ([siri.picture_url(b"x")], time.time())

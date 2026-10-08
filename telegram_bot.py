@@ -18,6 +18,8 @@ the way Hermes splits them. Runs on its own thread, so voice turns aren't held u
 import asyncio
 import collections
 import io
+import re
+import tempfile
 import logging
 import os
 import secrets
@@ -38,10 +40,32 @@ PICTURE_SIDE = 1600  # pixels: the biggest of Telegram's sizes of a photo up to 
 # sent as a photo, which Telegram makes smaller. A 6 MB camera file took longer to send the model than it waits
 FILE_BYTES = 2 * 1024 * 1024
 PICTURE_KINDS = ("image/jpeg", "image/png", "image/webp")  # what the answer model takes
+KEEP_BYTES = 20 * 1024 * 1024  # what you send her is kept on the PC to send on, up to Telegram's limit for a bot
+KEEP_FOR = 24 * 3600  # seconds such a file stays in Phone files
 ALBUM_WAIT = 1.2  # seconds after an album's last picture comes in before it's taken as one message
 ALBUM_MOST = 4  # pictures of an album she looks at
 # when the bot sent you something, [start, end] each: Telegram on this PC shows it too, see watch.own_reply
 SENDS = collections.deque(maxlen=50)
+
+
+def prune_files(max_age=KEEP_FOR):
+    """What came from the phone goes after max_age seconds (0: all of it, as on unpairing). One file in use is let
+    be, for next time."""
+    folder = files_dir()
+    if not os.path.isdir(folder):
+        return
+    for name in os.listdir(folder):
+        path = os.path.join(folder, name)
+        try:
+            if os.path.isfile(path) and time.time() - os.path.getmtime(path) >= max_age:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def files_dir():
+    """Where what you send her from your phone is kept, to send on: Phone files, beside her log."""
+    return os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "Hey Jev", "Phone files")
 
 
 def _sending():
@@ -169,7 +193,8 @@ class Pairing:
 class Bot:
     def __init__(self, on_message, on_tap, transcribe=None, on_pair=None, on_stop=None):
         """on_message(text, chat): a message from you, to run as a turn (on Jev's side, not this thread).
-        on_message(text, chat, pictures) when it came with pictures: [(bytes, type)], an album's together.
+        on_message(text, chat, pictures, files) when it came with pictures or files: pictures [(bytes, type)] to
+        look at, files [paths] kept on the PC to send on, an album's together.
         on_tap(yes, ask, chat, message): you tapped Yes or No on her question ask. transcribe(16 kHz audio) ->
         (text, ms), for voice notes. on_pair(name): someone sent /start while pairing was open and got a code, or
         None: they didn't, 3 others had asked first. on_stop(why): it gave up, by the error's class name
@@ -363,23 +388,33 @@ class Bot:
                 finally:
                     sent[1] = time.time()
             return
-        doc = msg.document
-        if any(getattr(msg, k, None) for k in ("video", "animation", "video_note", "sticker")) or (
-                doc and doc.mime_type not in PICTURE_KINDS):
-            # a video, a GIF, a .heic or a PDF: said so, never its words answered about an older picture
-            await self._reply(msg, "I can only look at photos, and JPEG, PNG or WebP pictures. Send it as a photo.")
+        doc, video = msg.document, getattr(msg, "video", None)
+        if any(getattr(msg, k, None) for k in ("animation", "video_note", "sticker")):
+            # a GIF or a sticker: said so, never its words answered about an older picture
+            await self._reply(msg, "I can take photos, files and videos, not GIFs or stickers.")
             return
-        picture = None
-        if msg.photo or doc:
-            if doc and (doc.file_size or 0) > FILE_BYTES:
-                await self._reply(msg, "That picture's too big for me as a file. Send it as a photo instead.")
+        group = getattr(msg, "media_group_id", None)
+        self._flush_albums(chat.id, but=group)  # an album that came before this goes first, whole
+        picture, kept = None, None
+        if msg.photo or doc or video:
+            if group:  # one of an album: counted in now, so a slow download doesn't split it
+                self._album_begin(chat.id, group, text)
+            item = msg.photo[-1] if msg.photo else doc or video
+            if (item.file_size or 0) > KEEP_BYTES:
+                if group:
+                    self._album_end(chat.id, group, None, None)
+                await self._reply(msg, "That's over 20 MB, more than Telegram lets me take. Send something smaller.")
                 return
-            picture = await self._picture(msg)
-            if picture is None:
-                await self._reply(msg, "I couldn't get that picture. Try sending it again, as a photo.")
+            kept = await self._keep(msg)  # on the PC, to send on: "send this to Amma on WhatsApp"
+            # a photo, or a picture file small enough, she looks at too: "which is cheaper?"
+            if msg.photo or (doc and doc.mime_type in PICTURE_KINDS and (doc.file_size or 0) <= FILE_BYTES):
+                picture = await self._picture(msg)
+            if group:
+                self._album_end(chat.id, group, picture, kept)
+            if kept is None and picture is None:
+                await self._reply(msg, "I couldn't get that. Try sending it again.")
                 return
-            if getattr(msg, "media_group_id", None):  # one of an album: they come one by one, taken as one
-                self._album(chat.id, msg.media_group_id, text, picture)
+            if group:
                 return
         if msg.voice or msg.audio:
             text = await self._hear(msg)
@@ -389,10 +424,35 @@ class Bot:
             await self._reply(msg, f"\U0001f3a4 {text}")
         if text == "/start":
             await self._reply(msg, "I'm here. Ask me anything, or tell me what to do on the PC.")
-        elif picture:  # the words with it, if any, are about it
-            self.on_message(text, chat.id, [picture])
+        elif picture or kept:  # the words with it, if any, are about it
+            self.on_message(text, chat.id, [picture] if picture else [], [kept] if kept else [])
         elif text:
             self.on_message(text, chat.id)
+
+    async def _keep(self, msg):
+        """What you sent, saved on this PC in Phone files to send on (a photo at its biggest): its path, or None."""
+        try:
+            if msg.photo:
+                item, name = msg.photo[-1], time.strftime("photo-%Y%m%d-%H%M%S.jpg")
+            else:
+                item = msg.document or msg.video
+                name = getattr(item, "file_name", None) or time.strftime("video-%Y%m%d-%H%M%S.mp4")
+            name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name)).strip(" .") or "file"
+            folder = files_dir()
+            os.makedirs(folder, exist_ok=True)
+            prune_files()  # a day on, they go
+            stem, ext = os.path.splitext(name)
+            path, n = os.path.join(folder, name), 1
+            while os.path.exists(path):
+                n += 1
+                path = os.path.join(folder, f"{stem} ({n}){ext}")
+            data = await (await item.get_file()).download_as_bytearray()
+            with open(path, "wb") as f:
+                f.write(bytes(data))
+            return path
+        except Exception as exc:
+            print(f"  keeping what came from the phone failed: {type(exc).__name__}")
+            return None
 
     async def _reply(self, msg, text):
         sent = _sending()
@@ -401,21 +461,41 @@ class Bot:
         finally:
             sent[1] = time.time()
 
-    def _album(self, chat, group, text, picture):
-        """A picture of an album: kept with the others until ALBUM_WAIT after the last, then all of them (up to
-        ALBUM_MOST) go as one message, with the album's caption, which Telegram puts on one of them."""
-        album = self.albums.setdefault((chat, group), {"text": "", "pictures": [], "timer": None})
+    def _album_begin(self, chat, group, text):
+        """A picture or file of an album coming in: counted before it's downloaded, with the album's caption, which
+        Telegram puts on one of them. They all go as one message ALBUM_WAIT after the last is in (_album_end)."""
+        album = self.albums.setdefault((chat, group), {"text": "", "pictures": [], "files": [], "timer": None,
+                                                       "coming": 0})
         album["text"] = album["text"] or text
-        if len(album["pictures"]) < ALBUM_MOST:
-            album["pictures"].append(picture)
+        album["coming"] += 1
         if album["timer"] is not None:
             album["timer"].cancel()
-        album["timer"] = asyncio.get_running_loop().call_later(ALBUM_WAIT, self._album_done, chat, group)
+            album["timer"] = None
+
+    def _album_end(self, chat, group, picture, kept):
+        """It's in (or couldn't be had): added, and once none is still coming, the wait for more starts again."""
+        album = self.albums.get((chat, group))
+        if album is None:
+            return
+        if picture and len(album["pictures"]) < ALBUM_MOST:
+            album["pictures"].append(picture)
+        if kept:
+            album["files"].append(kept)
+        album["coming"] -= 1
+        if album["coming"] <= 0:
+            album["timer"] = asyncio.get_running_loop().call_later(ALBUM_WAIT, self._album_done, chat, group)
+
+    def _flush_albums(self, chat, but=None):
+        """An album of this chat still waiting out ALBUM_WAIT goes now, before the message after it."""
+        for key in [k for k, a in self.albums.items() if k[0] == chat and k[1] != but and a["coming"] <= 0]:
+            if self.albums[key]["timer"] is not None:
+                self.albums[key]["timer"].cancel()
+            self._album_done(*key)
 
     def _album_done(self, chat, group):
         album = self.albums.pop((chat, group), None)
-        if album and album["pictures"]:
-            self.on_message(album["text"], chat, album["pictures"])
+        if album and (album["pictures"] or album["files"]):
+            self.on_message(album["text"], chat, album["pictures"], album["files"])
 
     async def _picture(self, msg):
         """A picture you sent: (its bytes, its type), Telegram's biggest size of a photo up to PICTURE_SIDE. None if

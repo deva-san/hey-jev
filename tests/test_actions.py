@@ -153,6 +153,7 @@ class SaysWhatHappened(unittest.TestCase):
 
     def send(self, send):
         siri.STAGED.update(ready={"app": "whatsapp", "contact": "Ravi", "text": "hi"}, until=time.time() + 60)
+        siri.SEND_OK["until"] = time.time() + 30  # as the yes to her question does
         with mock.patch.object(siri.messaging, "send", send):
             return siri.run_plan({"steps": [{"do": "message_send"}], "say": ""}, None)
 
@@ -175,6 +176,7 @@ class SaysWhatHappened(unittest.TestCase):
         siri.SENT_LINE[0] = "Sent to Mum."
         siri.STAGED_INSTALL.update(ready={"action": "install", "name": "VLC", "version": "3.0.24", "id": "VideoLAN.VLC"},
                                    until=time.time() + 60)
+        siri.SEND_OK["until"] = time.time() + 30
         with mock.patch.object(siri.TASK_STORE, "create", lambda *a, **kw: 12):
             failed, _, _, spoken = siri.run_plan({"steps": [{"do": "install_run"}], "say": ""}, None)
         self.assertEqual(failed, [])

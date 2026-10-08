@@ -1424,6 +1424,10 @@ class AssistantWindow:
         self.root.after(50, self._drain)
 
     def _set_status(self, state, detail):
+        if state == "Heard":  # what she heard you say, on its own line above the popup: nothing else changes
+            if self.popup:
+                self.bubble.caption(detail)
+            return
         self.status.configure(text=state)
         if detail is not None:  # None keeps what's there, like her last reply
             detail = " ".join(str(detail).split())

@@ -140,7 +140,8 @@ def clean_text(value):
 
 
 # Speech-to-text writes the same person more than one way: Nemotron heard "Message Mum" as "Message Mom"
-SAME_PERSON = {"mom": "mum", "mommy": "mum", "mummy": "mum", "mumma": "mum", "mama": "mum", "mamma": "mum",
+# not "mama": in Telugu, Tamil and Hindi that's an uncle, and his number would have gone in as Mum's
+SAME_PERSON = {"mom": "mum", "mommy": "mum", "mummy": "mum", "mumma": "mum",
                "amma": "mum", "ammi": "mum", "dad": "dad", "daddy": "dad", "papa": "dad", "pappa": "dad",
                "appa": "dad", "abbu": "dad"}
 
@@ -297,6 +298,18 @@ def window_of(app):
     return found[0] if found else None
 
 
+def again(fn, tries=3, pause=0.4):
+    """fn(), tried again a moment later on a COM error: WhatsApp's web view answers UI Automation with "An event
+    was unable to invoke any of the subscribers" now and then while it redraws. The last error if it never works."""
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception as exc:
+            if "COMError" not in type(exc).__name__ or i == tries - 1:
+                raise
+            time.sleep(pause)
+
+
 def _uia():
     import comtypes.client
     comtypes.client.GetModule("UIAutomationCore.dll")
@@ -326,6 +339,11 @@ def offline_reason(app, hwnd):
 
 
 def compose_box(app, hwnd):
+    """See _compose_box: tried again on a COM error."""
+    return again(lambda: _compose_box(app, hwnd))
+
+
+def _compose_box(app, hwnd):
     """The app's message box, and who the app says it's to: WhatsApp's 2025 app names it "Type a message to Amma",
     the one before "Type a message". (None, "") where Windows can't see it (Telegram draws its own)."""
     prefix = APPS[app]["compose"]
@@ -333,9 +351,12 @@ def compose_box(app, hwnd):
         return None, ""
     uia = _uia()
     root = uia.ElementFromHandle(hwnd)
-    # one lookup for an Edit whose name starts so (MatchSubstring | IgnoreCase), not a walk of the whole tree
-    box = root.FindFirst(4, uia.CreateAndCondition(uia.CreatePropertyCondition(30003, 50004),
-                                                    uia.CreatePropertyConditionEx(30005, prefix, 3)))
+    # one lookup for an Edit whose name has it (MatchSubstring | IgnoreCase), not a walk of the whole tree: the 2025
+    # app's "Type a message to Amma" first, as the caption box of its preview is "Type a message" too
+    edit = uia.CreatePropertyCondition(30003, 50004)
+    box = root.FindFirst(4, uia.CreateAndCondition(edit, uia.CreatePropertyConditionEx(30005, prefix + " to ", 3)))
+    if not box:
+        box = root.FindFirst(4, uia.CreateAndCondition(edit, uia.CreatePropertyConditionEx(30005, prefix, 3)))
     if not box:  # a NULL element, not None: reading it was "NULL COM pointer access", every time
         return None, ""
     name = str(box.CurrentName or "")
@@ -358,6 +379,17 @@ def typed_text(app, hwnd):
     except Exception as exc:
         print(f"  couldn't read the message box: {exc!r}")
         return None
+
+
+def box_shown(app, hwnd, wait=4.0):
+    """What the chat's message box holds once it's there, giving the chat the link opened a few seconds to draw it;
+    None if it never comes (not linked to the phone, or the chat didn't open)."""
+    end = time.time() + wait
+    while True:
+        shown = typed_text(app, hwnd)
+        if shown is not None or time.time() > end:
+            return shown
+        time.sleep(0.5)
 
 
 def type_into(app, hwnd, text):
@@ -443,6 +475,250 @@ def _hosted_by(front, hwnd):
     return False
 
 
+# Files and photos, on WhatsApp: put on the clipboard as File Explorer's Copy does and pasted into the chat, where
+# WhatsApp shows them in its preview ("Open photo, holiday.jpg, item 1 of 2", "Send 2 selected"), read back from there
+# before the yes, and sent with its own Send button after it. A no presses Esc and its Discard.
+MAX_FILES = 10
+MAX_FILE_MB = 100  # WhatsApp takes up to 2 GB, but she'd be uploading for minutes: past this, send it yourself
+
+
+def check_files(paths):
+    """The files, if they can go: there, files, and not too many or too big. Raises with why not."""
+    paths = [os.path.abspath(str(p)) for p in paths or []]
+    if not paths:
+        raise RuntimeError("there's no file to send")
+    if len(paths) > MAX_FILES:
+        raise RuntimeError(f"that's {len(paths)} files, I send up to {MAX_FILES} at a time")
+    for p in paths:
+        if not os.path.isfile(p):
+            raise RuntimeError(f"I can't find {os.path.basename(p)} any more")
+        if os.path.getsize(p) > MAX_FILE_MB * 1024 * 1024:
+            raise RuntimeError(f"{os.path.basename(p)} is over {MAX_FILE_MB} MB, send that one yourself")
+    return paths
+
+
+def _button(hwnd, name, part=False):
+    """See _find_button: tried again on a COM error."""
+    return again(lambda: _find_button(hwnd, name, part))
+
+
+def _find_button(hwnd, name, part=False):
+    """A button in the app's window by its name, or the start of... any part of it with part (one quick lookup when
+    it's there; a long one when it isn't, so only where it's expected or in a clean-up). None if there's none."""
+    uia = _uia()
+    root = uia.ElementFromHandle(hwnd)
+    named = uia.CreatePropertyConditionEx(30005, name, 3) if part else uia.CreatePropertyCondition(30005, name)
+    found = root.FindFirst(4, uia.CreateAndCondition(uia.CreatePropertyCondition(30003, 50000), named))
+    return found if found else None
+
+
+def _click(button):
+    """Clicks a button through UI Automation: no mouse, no keys, so nothing else can be hit."""
+    from comtypes.gen.UIAutomationClient import IUIAutomationInvokePattern
+    button.GetCurrentPattern(10000).QueryInterface(IUIAutomationInvokePattern).Invoke()  # UIA_InvokePatternId
+
+
+WAITING = re.compile(r"Open [\w ]+, (?P<name>.+), item \d+ of \d+")  # "Open photo, holiday.jpg, item 1 of 2"
+
+
+def waiting(hwnd):
+    """See _waiting: tried again on a COM error."""
+    return again(lambda: _waiting(hwnd))
+
+
+def _waiting(hwnd):
+    """What WhatsApp's preview holds now: ([its file names], how many its Send button says), ([], 0) with none. One
+    look through all its buttons, about 3 s on this PC: the quick lookups by name missed a preview that was there,
+    and which box has the keyboard isn't a sure sign of one (a test picture was left waiting in a chat that way)."""
+    uia = _uia()
+    found = uia.ElementFromHandle(hwnd).FindAll(4, uia.CreatePropertyCondition(30003, 50000))
+    names, count = {}, 0
+    for i in range(found.Length if found else 0):
+        try:
+            label = str(found.GetElement(i).CurrentName or "")
+        except Exception:  # one element gone while it redrew: the rest still count
+            continue
+        m = WAITING.fullmatch(label)
+        if m:  # the page shows each element more than once: by the whole label, whose item number tells them apart
+            names[label] = m["name"]
+        m = re.fullmatch(r"Send (\d+) selected", label)
+        if m:
+            count = int(m[1])
+    return sorted(names.values()), count
+
+
+def _caption_box(hwnd):
+    """See _find_caption_box: tried again on a COM error."""
+    return again(lambda: _find_caption_box(hwnd))
+
+
+def _find_caption_box(hwnd):
+    """The caption box of WhatsApp's preview: an Edit named "Type a message", to nobody. None if there's none."""
+    uia = _uia()
+    found = uia.ElementFromHandle(hwnd).FindFirst(4, uia.CreateAndCondition(
+        uia.CreatePropertyCondition(30003, 50004), uia.CreatePropertyCondition(30005, "Type a message")))
+    return found if found else None
+
+
+def _focus_box(app, hwnd):
+    """The chat's message box, with the keyboard in it and the app in front, or raises."""
+    end = time.time() + 3.0  # the chat the link opened may still be drawing its box: a moment, then again
+    while True:
+        box, _ = compose_box(app, hwnd)
+        if box and in_front(app, hwnd):
+            if not box.CurrentHasKeyboardFocus:  # the link usually leaves it there already
+                box.SetFocus()
+                time.sleep(0.2)
+            if box.CurrentHasKeyboardFocus and in_front(app, hwnd):
+                return box
+        if time.time() > end:
+            raise RuntimeError(f"I couldn't get to the message box in {APPS[app]['say']}, so I've not typed "
+                               f"anything" if box else f"{APPS[app]['say']} didn't come to the front, so I've not "
+                               f"typed anything")
+        time.sleep(0.3)
+
+
+def prepare_files(app, contact, paths, caption=""):
+    """Open the chat and put the files in WhatsApp's preview, with a caption if there's one, ready for a yes.
+    Nothing is sent. Returns what she should read back, as prepare does."""
+    app = app_key(app)
+    if app != "whatsapp":
+        raise RuntimeError("I can only send files on WhatsApp so far")
+    paths = check_files(paths)
+    caption = " ".join(str(caption or "").split())[:MAX_TEXT]
+    name, handle = find_contact(contact, app)
+    hwnd = open_chat(app, handle, "")
+    if box_shown(app, hwnd) is None:  # as in prepare: not linked, or the chat didn't open
+        why = offline_reason(app, hwnd)
+        raise RuntimeError(why or f"{APPS[app]['say']} didn't open the chat with {name}, so I've not sent anything")
+    if waiting(hwnd)[1] and not discard_preview(app, hwnd):  # files left waiting from before would go too
+        raise RuntimeError(f"something's already waiting to go in {APPS[app]['say']}, so I've not added anything")
+    box = _focus_box(app, hwnd)
+    _, to = compose_box(app, hwnd)
+    if box_value(box):  # a draft from before: it would go as the caption
+        win.press("ctrl", "a")
+        win.press("backspace")
+    saved, changed = win.clipboard_snapshot(), None
+    names, count = [], 0
+    try:
+        win.set_clipboard_files(paths)
+        changed = win.clipboard_sequence()
+        time.sleep(1.2)  # the chat the link just opened can miss a paste straight away
+        if not (in_front(app, hwnd) and box.CurrentHasKeyboardFocus):
+            raise RuntimeError(f"{APPS[app]['say']} went out of the front, so I've not sent anything")
+        win.press("ctrl", "v")
+        for _ in range(4):
+            time.sleep(1.0)
+            names, count = waiting(hwnd)
+            if count:
+                break
+    except Exception as exc:  # whatever was pasted is taken out again, never left one Enter from going
+        discard_preview(app, hwnd)
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(f"{APPS[app]['say']} stopped answering, so I've not sent anything") from exc
+    finally:
+        try:  # what you'd copied comes back, all of it, unless you've copied something since
+            if changed is None or win.clipboard_sequence() == changed:
+                win.clipboard_restore(saved)
+        except Exception as exc:
+            print(f"  couldn't put the clipboard back: {exc!r}")
+    if count != len(paths) or names != sorted(os.path.basename(p) for p in paths):
+        discard_preview(app, hwnd)
+        raise RuntimeError(f"{APPS[app]['say']} didn't take {'the file' if len(paths) == 1 else 'all the files'} "
+                           f"as they are, so I've not sent anything")
+    try:
+        return _with_caption(app, hwnd, caption, {"app": app, "say": APPS[app]["say"], "contact": name,
+                                                  "handle": handle, "text": caption, "hwnd": hwnd, "checked": True,
+                                                  "other": False, "to": to, "files": paths})
+    except Exception as exc:
+        discard_preview(app, hwnd)
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(f"{APPS[app]['say']} stopped answering, so I've not sent anything") from exc
+
+
+def _with_caption(app, hwnd, caption, ready):
+    """The caption typed into the preview's own box and read back, then ready as it is."""
+    if caption:  # into the preview's own caption box: "Type a message", to nobody
+        box = _caption_box(hwnd)
+        if box and not box.CurrentHasKeyboardFocus:
+            box.SetFocus()
+            time.sleep(0.2)
+        if not (box and box.CurrentHasKeyboardFocus and in_front(app, hwnd)):
+            discard_preview(app, hwnd)
+            raise RuntimeError("I couldn't get to the caption box, so I've not sent anything")
+        win.type_text(caption)
+        time.sleep(0.4)
+        if box_value(box) != caption:
+            discard_preview(app, hwnd)
+            raise RuntimeError(f"{APPS[app]['say']} didn't take the caption, so I've not sent anything")
+    return ready
+
+
+def discard_preview(app, hwnd):
+    """Take the files out of WhatsApp's preview with its own Remove attachment buttons, so they aren't left waiting
+    in the chat (Esc only asks "Discard unsent message?"), then check none are. In front or not: the buttons are
+    clicked through UI Automation, so nothing else can be hit."""
+    if not hwnd or not user32.IsWindow(hwnd):
+        return False
+    for _ in range(MAX_FILES + 4):
+        try:
+            if not waiting(hwnd)[1]:
+                return True
+            button = _button(hwnd, "Remove attachment")
+            if button is None:
+                break
+            _click(button)
+        except Exception as exc:  # "An event was unable to invoke any of the subscribers": a moment, then again
+            print(f"  clearing WhatsApp's preview: {type(exc).__name__}, again")
+        time.sleep(0.6)
+    try:
+        return not waiting(hwnd)[1]
+    except Exception:
+        return False
+
+
+def send_files(ready):
+    """Click Send in WhatsApp's preview, once it still holds exactly these files in the same chat, then check it went
+    (the preview closes, and the chat's message box has the keyboard again). Only ever called after a yes."""
+    app, hwnd, paths = ready["app"], ready.get("hwnd"), ready["files"]
+    if not hwnd or not user32.IsWindow(hwnd):
+        raise RuntimeError(f"{APPS[app]['say']} isn't open any more, so I've not sent it")
+    try:
+        win.bring_to_front(hwnd)
+    except Exception:
+        pass
+    time.sleep(0.5)
+    if not in_front(app, hwnd):
+        raise RuntimeError(f"{APPS[app]['say']} isn't in front, so I've not sent it")
+    _, to = compose_box(app, hwnd)
+    if ready.get("to") and to != ready["to"]:
+        raise RuntimeError("another chat is open now, so I've not sent it")
+    names, count = waiting(hwnd)
+    button = _button(hwnd, f"Send {count} selected") if count else None
+    if count != len(paths) or names != sorted(os.path.basename(p) for p in paths) or button is None:
+        raise RuntimeError("what's waiting to go changed, so I've not sent it")
+    try:
+        _click(button)  # once, whatever it says: Invoke often reports an error for a click that worked
+    except Exception as exc:
+        print(f"  clicking Send: {type(exc).__name__}, checking what it did")
+    answered = False
+    for _ in range(6):  # the preview closes once WhatsApp has taken them
+        time.sleep(1.0)
+        try:
+            left = waiting(hwnd)[1]
+        except Exception:
+            continue
+        answered = True
+        if not left:
+            what = os.path.basename(paths[0]) if len(paths) == 1 else f"{len(paths)} files"
+            return True, f"Sent {what} to {ready['contact']}."
+    if not answered:
+        raise RuntimeError("I pressed Send but couldn't check it went, so look at WhatsApp before asking again")
+    raise RuntimeError("WhatsApp still shows it waiting to go, so it may not have sent")
+
+
 def prepare(app, contact, text):
     """Open the chat with the message typed in, ready for a yes. Returns what she should read back."""
     app = app_key(app)
@@ -451,7 +727,7 @@ def prepare(app, contact, text):
     text = clean_text(text)
     name, handle = find_contact(contact, app)
     hwnd = open_chat(app, handle, text)
-    if APPS[app]["compose"] and typed_text(app, hwnd) is None:
+    if APPS[app]["compose"] and box_shown(app, hwnd) is None:
         # no message box: not linked to the phone (the Reconnect button: a 7 s look on the 2025 app's big page, so
         # only now), or the chat didn't open, as for a number not on WhatsApp. Never Enter into whatever that is
         why = offline_reason(app, hwnd)
@@ -467,6 +743,8 @@ def prepare(app, contact, text):
 
 def send(ready):
     """Press Enter in the chat she opened, then check it went. Only ever called after a yes."""
+    if ready.get("files"):
+        return send_files(ready)
     if ready.get("other"):
         return _send_other(ready)
     app, hwnd, text = ready["app"], ready.get("hwnd"), ready["text"]
@@ -584,6 +862,8 @@ def discard(ready):
         return False
     try:
         app, hwnd = ready.get("app"), ready.get("hwnd")
+        if ready.get("files"):
+            return discard_preview(app, hwnd)
         if not (in_front_of(ready["obj"]) if ready.get("other") else (hwnd and in_front(app, hwnd))):
             return False
         win.press("ctrl", "a")

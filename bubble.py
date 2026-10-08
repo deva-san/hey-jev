@@ -155,6 +155,66 @@ def dots(t, w, h, zoom=0.42):
 
 
 # --------------------------------------------------------------------------- the window
+class Caption:
+    """A line above the pill with what she heard you say ("You: open Notepad"), after she's put right the words she
+    knows speech-to-text gets wrong, so you can see she has them right before she acts (asked for on 8 October). It
+    goes with the pill, and after 15 s at most. Never takes the focus and isn't in her screenshots, as the pill."""
+
+    def __init__(self, root, s):
+        self.root, self.s, self.job, self.visible = root, s, None, False
+        families = set(tkfont.families(root))
+        self.font = tkfont.Font(root=root, family="Segoe UI" if "Segoe UI" in families else "TkDefaultFont", size=10)
+        self.h = round(30 * s)
+        self.top = tk.Toplevel(root, bg=KEY)
+        self.top.withdraw()
+        self.top.overrideredirect(True)
+        self.top.attributes("-topmost", True)
+        self.top.attributes("-transparentcolor", KEY)
+        self.top.attributes("-alpha", 0.92)
+        self.canvas = tk.Canvas(self.top, width=10, height=self.h, bg=KEY, highlightthickness=0, bd=0)
+        self.canvas.pack()
+        self.top.geometry(f"10x{self.h}+-20000+-20000")
+        self.top.deiconify()
+        self.top.update_idletasks()
+        self.hwnd = win.root_hwnd(self.top.winfo_id())
+        win.make_overlay(self.hwnd)
+        win.NO_CAPTURE.append(self.hwnd)
+        win.hide_window(self.hwnd)
+
+    def show(self, text, above):
+        """"You: text", centred, above the bottom of the work area by above px and a gap."""
+        text = " ".join(str(text or "").split())
+        if not text:
+            return self.hide()
+        text, limit = "You: " + text, round(MAX_TEXT * self.s)
+        if self.font.measure(text) > limit:
+            while text and self.font.measure(text + "\u2026") > limit:
+                text = text[:-1]
+            text = text.rstrip() + "\u2026"
+        w = self.font.measure(text) + round(28 * self.s)
+        c, h, r = self.canvas, self.h, self.h / 2
+        c.configure(width=w)
+        c.delete("all")
+        c.create_oval(0, 0, h, h, fill=PILL, outline=PILL)
+        c.create_oval(w - h, 0, w, h, fill=PILL, outline=PILL)
+        c.create_rectangle(r, 0, w - r, h, fill=PILL, outline=PILL)
+        c.create_text(w / 2, r, text=text, fill=DIM_TEXT, font=self.font)
+        left, top, right, bottom = win.work_area()
+        win.show_no_activate(self.hwnd, left + (right - left - w) // 2, bottom - above - h - round(6 * self.s), w, h)
+        self.visible = True
+        if self.job:
+            self.root.after_cancel(self.job)
+        self.job = self.root.after(15000, self.hide)  # never left up: the pill going takes it sooner
+
+    def hide(self):
+        if self.job:
+            self.root.after_cancel(self.job)
+            self.job = None
+        if self.visible:
+            win.hide_window(self.hwnd)
+            self.visible = False
+
+
 class Bubble:
     def __init__(self, root):
         self.root = root
@@ -186,6 +246,7 @@ class Bubble:
         self.visible, self.state, self.text, self.alpha, self.fade = False, None, "", 0.0, 0
         self.level, self.since, self.t0, self.job, self.hide_job = 0.0, 0.0, time.time(), None, None
         self.outside = self._outside()
+        self.heard = Caption(root, self.s)  # what she heard you say, on a line above
 
     # ------------------------------------------------------------------ what the app calls
     def show(self, state, text=None):
@@ -209,15 +270,23 @@ class Bubble:
         if not self.job:
             self._tick()
 
+    def caption(self, text):
+        """What she heard you say, on a line above the pill while she's on it: you can see she got the words."""
+        self.heard.show(text, self.h + round(28 * self.s))
+
     def hide(self, delay=0):
         """Fade out, after delay ms. Showing it again in the meantime keeps it up."""
         if delay:
             if self.visible and not self.hide_job:
                 self.hide_job = self.root.after(delay, self.hide)
+            elif not self.visible:
+                self.heard.hide()
             return
         self.hide_job = None
         if self.visible:
             self.fade = -1
+        else:
+            self.heard.hide()
 
     def close(self):
         """Gone straight away, for quitting."""
@@ -225,6 +294,7 @@ class Bubble:
             if job:
                 self.root.after_cancel(job)
         self.job = self.hide_job = None
+        self.heard.hide()
         if self.visible:
             win.hide_window(self.hwnd)
             self.visible = False
@@ -281,6 +351,7 @@ class Bubble:
             print(f"  bubble draw failed: {exc}")
         if self.fade < 0 and self.alpha <= 0:
             win.hide_window(self.hwnd)
+            self.heard.hide()  # the turn it was for is over
             self.visible, self.job, self.state = False, None, None
             return
         self.job = self.root.after(33, self._tick)

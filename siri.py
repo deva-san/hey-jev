@@ -845,7 +845,7 @@ def _weather(m):
 # number or username you say next finishes it.
 STAGED = {"ready": None, "until": 0.0}
 SENT_LINE = [""]  # what the send actually managed, so she says that and not a guess
-ASKED = {"alias": "", "app": "", "text": "", "until": 0.0}
+ASKED = {"alias": "", "app": "", "text": "", "until": 0.0, "files": None}
 MESSAGE_WAIT = 90.0  # seconds a staged message or an asked-for contact stays live
 DIGIT_WORDS = {"zero": "0", "oh": "0", "o": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
                "six": "6", "seven": "7", "eight": "8", "nine": "9", "double": "", "plus": ""}
@@ -877,18 +877,20 @@ def stage_message(app, contact, text):
 
     Apps with a link of their own take it; the rest get walked through their own search box."""
     key = messaging.app_key(app)
+    if (STAGED["ready"] or {}).get("files"):
+        drop_staged()  # files waiting before aren't left in WhatsApp's preview
     try:
         ready = messaging.prepare(app, contact, text) if key else \
             messaging.prepare_other(app, find_app(app), contact, text)
     except messaging.NeedContact as exc:
-        ASKED.update(alias=str(contact), app=key or "", text=str(text), until=time.time() + MESSAGE_WAIT)
+        ASKED.update(alias=str(contact), app=key or "", text=str(text), until=staged_for(), files=None)
         return make_plan(say=str(exc))
     except (RuntimeError, ValueError) as exc:
         return make_plan(say=f"I've not sent anything: {exc}.")
-    STAGED.update(ready=ready, until=time.time() + MESSAGE_WAIT)
+    STAGED.update(ready=ready, until=staged_for())
     where = ready.get("say") or messaging.say_of(ready["app"])
     to = re.sub(r"[^\w\s'.-]", "", str(ready.get("to") or "")).strip()  # the chat's name in the app, emoji off
-    if ready["checked"] and to and messaging.alias_key(to) != messaging.alias_key(ready["contact"]):
+    if ready["checked"] and to and to.casefold() != str(ready["contact"]).strip().casefold():
         unseen = f" The chat open is {to}."  # the yes is to that chat: say it if it isn't the name you used
     elif ready["checked"]:
         unseen = ""
@@ -948,13 +950,98 @@ def direct_install(words):
     return None
 
 
+def stage_files(app, contact, paths, caption=""):
+    """Put the files in the chat's preview and ask before sending, as stage_message does for words."""
+    if (STAGED["ready"] or {}).get("files"):
+        drop_staged()
+    try:
+        ready = messaging.prepare_files(app, contact, paths, caption)
+    except messaging.NeedContact as exc:
+        ASKED.update(alias=str(contact), app=messaging.app_key(app) or "", text=str(caption or ""),
+                     until=staged_for(), files=list(paths))
+        return make_plan(say=str(exc))
+    except (RuntimeError, ValueError) as exc:
+        return make_plan(say=f"I've not sent anything: {exc}.")
+    STAGED.update(ready=ready, until=staged_for())
+    names = [os.path.basename(p) for p in ready["files"]]
+    what = names[0] if len(names) == 1 else f"{len(names)} files, {', '.join(names[:-1])} and {names[-1]}"
+    to = re.sub(r"[^\w\s'.-]", "", str(ready.get("to") or "")).strip()
+    chat = f" The chat open is {to}." if to and to.casefold() != str(ready["contact"]).strip().casefold() else ""
+    said = f" with \u201c{ready['text']}\u201d" if ready["text"] else ""
+    return {"steps": [], "say": f"Send {what}{said} to {ready['contact']} on {ready['say']}?{chat}", "exact": True,
+            "confirm": {"steps": [{"do": "message_send"}], "say": ""}}
+
+
+# Sending on a file or photo: "send this to Amma", "share these photos with Mum on WhatsApp", "forward the PDF to
+# Ravi". What goes is only ever what you gave her: sent from your phone in the last FILES_FOR, or selected in File
+# Explorer in front of you. Never a path the model names, so nothing on the PC can be sent that you didn't pick
+FILES_FOR = 600.0
+SHARE = re.compile(rf"(?:send|share|forward)\s+(?:(?:this|these|that|those|it|them|the|my)\s+)?(?:(?:selected|"
+                   rf"same)\s+)?(?:(?P<what>photos?|pictures?|pics?|images?|files?|documents?|docs?|pdfs?|videos?|"
+                   rf"attachments?|screenshots?)\s+)?(?:(?:to|with)\s+)(?P<who>{WHO})(?:\s+on\s+(?P<app>{APP_WORDS}))?"
+                   rf"(?:,?\s+(?:saying|with (?:the )?caption|and say)\s+(?P<caption>.+))?", re.I)
+PHONE_FILES = {}  # chat -> ([paths], when): what you sent her from your phone, kept to send on
+
+
+def given_files():
+    """The files you gave her for this turn: sent from your phone a moment ago, or selected in File Explorer in
+    front of you. [] if neither."""
+    if origin() == "phone":
+        got = PHONE_FILES.get(PHONE_CHAT.get())
+        return [p for p in got[0] if os.path.isfile(p)] if got and time.time() - got[1] < FILES_FOR else []
+    try:
+        return win.selected_files()
+    except RuntimeError:
+        raise  # said as it is: which tab
+    except Exception as exc:
+        print(f"  couldn't read what's selected: {exc!r}")
+        return []
+
+
+def direct_share(words):
+    """"Send this to Amma", said plainly: the files you gave her, to that person, asked about first. Before
+    direct_message, which would have sent the word "this"."""
+    m = SHARE.fullmatch(" ".join(str(words).split()).strip(" .!?"))
+    if not m:
+        return None
+    who = re.sub(r"\s+(?:please|now|too|for me|thanks|thank you)$", "", m["who"], flags=re.I).strip()
+    if TO_ME.fullmatch(who) or (not m["caption"] and SECOND_COMMAND.search(" " + plain(who))):
+        return None  # "send this to my phone", or "... to Amma and lock the PC": not this rule's
+    if messaging.app_key(m["app"] or "whatsapp") != "whatsapp":
+        return make_plan(say="I can only send files on WhatsApp so far.")
+    return share_files(who, m["caption"] or "")
+
+
+TO_ME = re.compile(r"(?:me|myself|(?:my|the) (?:phone|mobile|telegram|laptop|pc|computer))", re.I)
+
+
+def share_files(who, caption=""):
+    """The files you gave her, to who on WhatsApp, asked about first; or why not."""
+    try:
+        paths = given_files()
+    except RuntimeError as exc:
+        return make_plan(say=f"{exc}.")
+    if not paths:
+        return make_plan(say="Send it to me here first, then tell me who it's for." if origin() == "phone" else
+                         "Select it in File Explorer first, then ask me again.")
+    return stage_files("whatsapp", who, paths, caption)
+
+
 def drop_staged():
-    """A no to a message: forget it, and clear what she typed so it isn't left sitting in someone's chat."""
+    """A no to a message: forget it, and clear what she typed so it isn't left sitting in someone's chat, however
+    long it's been waiting."""
     STAGED_INSTALL.update(ready=None, until=0.0)  # a no to an install: nothing was downloaded, so just forget it
-    ready = STAGED["ready"] if time.time() < STAGED["until"] else None
+    ready = STAGED["ready"]
     STAGED.update(ready=None, until=0.0)
     if ready and messaging.discard(ready):
         print(f"  cleared the unsent message to {ready['contact']}")
+    elif ready and ready.get("files"):
+        print(f"  couldn't take the files out of WhatsApp's preview for {ready['contact']}")
+
+
+def staged_for():
+    """How long a staged message or files wait for the yes: a phone question's buttons wait PHONE_WAITS."""
+    return time.time() + (PHONE_WAITS if origin() == "phone" else MESSAGE_WAIT)
 
 
 def finish_asked(words):
@@ -982,8 +1069,11 @@ def finish_asked(words):
         saved = messaging.save_contact(alias, app, handle)
     except (ValueError, RuntimeError):
         return None  # not a number or username after all, so let the rest of the turn have it
-    ASKED.update(alias="", app="", text="", until=0.0)
+    files = ASKED.get("files")
+    ASKED.update(alias="", app="", text="", until=0.0, files=None)
     print(f"  learned contact: {saved}")
+    if files:  # the files that were waiting for it
+        return stage_files(app, alias, files, text)
     if not text:
         return make_plan(say=f"Saved {saved}.")
     return stage_message(app, alias, text)
@@ -1453,6 +1543,10 @@ def _quick(words, gate=False):
             return make_plan(skill["plan"]["steps"], skill["plan"]["say"])
     # Without her name the model decides it was for her first: staging opens the chat with the words typed in
     # ("WhatsApp Mum: running late" from across the room), and an install sits through winget searches
+    share = direct_share(words) if gate != "cold" else None
+    if share:
+        print("  local share")
+        return share
     message = direct_message(words) if gate != "cold" else None
     if message:
         print("  local message")
@@ -1558,9 +1652,10 @@ lookup, recall, web, read, weather, news and skill_view send the results back to
 {"do":"note","title":"Shopping list","text":"..."}  save a note for them. {"do":"open_notes"}  show their notes
 {"do":"command","command":"npm test","cwd":"C:\\\\path\\\\to\\\\project","description":"Run the tests"}  only when they explicitly ask for terminal, command, test, build, lint, Git or system-diagnostic work: run it in the background, hidden. Code checks it: read-only checks and tests run; anything that changes files or programs waits for their explicit approval; destructive/admin/security/credential/download commands are blocked. Always give an existing full cwd. Never put secrets in a command
 {"do":"schedule","when":"2026-10-07T18:00:00","repeat":"","description":"Check C drive","task":{"kind":"lookup","what":"disk"}}  durable work at a time. when: local ISO date/time, "tomorrow at 6 PM", "in 2 hours". repeat is empty, "every 30 minutes", "daily at 6 PM", or "every Monday at 9 AM". task is one of: {"kind":"reminder","text":"call Mum"}; {"kind":"lookup","what":"disk|battery|cpu|memory|apps|network|uptime|system"}; {"kind":"research","topic":"..."}; {"kind":"command","command":"git status","cwd":"C:\\\\path"}. Never schedule send, delete, publish, pay, account, security, typing, clicking or screen actions
-{"do":"send_screenshot","caption":""}  send a picture of their screen to their phone on Telegram, only when they ask for one ("send me a screenshot", "send my screen to my phone"). It goes only to their own paired Telegram, never anyone else; to a person, that's a message. On the phone, "screenshot" means this
+{"do":"send_screenshot"}  a picture of their screen to their own phone, only when asked ("send me a screenshot"). On the phone, "screenshot" means this
 {"do":"code","task":"add a dark mode toggle to the settings page","cwd":"C:\\\\path\\\\to\\\\project"}  coding work on one of their projects, when they ask for it: OpenCode does it in the background in that git project folder, she asks first and tells them when it's done. Always the full folder
 {"do":"install","app":"VLC"}  download and install, or update, an app on this PC: app exactly as they named it. She looks it up in winget and the Microsoft Store herself, picks the right version for this PC, reads it back and asks first. Never use a website, google or a command to download an app
+{"do":"share","contact":"Mum","caption":""}  sends on WhatsApp the file they just sent you or selected in File Explorer
 {"do":"message","app":"whatsapp","contact":"Mum","text":"hi"}  message someone in a chat app: whatsapp, telegram, or another one on this PC like signal, slack or discord. app and contact exactly as they said them, text exactly the words to send. You never send it: the chat opens with the text typed in and they say yes first. If you don't know the person or the app, still use this step, she works it out herself. Only for a plain message they dictated; never invent or add to their words
 {"do":"contact","action":"save","alias":"Mum","app":"whatsapp","number":"+919876543210"}  remember who someone is, when they tell you a number or username. action remove forgets them. For telegram use "username" instead of "number"
 {"do":"task_control","action":"cancel","id":3}  cancel a queued/running task. action approve runs a task that is waiting for approval. Listing tasks and schedules is handled on the PC
@@ -1611,10 +1706,14 @@ ASKS_FOR = {"type": EDIT_WORDS, "keys": EDIT_WORDS, "close": re.compile(r"\b(?:c
 # a message from having her save its own number as Mum's
 READ_SAFE = {"open", "website", "youtube", "google", "media", "volume", "scroll", "new_tab", "timer", "note",
              "open_notes", "research", "window", "screenshot", "open_folder", "abort_shutdown", "dictate", "message",
-             "install", "command"}
+             "install", "command", "share"}  # message, install and share ask for themselves, with what and who
 # Shutting down or restarting always asks first, whoever planned it, and only runs straight after a spoken yes
 POWER_STEPS = {"shutdown", "restart"}
 POWER_OK = {"until": 0.0}
+# and a message, a file or an install only straight after a yes to her own question about it: a model that saw
+# "yes" -> message_send in the last turns planned it for "yes send it" typed on the phone, with no button tapped
+SEND_OK = {"until": 0.0}
+ASKS_YES = {"message_send", "install_run"}
 # Shortcuts that only move around, play or open things, fine whoever asked
 SAFE_KEYS = {"ctrl+t", "ctrl+w", "ctrl+shift+t", "alt+left", "alt+right", "f5", "ctrl+r", "f", "k", "space", "esc",
              "page_down", "page_up", "home", "end", "ctrl+tab", "ctrl+shift+tab", "f11", "m", "j", "l", "shift+n",
@@ -2387,7 +2486,7 @@ KNOWN_STEPS = {"open", "close", "minimise", "website", "youtube", "google", "med
                "new_tab", "timer", "cancel_timers", "dark_mode", "lock", "sleep", "shutdown", "restart", "abort_shutdown",
                "dictate", "screen", "memory", "lookup", "recall", "web", "read", "weather", "news", "skill_view",
                "skill", "research", "note", "open_notes", "command", "schedule", "install", "message", "contact", "code",
-               "send_screenshot", "shortcut",
+               "send_screenshot", "shortcut", "share",
                "task_control", "window", "open_folder", "screenshot", "message_send", "install_run", "task_queued",
                "click", "wait"}
 
@@ -2758,7 +2857,7 @@ def think(text, gate, notify=None, sure=1.0):
     if not gate and any(s["do"] in INFO for s in plan["steps"]) and not tidy(plan.get("say")) \
             and not plan.get("ignore"):
         plan["say"] = say_line("looked_no_answer")  # it wanted yet another look: never "say that again" for that
-    plan["steps"] = [s for s in plan["steps"] if s["do"] not in INFO]
+    plan["steps"] = [s for s in plan["steps"] if s["do"] not in INFO and s["do"] not in ASKS_YES]  # never planned
     # "llm" lines count as questions answered in the window's stats, "plan" lines as commands
     print(f"  {'plan' if plan['steps'] else 'llm'} {model} {int((time.time() - t) * 1000)}ms  "
           f"{usage.get('completion_tokens', '?')} tokens  $0 (free)")
@@ -3647,10 +3746,16 @@ def do_step(step):
         return f"sent to your phone ({len(picture) // 1024} KB)"
     if do == "message_send":  # only ever reached through a yes to the question stage_message asked
         SENT_LINE[0] = ""  # never the last one's: she said "Sent to Mum." for a message to Ravi
-        ready = STAGED["ready"] if time.time() < STAGED["until"] else None
+        if time.time() >= SEND_OK["until"]:
+            raise RuntimeError("I only send after you say yes to my question about it")
+        SEND_OK["until"] = 0.0  # one yes, one send
+        stale, fresh = STAGED["ready"], time.time() < STAGED["until"]
         STAGED.update(ready=None, until=0.0)
-        if not ready:
+        if not (stale and fresh):
+            if stale:
+                messaging.discard(stale)  # not left waiting in the chat either
             raise RuntimeError("That message isn't waiting any more, so I've not sent it")
+        ready = stale
         _, said = messaging.send(ready)
         SENT_LINE[0] = said
         print(f"  sent on {ready['app']} to {ready['contact']}")
@@ -3659,6 +3764,9 @@ def do_step(step):
         raise RuntimeError("I ask before sending a message")
     if do == "install_run":  # only ever reached through a yes to the question stage_install asked
         SENT_LINE[0] = ""
+        if time.time() >= SEND_OK["until"]:
+            raise RuntimeError("I only install after you say yes to my question about it")
+        SEND_OK["until"] = 0.0
         ready = STAGED_INSTALL["ready"] if time.time() < STAGED_INSTALL["until"] else None
         STAGED_INSTALL.update(ready=None, until=0.0)
         if not ready:
@@ -3803,7 +3911,7 @@ def run_plan(plan, notify):
     looks = next((str(s.get("task") or "") for s in steps if s["do"] == "screen"), None)
     first = any(s["do"] in SPEAK_FIRST or (s["do"] == "volume" and str(s.get("to")).lower() in ("mute", "0")) for s in steps)
     last = max((i for i, s in enumerate(steps) if s["do"] in SAY_AFTER and looks is None and not first), default=-1)
-    line = tidy(plan.get("say"), not plan.get("confirm")) or \
+    line = (str(plan.get("say") or "") if plan.get("exact") else tidy(plan.get("say"), not plan.get("confirm"))) or \
         (say_line("looking") if looks is not None else "" if last >= 0 else default_line(steps))
     failed, voice_error, spoken, seen = [], None, [], []
     if REPLY_TO.get() is None:
@@ -4222,6 +4330,19 @@ PLAYBACK = {"media", "volume", "keys", "scroll"}  # what she does without her na
 UNSURE = 0.55  # without her name, words speech-to-text is less sure of than this are let go: mumbling, talk across
 #                the room, another language (0.4 to 0.6 on this PC's clips). Clear speech came out above 0.9
 CHECK_BELOW = 0.7  # with her name, below this the model is told the words may be wrong, so it asks rather than guess
+# Below CHECK_BELOW, said to her (her name, right Alt, or a follow-up that sounds like a request), she asks "Did you
+# say: ...?" before doing anything, and a yes does what she heard: speech-to-text gets words wrong (asked for on 8
+# October: say the message back first). Talk around the room she lets go quietly, as before; and the words she acts
+# on show above the popup every time ("Heard", see assistant_ui)
+HEARD = {"words": None, "until": 0.0}
+SLIPS = re.compile(r"\b(" + "|".join(sorted((re.escape(k) for k in fast_intent.COMMON_SLIPS), key=len, reverse=True))
+                   + r")\b", re.I)
+
+
+def heard_as(words):
+    """What she heard, with the words speech-to-text is known to get wrong put right, for you to see: "open prone"
+    is "open chrome"."""
+    return SLIPS.sub(lambda m: fast_intent.COMMON_SLIPS[m[1].lower()], str(words))
 # Words that ask her to do something: without her name, only these get a "sorry, I'm slow" when the model fails
 COMMAND = re.compile(r"\b(?:open|close|quit|play|pause|stop|resume|search|google|scroll|turn|make|set|start|launch|"
                      r"show|type|write|volume|louder|quieter|mute|full ?screen|next|skip|previous|remind|timer|lock)\b",
@@ -4520,6 +4641,15 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     text, words = fix_names(text), fix_names(text if words is None else words)
     text, words = fix_vocab(text), fix_vocab(words)  # their dictionary, as for dictation
     MEMORY.reset_consolidation_failures()
+    asked = HEARD["words"] if time.time() < HEARD["until"] and origin() == "voice" else None
+    HEARD.update(words=None, until=0.0)
+    if asked and YES.fullmatch(plain(words)):  # "Did you say: open Notepad?" "Yes": what she heard, as sure as can be
+        print(f"  (yes, they said {asked!r})")
+        text = words = speech.heard(str(asked), 1.0)
+        sure = 1.0
+    elif asked and NO.fullmatch(plain(words)):
+        say("Okay, say it again.", notify)
+        return True
     note = None  # shown in the window instead of her line, when something needs fixing
     # kept through talk she lets go ("Hmm", a mumble, someone else), so the yes can still follow; gone once she acts
     pending = PENDING["plan"] if time.time() < PENDING["until"] and PENDING["origin"] == origin() and \
@@ -4535,6 +4665,8 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         plan = pending
         if any(s.get("do") in POWER_STEPS for s in plan.get("steps") or []):
             POWER_OK["until"] = time.time() + 20  # this yes, and only this one, lets the shutdown or restart run
+        if any(s.get("do") in ASKS_YES for s in plan.get("steps") or []):
+            SEND_OK["until"] = time.time() + 30  # and this one the message, the files or the install
     # any no in the first few seconds; after that a message stays waiting, and "Jev, stop the music" or "cancel the
     # timer" is that, where it was taken as a no to the message and the music played on
     elif pending and NO.fullmatch(answer) and (time.time() < PENDING["soon"] or not COMMAND.search(answer)):
@@ -4550,7 +4682,16 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
             emit(notify, "Ready", None)
             return False
         plan = make_plan(say=say_line("go_ahead"))  # "yes" to her "Anything you'd like me to do?"
+    elif sure < CHECK_BELOW and origin() == "voice" and not TAPPED.get() and \
+            (not gate or (gate is True and could_be_request(words))) and not YES.fullmatch(plain(words)):
+        # unsure of the words, and said to her: what she heard, back to you before she does anything
+        HEARD.update(words=str(words), until=time.time() + FOLLOW_UP + 8)
+        print(f"  (only {sure:.0%} sure of the words: asking)")
+        emit(notify, "Heard", heard_as(words))
+        plan = make_plan(say=f"Did you say: {heard_as(words)}?")
     else:
+        if origin() == "voice":
+            emit(notify, "Heard", heard_as(words))  # above the popup, before she acts: you can see she has the words
         # a screenshot for the phone: straight away when called by name, or asked on the phone; heard without her
         # name, the model decides it was for her first, as for anything that leaves the PC
         plan = (None if gate else phone_screenshot(words)) or quick(words, gate)
@@ -4608,8 +4749,14 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
             plan = {"steps": [], "say": confirm_question(power), "confirm": plan}
     if not plan.get("confirm"):  # else a yes or no decides, once she's asked (below)
         plan = prepare_task_steps(plan)  # command/schedule steps become durable rows before anything runs
-        first = next((s for s in plan.get("steps") or [] if s.get("do") == "message"), None)
-        if first:  # the model planned a message: open the chat with it typed in and ask, never send
+        first = next((s for s in plan.get("steps") or [] if s.get("do") in ("message", "share")), None)
+        if first and first["do"] == "share":  # the files you gave her, never a path the model named
+            who = str(first.get("contact") or first.get("to") or "")
+            plan = make_plan(say="I can only send files on WhatsApp so far.") \
+                if messaging.app_key(first.get("app") or "whatsapp") != "whatsapp" else \
+                make_plan(say="I can send it to your phone, just ask for a screenshot.") if TO_ME.fullmatch(who) else \
+                share_files(who, first.get("caption") or first.get("text") or "")
+        elif first:  # the model planned a message: open the chat with it typed in and ask, never send
             plan = stage_message(first.get("app"), first.get("contact") or first.get("to"), first.get("text"))
         wanted = next((s for s in plan.get("steps") or [] if s.get("do") == "install"), None)
         if wanted:  # the model planned an install: look it up and ask, never install straight away
@@ -4618,7 +4765,10 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     if not plan.get("steps") and not tidy(plan.get("say")):
         plan = make_plan(say=say_line("not_caught" if origin() == "voice" else "not_worked_out"))
     if PENDING["origin"] == origin():
-        PENDING["plan"] = None  # answered, or something else asked for instead
+        old, PENDING["plan"] = PENDING["plan"], None  # answered, or something else asked for instead
+        if old is not None and plan is not old and not plan.get("confirm") and (STAGED["ready"] or {}).get("files") \
+                and any(s.get("do") == "message_send" for s in old.get("steps") or []):
+            drop_staged()  # passed over: files aren't left in WhatsApp's preview, one Enter from going
     failed, dictate, voice_error, spoken = run_plan(plan, notify)
     if plan.get("confirm") and origin() == "voice" and HER.stop.is_set():
         print("  (not asked: she was stopped)")  # never a yes to a question you didn't hear out
@@ -4635,7 +4785,8 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
                        id=hashlib.sha1(os.urandom(16)).hexdigest()[:12])  # an old button can't match a new question
     # what she said, also when it came from the screen: the next turn's "play the third one" needs what she saw
     kept = {"steps": plan.get("steps") or [],
-            "say": (tidy(plan.get("say"), not plan.get("confirm")) if not failed else "") or " ".join(spoken)}
+            "say": ((str(plan.get("say") or "") if plan.get("exact") else tidy(plan.get("say"), not plan.get("confirm")))
+                    if not failed else "") or " ".join(spoken)}
     try:  # kept on this PC, so she can recall it, and in the day's file
         history.add(words or text, describe(kept["steps"]) + (f" (failed: {'; '.join(failed)})" if failed else ""),
                     " ".join(spoken), json.dumps({**kept, "failed": failed} if failed else kept, ensure_ascii=False))
@@ -4728,6 +4879,7 @@ def summarize_days():
                     kept.append(f"from {day}: {fact.strip()}")
             journal_end(before, kept)
         tidy_skills()
+        telegram_bot.prune_files()  # not only when the next file comes
         time.sleep(3 * 3600)
 
 
@@ -5760,12 +5912,28 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         """One message or tap from your phone."""
         if chat != telegram_bot.owner():  # unpaired while it waited its turn
             return
-        if isinstance(job, dict):  # pictures (an album's together), with the words sent with them if any
-            PHONE_PICTURES[chat] = ([picture_url(*p) for p in job["pictures"]], time.time())
-            job, many = job["text"], len(job["pictures"]) > 1
+        if isinstance(job, dict):  # pictures and files (an album's together), with the words sent with them if any
+            pictures, files = job["pictures"], job["files"]
+            if pictures:  # what this message brought is what "this" means now: never one from before
+                PHONE_PICTURES[chat] = ([picture_url(*p) for p in pictures], time.time())
+            else:
+                PHONE_PICTURES.pop(chat, None)
+            if files:
+                PHONE_FILES[chat] = (list(files), time.time())
+            else:
+                PHONE_FILES.pop(chat, None)
+            job = job["text"]
+            if job and len(files) > len(pictures) and not SHARE.fullmatch(" ".join(job.split()).strip(" .!?")):
+                # a question about a PDF or a video: she can't open those, only send them on
+                phone.send(chat, "I can't open that kind of file, only look at photos. I can send it on, though: "
+                                 "tell me who it's for.")
+                return
             if not job:
-                phone.send(chat, "Got the pictures. What would you like to know about them?" if many else
-                           "Got the picture. What would you like to know about it?")
+                n = max(len(pictures), len(files))
+                kind = "picture" if pictures and len(pictures) == len(files or pictures) else "file"
+                it = "them" if n > 1 else "it"
+                phone.send(chat, f"Got the {kind}{'s' if n > 1 else ''}. Ask me about {it}, or tell me who to send "
+                                 f"{it} to, like \u201csend {it} to Amma\u201d.")
                 return
         lines, tapped = [], isinstance(job, tuple)
         entry = job_asks.get(job[2]) if tapped else None
@@ -5825,8 +5993,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         print(f"[phone: {line}]")
         emit(notify, "Phone", line)
 
-    phone = telegram_bot.Bot(on_message=lambda text, chat, pictures=None: phone_jobs.put(
-        ({"text": text, "pictures": pictures} if pictures else text, chat)),
+    phone = telegram_bot.Bot(on_message=lambda text, chat, pictures=None, files=None: phone_jobs.put(
+        ({"text": text, "pictures": pictures or [], "files": files or []} if pictures or files else text, chat)),
                              on_tap=lambda yes, ask, chat, message: phone_jobs.put((("tap", yes, ask, message), chat)),
                              transcribe=transcribe,
                              # the instruction first: the popup has room for about 50 letters, the name can be cut
@@ -5836,6 +6004,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                              on_stop=lambda why: phone_news("Telegram didn't take the bot's token, check it in Keys"
                                                             if why == "InvalidToken" else f"Telegram stopped ({why})"))
     threading.Thread(target=phone_turn, daemon=True).start()
+    threading.Thread(target=telegram_bot.prune_files, daemon=True).start()  # a day on, what came from the phone goes
     PHONE.update(send=lambda chat, line: phone.send(chat, line), ask=phone_ask,
                  photo=lambda chat, picture, caption: phone.send_photo(chat, picture, caption))
     # whenever a bot token is saved: paired, it's you; not yet, it only answers /start with how to pair
@@ -5899,6 +6068,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 phone.strangers.clear()
                 phone.told.clear()
                 PHONE_PICTURES.clear()
+                PHONE_FILES.clear()
+                telegram_bot.prune_files(0)  # what came from that phone goes from this PC too
                 phone_news("Unpaired: it only answers /start now, with how to pair")
             elif command == "learn voice":  # Settings > Your voice > Learn my voice
                 threading.Thread(target=start_enrol, args=(lambda line: tell(line, "learning your voice"),),
