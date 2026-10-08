@@ -235,6 +235,30 @@ class Fixes(unittest.TestCase):
             bot.stop()
         self.assertEqual(len(polls), 3)
 
+    def test_a_send_from_the_bots_own_loop_doesnt_freeze_it(self):
+        """"stop" from your phone during a task in an app: "Stopping." was sent from the message's own handler, which
+        waited 30 s for the loop it was holding. No message or tap was taken meanwhile, and "Stopping." came late."""
+        bot, sent = telegram_bot.Bot(on_message=None, on_tap=None), []
+
+        async def send_message(chat, text, **kw):
+            sent.append((chat, text))
+        bot.app = SimpleNamespace(bot=SimpleNamespace(send_message=send_message))
+        bot.loop = loop = asyncio.new_event_loop()
+
+        async def handler():  # as phone_message runs, inside Bot._message
+            start = time.time()
+            ok = bot.send(7, "Stopping.")
+            took = time.time() - start
+            await asyncio.sleep(0.05)  # the loop free again: the send goes
+            return ok, took
+        try:
+            ok, took = loop.run_until_complete(handler())
+        finally:
+            loop.close()
+        self.assertTrue(ok)
+        self.assertLess(took, 1.0)
+        self.assertEqual(sent, [(7, "Stopping.")])
+
     def test_a_bad_token_is_said_once_and_it_stops(self):
         stops = []
         bot = telegram_bot.Bot(on_message=None, on_tap=None, on_stop=stops.append)

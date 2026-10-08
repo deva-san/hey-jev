@@ -204,6 +204,7 @@ class Bot:
         self.pairing, self.strangers, self.told, self.name = Pairing(), set(), set(), ""
         self.answered = {}  # her questions already answered with a tap: (chat, message) -> when
         self.albums = {}  # (chat, album) -> the pictures of an album that have come in, see _album
+        self.sending = set()  # sends started on the loop itself, held until done (see _call)
         self.loop, self.app, self.thread, self.why = None, None, None, ""
         self.stopping, self.again = False, False  # stop() asked for, and start() asked for again meanwhile
         self.lock = threading.Lock()
@@ -557,6 +558,22 @@ class Bot:
         if loop is None:
             return False
         sent = _sending()
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:  # from a handler on the loop itself ("stop" from your phone): waiting there for the
+            # loop froze it for 30 s, no message or tap taken, and "Stopping." came 30 s late. Sent once it's free
+            task = loop.create_task(coro_fn())
+            self.sending.add(task)
+
+            def done(t):
+                self.sending.discard(t)
+                sent[1] = time.time()
+                if not t.cancelled() and t.exception() is not None:
+                    print(f"  telegram send failed: {type(t.exception()).__name__}")
+            task.add_done_callback(done)
+            return True
         try:
             asyncio.run_coroutine_threadsafe(coro_fn(), loop).result(30)
             return True
