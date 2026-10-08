@@ -4588,8 +4588,9 @@ STOPS = ("stop", "stop it", "stop talking", "ok stop", "okay stop", "wait", "hol
 CARRY_ON = re.compile(r"(?:ok|okay|yeah|yes|no|now|also|actually|instead|what about|how about|hey|jev) \w")
 NODS = {"ok", "okay", "mm", "mhm", "hmm", "right", "uh huh", "alright", "all right"}  # said along as she talks
 # Talking over her: a request, her name or "stop" stops her there and then, and the rest of her turn isn't said; it's
-# then done as soon as her turn is over (act_on). Other words over her turn her down while they last (LiveKit pauses
-# for its 2 s false-interruption timeout; turned down she still finishes if it was the TV)
+# then done as soon as her turn is over (act_on), as said to her (said_to_her). Other words over her turn her down
+# while they last (LiveKit pauses for its 2 s false-interruption timeout; turned down she still finishes if it was the
+# TV)
 DUCK, DUCK_FOR = 0.3, 2.0  # her volume while you talk over her, and for how long after your last words
 CUT_SURE = 0.7  # speech-to-text at least this sure of a request over her, to stop her for it
 BARGE_WORDS = 2  # words a request over her needs (Pipecat's MinWords while the bot speaks)
@@ -4627,14 +4628,21 @@ class Her:
     def __init__(self):
         self.stop = threading.Event()  # she stops: every player looks between SLICE pieces
         self.turn, self.until, self.level, self.asking = 0, 0.0, 1.0, False
+        # the words that stopped her, kept past the end of her turn: that phrase was said to her, and is done once her
+        # turn is over. Placed over her it was held to the strict rule as if a TV had said it, so "open Chrome"
+        # stopped her mid-sentence and then nothing happened (said_to_her)
+        self.cut_by = ""
 
     def begin(self):
         """A turn of hers starts: she may talk again, at full volume."""
+        self.end()
+        self.cut_by = ""
+
+    def end(self):
+        """And once it's over: a verdict that comes late stops nothing, a voice preview included."""
         self.turn += 1
         self.stop.clear()
         self.until, self.asking = 0.0, False
-
-    end = begin  # and once it's over: a verdict that comes late stops nothing, a voice preview included
 
     def gain(self):
         return DUCK if time.time() < self.until else 1.0
@@ -4645,11 +4653,13 @@ class Her:
     def unduck(self):
         self.until = 0.0
 
-    def cut(self, why, turn=None):
-        """Stops her, if this is still the turn it was meant for. True if she was stopped."""
+    def cut(self, why, turn=None, words=""):
+        """Stops her, if this is still the turn it was meant for. True if she was stopped. words: what was said over
+        her that stopped her (overhear)."""
         if (turn is not None and turn != self.turn) or self.stop.is_set():
             return False
         self.stop.set()
+        self.cut_by = words_of(words)
         agent.STOP.set()  # a task she's doing in an app stops too, and doesn't act again (agent.stopped)
         voice_bits.mark_speech_interrupted()  # the model is told, next turn (think)
         print(f"\n  (stopped her: {why})")
@@ -4696,6 +4706,16 @@ def stop_said(t):
     """"Stop", "Jev, stop": the whole of it a stop phrase (Hermes' is_voice_stop_phrase)."""
     found = find_name(t)
     return voice_bits.is_voice_stop_phrase(words_of(found[1] if found else t), STOPS)
+
+
+def said_to_her(text):
+    """True if words said over her stopped her this turn (Her.cut_by) and text, heard whole once she's done, is a
+    request that would: one that stops her is one to do. Her verdict on it is what's compared, not the words, which
+    the listener over her may have split or written a little differently. Once only."""
+    if not HER.cut_by or barge(text, True, getattr(text, "sure", 1.0)) != "cut":
+        return False
+    HER.cut_by = ""
+    return True
 
 
 def answering():
@@ -5648,7 +5668,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         if zone == "thinking" and kind == "follow_up":
             kind = "other"  # said while she thought: not carrying on from her answer, which hadn't come
         elif zone in ("over", "gap") and kind != "armed":
-            kind, strict = "follow_up", zone == "over" or her_strict
+            # what stopped her was said to her: not held to the strict rule, which let it go (said_to_her)
+            kind, strict = "follow_up", (zone == "over" or her_strict) and not said_to_her(text)
         elif zone in ("after", "before") and kind == "follow_up" and begun is not None and window_from[0] is not None \
                 and begun >= window_from[0]:
             strict = window_strict[0]
@@ -5815,7 +5836,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 return
             verdict = barge(words, final, sure, HER.asking or (agent.RUNNING.is_set() and not rec._soft))
             if verdict == "cut":
-                HER.cut(repr(str(words)), turn[0])
+                HER.cut(repr(str(words)), turn[0], words)
             elif verdict == "duck" and turn[0] == HER.turn:
                 HER.duck()
             elif final:
