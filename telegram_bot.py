@@ -44,6 +44,10 @@ KEEP_BYTES = 20 * 1024 * 1024  # what you send her is kept on the PC to send on,
 KEEP_FOR = 24 * 3600  # seconds such a file stays in Phone files
 ALBUM_WAIT = 1.2  # seconds after an album's last picture comes in before it's taken as one message
 ALBUM_MOST = 4  # pictures of an album she looks at
+# A voice note's longest she writes out: a long one is decoded whole into memory (a 20 MB clip about 1 GB of it, with
+# 2.6 GB free here) and holds speech-to-text, and so her ears at the PC, for as long as it takes
+VOICE_SECONDS = 180
+FORWARDED = "That's forwarded, so it's someone else's words: I've not done anything with it. Tell me what you'd like."
 # when the bot sent you something, [start, end] each: Telegram on this PC shows it too, see watch.own_reply
 SENDS = collections.deque(maxlen=50)
 
@@ -388,7 +392,12 @@ class Bot:
                 finally:
                     sent[1] = time.time()
             return
-        doc, video = msg.document, getattr(msg, "video", None)
+        # A friend's voice note or a line from a group, forwarded here to read: their words, never yours to run. A
+        # forwarded "close all the windows" was run as if you'd typed it. Its caption is theirs too
+        forwarded = getattr(msg, "forward_origin", None) is not None
+        if forwarded:
+            text = ""
+        doc, video, audio = msg.document, getattr(msg, "video", None), getattr(msg, "audio", None)
         if any(getattr(msg, k, None) for k in ("animation", "video_note", "sticker")):
             # a GIF or a sticker: said so, never its words answered about an older picture
             await self._reply(msg, "I can take photos, files and videos, not GIFs or stickers.")
@@ -396,10 +405,12 @@ class Bot:
         group = getattr(msg, "media_group_id", None)
         self._flush_albums(chat.id, but=group)  # an album that came before this goes first, whole
         picture, kept = None, None
-        if msg.photo or doc or video:
+        # a song or a recording sent as a file is a file, kept to send on with its caption: it was written out as if
+        # you'd said it, "send this to Amma" thrown away for the song's words
+        if msg.photo or doc or video or audio:
             if group:  # one of an album: counted in now, so a slow download doesn't split it
                 self._album_begin(chat.id, group, text)
-            item = msg.photo[-1] if msg.photo else doc or video
+            item = msg.photo[-1] if msg.photo else doc or video or audio
             if (item.file_size or 0) > KEEP_BYTES:
                 if group:
                     self._album_end(chat.id, group, None, None)
@@ -416,12 +427,21 @@ class Bot:
                 return
             if group:
                 return
-        if msg.voice or msg.audio:
+        if msg.voice:
+            if (getattr(msg.voice, "duration", 0) or 0) > VOICE_SECONDS:
+                await self._reply(msg, f"That voice note's too long for me: keep it under {VOICE_SECONDS // 60} "
+                                       f"minutes.")
+                return
             text = await self._hear(msg)
             if not text:
                 await self._reply(msg, "I couldn't make out that voice note.")
                 return
-            await self._reply(msg, f"\U0001f3a4 {text}")
+            await self._reply(msg, f"\U0001f3a4 {text}" + (f"\n\n{FORWARDED}" if forwarded else ""))
+            if forwarded:  # written out for you to read, and that's all
+                return
+        if forwarded and not (picture or kept):
+            await self._reply(msg, FORWARDED)
+            return
         if text == "/start":
             await self._reply(msg, "I'm here. Ask me anything, or tell me what to do on the PC.")
         elif picture or kept:  # the words with it, if any, are about it
@@ -435,8 +455,10 @@ class Bot:
             if msg.photo:
                 item, name = msg.photo[-1], time.strftime("photo-%Y%m%d-%H%M%S.jpg")
             else:
-                item = msg.document or msg.video
-                name = getattr(item, "file_name", None) or time.strftime("video-%Y%m%d-%H%M%S.mp4")
+                audio = getattr(msg, "audio", None)
+                item = msg.document or getattr(msg, "video", None) or audio
+                name = getattr(item, "file_name", None) or \
+                    time.strftime("audio-%Y%m%d-%H%M%S.mp3" if item is audio else "video-%Y%m%d-%H%M%S.mp4")
             name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name)).strip(" .") or "file"
             folder = files_dir()
             os.makedirs(folder, exist_ok=True)
@@ -518,7 +540,7 @@ class Bot:
         if self.transcribe is None:
             return ""
         import soundfile as sf
-        note = msg.voice or msg.audio
+        note = msg.voice
         if (note.file_size or 0) > 20 * 1024 * 1024:  # Telegram's own limit for a bot downloading a file
             return ""
         data = await (await note.get_file()).download_as_bytearray()
