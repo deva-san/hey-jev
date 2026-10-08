@@ -13,7 +13,7 @@ import time
 import unittest
 from unittest import mock
 
-from tests.support import siri
+from tests.support import needs_windows, siri
 from tests.test_timers import StopsWorker
 
 import coder
@@ -72,6 +72,10 @@ class Rules(unittest.TestCase):
                 coder.check_folder(tempfile.mkdtemp())  # not git
             with self.assertRaises(RuntimeError):
                 coder.check_folder(os.path.expanduser("~"))
+
+    @needs_windows
+    def test_never_under_app_data_or_windows(self):
+        folder = git_folder()
         with self.assertRaises(RuntimeError):
             coder.check_folder(folder)  # under AppData
         with self.assertRaises(RuntimeError):
@@ -100,6 +104,7 @@ class Rules(unittest.TestCase):
 
 
 class OverTheProtocol(unittest.TestCase):
+    @needs_windows  # runs a real process with CREATE_NO_WINDOW
     def test_a_job_runs_with_a_free_model_and_her_answers(self):
         folder = git_folder()
         fake = os.path.join(folder, "fake_opencode.py")

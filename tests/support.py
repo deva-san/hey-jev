@@ -16,6 +16,11 @@ os.environ["LOCALAPPDATA"] = DATA
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from tests import winfakes  # noqa: E402
+
+winfakes.install()  # off Windows only: stand-ins for winreg, ctypes.windll, winrt, pycaw, comtypes and sounddevice
+needs_windows = winfakes.needs_windows
+
 import requests  # noqa: E402
 
 TRIPPED = []

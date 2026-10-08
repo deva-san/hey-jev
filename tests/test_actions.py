@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.support import ORIGINAL, TRIPPED, siri, winplatform
+from tests.support import ORIGINAL, TRIPPED, needs_windows, siri, winplatform
 
 
 def original(name):
@@ -100,6 +100,7 @@ class Media(unittest.TestCase):
 
 
 class RamFigures(unittest.TestCase):
+    @needs_windows  # sysinfo reads Windows' process list
     def test_an_apps_ram_is_its_private_working_set(self):
         """"Chrome uses the most, 4.1 GB" against Task Manager's 2.65: shared pages were counted in every process.
         Reads the process list only. This process's own figure should be its private set (psutil's USS), not all of
