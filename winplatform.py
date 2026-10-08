@@ -608,6 +608,16 @@ def quit_app(app):
             pass
 
 
+def front_window():
+    """The window in front, or None."""
+    return user32.GetForegroundWindow() or None
+
+
+def shown(hwnd):
+    """True if hwnd is a window that's still there and showing."""
+    return bool(hwnd) and bool(user32.IsWindow(hwnd)) and bool(user32.IsWindowVisible(hwnd))
+
+
 def foreground_exe():
     hwnd = user32.GetForegroundWindow()
     return window_exe(hwnd) if hwnd else ""

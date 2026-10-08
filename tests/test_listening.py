@@ -173,8 +173,8 @@ class Assistant:
                     (siri.Recorder, "_open", open_stream),
                     (siri.win, "warm_start_apps", lambda: None),
                     (siri.win, "start_ptt_listener", lambda press, release: None),
-                    (siri.watch, "Watcher", lambda: types.SimpleNamespace(messages=lambda front: None,
-                                                                          check=lambda *a: [])),
+                    (siri.watch, "Watcher", lambda followed=None: types.SimpleNamespace(
+                        messages=lambda front: None, check=lambda *a: [], take_replies=lambda: [])),
                     (siri, "start_timer_loop", lambda on_done: setattr(self, "timer_done", on_done)),
                     (siri, "watch_return", lambda on_back: setattr(self, "back", on_back)),
                     (siri, "warm", lambda: None),
@@ -825,14 +825,14 @@ class DuringDictation(Case):
 
     def test_reminders_that_come_up_while_dictating_are_told_after(self):
         a, told = self.assistant(), []
-        self.heads_ups(a, lambda line, said_for: told.append(line) or True, True)
+        self.heads_ups(a, lambda line, said_for, kept=None: told.append(line) or True, True)
         self.assertEqual(told, ["Reminder: call Mum."])
 
     def test_one_held_back_by_a_dictation_you_started_is_told_after_it(self):
         """tell() waited while you said "Hey Jev, transcribe", so it didn't say it: once it stops, it does."""
         a, told = self.assistant(), []
 
-        def tell(line, said_for):
+        def tell(line, said_for, kept=None):
             if not a.rec.dictating and not told:
                 a.rec.dictating = True
                 told.append(None)

@@ -219,6 +219,59 @@ def known_for(app):
     return sorted((v.get("name") or k).strip() for k, v in read_contacts().items() if v.get(app))
 
 
+# --------------------------------------------------------------------------- the people she's messaging for you
+# Everyone she sends a message or a file to for you, so a reply from them is told to you as theirs, on the PC and on
+# your phone, whenever it comes (asked for on 8 October: "all days, 24/7"; see watch.Watcher and siri.replied). Kept
+# in %APPDATA%\Hey Jev\follow_ups.json, on this PC only, until FOLLOW_MAX newer ones push it out.
+FOLLOW_PATH = os.path.join(win.APPDATA_DIR, "follow_ups.json")
+FOLLOW_MAX = 200
+
+
+def read_follows():
+    try:
+        with open(FOLLOW_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def follow(app, contact, to="", handle=""):
+    """Note that she messaged contact (what you call them) on app (as Windows' notifications name it: "WhatsApp"), by
+    the name a notification of theirs carries: the chat's own name in the app (to), and their number. Only where the
+    app can't show the chat's name (Telegram, the apps she types her way into) by what you call them."""
+    chat = " ".join(str(to or "").split())
+    names = [n for n in dict.fromkeys((chat or " ".join(str(contact or "").split()), str(handle or ""))) if _letters(n)]
+    if not names:
+        return
+    book = read_follows()
+    book[f"{other_key(app)}:{alias_key(contact) or _letters(names[0])}"] = {
+        "app": str(app), "contact": " ".join(str(contact or names[0]).split())[:60], "names": names[:2],
+        "by_alias": not chat, "when": time.time()}
+    if len(book) > FOLLOW_MAX:  # the ones messaged longest ago go first
+        book = dict(sorted(book.items(), key=lambda kv: kv[1].get("when", 0))[-FOLLOW_MAX:])
+    _write_json(FOLLOW_PATH, book)
+
+
+def followed(app, sender):
+    """The person she's been messaging for you that a notification on app from sender is, or None. By the chat's own
+    name, spaces and case aside but emoji kept ("Buntyyy🐼" is "Buntyyy 🐼", not "Buntyyy 🎂"), or by their number:
+    never by a shorter name, as your "Ravi" is Ravi Kumar, and another Ravi isn't."""
+    got, digits = _chat_key(sender), re.sub(r"\D", "", str(sender or ""))
+    number = len(digits) >= 7 and re.fullmatch(r"[\d\s()+.-]+", str(sender or "").strip())
+    if not _letters(sender):
+        return None
+
+    def same(entry, name):
+        if number:
+            return re.sub(r"\D", "", name) == digits
+        return (_letters(name) == _letters(sender)) if entry.get("by_alias") else _chat_key(name) == got
+    hits = [entry for entry in read_follows().values() if str(entry.get("app", "")).casefold() == str(app).casefold()
+            and any(same(entry, n) for n in entry.get("names") or [])]
+    # one chat you've called two things ("buntyy", then "buntyyy"): who you messaged last
+    return max(hits, key=lambda e: e.get("when", 0)) if hits else None
+
+
 # --------------------------------------------------------------------------- the recipes she's been taught
 def read_recipes():
     try:
@@ -687,6 +740,11 @@ def _open_row(hwnd, row, label):
 def _ours(hwnd, at):
     """True if window at is WhatsApp's own, or the web view its page is in."""
     return bool(at) and (at == hwnd or _hosted_by(at, hwnd))
+
+
+def _chat_key(name):
+    """A chat's name compared without spaces, case or emoji variation marks, the emoji themselves kept."""
+    return re.sub(r"[\s\ufe0f]+", "", str(name or "")).casefold()
 
 
 def _letters(text):

@@ -27,6 +27,7 @@ FILETIME_1970 = 116444736000000000  # Windows counts time in 100 ns steps from 1
 SETTINGS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings"
 MESSAGE_LOOK = 4.0  # seconds between looks for messages: one look reads a small file, about a millisecond
 SAME_MESSAGE = 60.0  # one heads-up per person per app in this time: Phone Link and WhatsApp Desktop both get each one
+REPLY_SETTLE = 8.0  # a person's replies are told together once they've stopped for this long: "ok", "on my way"...
 # The apps people message you in, by a piece of the app's ID in Windows, and what she calls them
 MESSAGING = [(r"YourPhoneNotifications_com\.whatsapp|whatsapp", "WhatsApp"), (r"YourPhoneMessages|android\.apps\.messaging",
              "Messages"), (r"teams", "Teams"), (r"outlook|com\.microsoft\.office\.outlook", "Outlook"),
@@ -185,10 +186,24 @@ def online():
         return False
 
 
-class Watcher:
-    """Call check() every 20 seconds or so: it returns what's worth saying now, each thing once."""
+def quiet():
+    """True in the hours she keeps quiet on the PC (QUIET)."""
+    hour = time.localtime().tm_hour
+    return hour >= QUIET[0] or hour < QUIET[1]
 
-    def __init__(self):
+
+class Watcher:
+    """Call check() every 20 seconds or so: it returns what's worth saying now, each thing once.
+
+    followed: who of the people she messages for you a notification is from (messaging.followed), so their replies
+    are kept for take_replies, day or night and whatever's in front, instead of being one more heads-up."""
+
+    def __init__(self, followed=None):
+        self.followed = followed
+        self.replies = []  # replies for her to tell you, see take_replies
+        self.reply_seen = time.time()  # the newest notification looked at for replies
+        self.answered = {}  # (app, sender, when) of each reply noted: never a heads-up as well, nor told twice
+        self.recent_replies = {}  # (person, words): when, so the other app's copy of a reply, a look later, isn't one
         self.seen = time.time()  # messages before she started don't count
         self.added = last_added()  # when each message app last notified, so ones from before she started don't count
         self.waiting = {}  # app ID: (when it notified, when she noticed) for ones with nothing left in the list yet
@@ -214,15 +229,47 @@ class Watcher:
         self.told[key] = now
         return True
 
+    def take_replies(self):
+        """The replies from people who've sent nothing more for REPLY_SETTLE seconds: [{"app", "from", "text", "when",
+        "contact"}], oldest first. Someone still sending waits, so a burst is told once."""
+        now = time.time()
+        typing = {r["contact"] for r in self.replies if now - r["when"] < REPLY_SETTLE}
+        out = [r for r in self.replies if r["contact"] not in typing]
+        self.replies = [r for r in self.replies if r["contact"] in typing]
+        return out
+
+    def _replies(self, now):
+        """Note replies from the people she's messaging for you. Phone Link and WhatsApp Desktop both get each one:
+        the same words from the same person within SAME_MESSAGE are one reply."""
+        if not self.followed:
+            return
+        found = notifications(self.reply_seen)
+        if found:
+            self.reply_seen = found[-1]["when"] + 1e-6
+        for n in found:
+            key = (n["app"], n["from"], n["when"])
+            who = self.followed(n["app"], n["from"]) if key not in self.answered else None
+            if who is None:
+                continue
+            self.answered[key] = now
+            mark = (who["contact"], n["text"])
+            if abs(self.recent_replies.get(mark, float("-inf")) - n["when"]) < SAME_MESSAGE:
+                continue
+            self.recent_replies[mark] = n["when"]
+            self.replies.append({**n, "contact": who["contact"]})
+        self.answered = {k: t for k, t in self.answered.items() if now - t < 24 * 3600}
+        self.recent_replies = {k: t for k, t in self.recent_replies.items() if now - t < 2 * SAME_MESSAGE}
+
     def messages(self, front=""):
         """A heads-up for messages that came in since the last look, or "". Light enough to call every few seconds.
 
         front is the app in front (or something that says which): you're already looking at that one's messages.
-        From the list, she says who it's from. If the list lost it before she looked, she still says which app."""
-        hour = time.localtime().tm_hour
-        if hour >= QUIET[0] or hour < QUIET[1]:
-            return ""
+        From the list, she says who it's from. If the list lost it before she looked, she still says which app.
+        Replies from the people she's messaging for you are kept for take_replies instead, at any hour."""
         now = time.time()
+        self._replies(now)
+        if quiet():
+            return ""
         found = notifications(self.seen)
         if found:
             # a microsecond past the newest one, because Windows' arrival time is in 100ns ticks and loses a couple
@@ -250,7 +297,7 @@ class Watcher:
         if not (found or gone):
             return ""
         front = (front() if callable(front) else front or "").lower()
-        new = [n for n in found if n["app"].lower() not in front
+        new = [n for n in found if n["app"].lower() not in front and (n["app"], n["from"], n["when"]) not in self.answered
                and self._fresh((n["app"], spoken_sender(n["from"])), now)]
         for n in new:
             self.told[n["app"]] = now  # so a WhatsApp copy that vanished doesn't make a second heads-up

@@ -846,7 +846,7 @@ def _weather(m):
 # number or username you say next finishes it.
 STAGED = {"ready": None, "until": 0.0}
 SENT_LINE = [""]  # what the send actually managed, so she says that and not a guess
-ASKED = {"alias": "", "app": "", "text": "", "until": 0.0, "files": None}
+ASKED = {"alias": "", "app": "", "text": "", "until": 0.0, "files": None, "back": None}
 MESSAGE_WAIT = 90.0  # seconds a staged message or an asked-for contact stays live
 DIGIT_WORDS = {"zero": "0", "oh": "0", "o": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
                "six": "6", "seven": "7", "eight": "8", "nine": "9", "double": "", "plus": ""}
@@ -873,23 +873,25 @@ def _digits_said(text):
     return "".join(out)
 
 
-def stage_message(app, contact, text):
+def stage_message(app, contact, text, back=None):
     """Open the chat with the text typed in and ask before sending. Returns the plan she should run now.
 
     Apps with a link of their own take it; the rest get walked through their own search box."""
     key = messaging.app_key(app)
     if (STAGED["ready"] or {}).get("files"):
         drop_staged()  # files waiting before aren't left in WhatsApp's preview
+    back = window_to_put_back(back)
     try:
         ready = messaging.prepare(app, contact, text) if key else \
             messaging.prepare_other(app, find_app(app), contact, text)
     except messaging.NeedContact as exc:
         if key == "whatsapp":  # she looks in your WhatsApp first, and asks if who she finds is them
             return look_up(contact, text, None, str(exc))
-        ASKED.update(alias=str(contact), app=key or "", text=str(text), until=staged_for(), files=None)
+        ASKED.update(alias=str(contact), app=key or "", text=str(text), until=staged_for(), files=None, back=back)
         return make_plan(say=str(exc))
     except (RuntimeError, ValueError) as exc:
         return make_plan(say=f"I've not sent anything: {exc}.")
+    ready["back_to"] = back
     STAGED.update(ready=ready, until=staged_for())
     where = ready.get("say") or messaging.say_of(ready["app"])
     to = re.sub(r"[^\w\s'.-]", "", str(ready.get("to") or "")).strip()  # the chat's name in the app, emoji off
@@ -953,20 +955,22 @@ def direct_install(words):
     return None
 
 
-def stage_files(app, contact, paths, caption=""):
+def stage_files(app, contact, paths, caption="", back=None):
     """Put the files in the chat's preview and ask before sending, as stage_message does for words."""
     if (STAGED["ready"] or {}).get("files"):
         drop_staged()
+    back = window_to_put_back(back)
     try:
         ready = messaging.prepare_files(app, contact, paths, caption)
     except messaging.NeedContact as exc:
         if messaging.app_key(app) == "whatsapp":
             return look_up(contact, caption or "", list(paths), str(exc))
         ASKED.update(alias=str(contact), app=messaging.app_key(app) or "", text=str(caption or ""),
-                     until=staged_for(), files=list(paths))
+                     until=staged_for(), files=list(paths), back=back)
         return make_plan(say=str(exc))
     except (RuntimeError, ValueError) as exc:
         return make_plan(say=f"I've not sent anything: {exc}.")
+    ready["back_to"] = back
     STAGED.update(ready=ready, until=staged_for())
     names = [os.path.basename(p) for p in ready["files"]]
     what = names[0] if len(names) == 1 else f"{len(names)} files, {', '.join(names[:-1])} and {names[-1]}"
@@ -1032,6 +1036,41 @@ def share_files(who, caption=""):
     return stage_files("whatsapp", who, paths, caption)
 
 
+CHAT_WINDOWS = {"whatsapp.exe", "whatsapp.root.exe", "telegram.exe", "msedgewebview2.exe"}  # chat apps, WhatsApp's page
+LAST_BACK = [None]  # the window you were in when she last opened a chat for you
+
+
+def window_to_put_back(back=None):
+    """The window to put back in front once a message has gone (sent_to): the one you were in, never the chat app
+    itself. After a no, "tell him ..." starts with the chat in front, so the window from before it is the one."""
+    back = back or win.front_window()
+    try:
+        if back and os.path.basename(win.window_exe(back)).lower() in CHAT_WINDOWS:
+            back = LAST_BACK[0]
+    except Exception:
+        back = None
+    LAST_BACK[0] = back
+    return back
+
+
+def sent_to(ready):
+    """Once a message or files have gone: their replies are watched for (messaging.follow), and the window you were
+    in before she opened the chat is put back in front. With the chat left in front, the app shows no notification
+    for a reply in it, so she'd never hear of it."""
+    try:  # under the name Windows' notifications give the app: Teams, not Microsoft Teams
+        say = ready.get("say") or messaging.say_of(ready["app"])
+        name, chat_app = watch._app(messaging.other_key(say))
+        messaging.follow(name if chat_app else say, ready["contact"], ready.get("to"), ready.get("handle"))
+    except Exception as exc:
+        print(f"  couldn't note who to watch for: {exc!r}")
+    back = ready.get("back_to")
+    try:
+        if win.shown(back) and back != win.front_window() and back != ready.get("hwnd"):
+            win.bring_to_front(back)
+    except Exception as exc:
+        print(f"  couldn't put your window back: {exc!r}")
+
+
 def drop_staged():
     """A no to a message: forget it, and clear what she typed so it isn't left sitting in someone's chat, however
     long it's been waiting."""
@@ -1075,21 +1114,21 @@ def finish_asked(words):
         saved = messaging.save_contact(alias, app, handle)
     except (ValueError, RuntimeError):
         return None  # not a number or username after all, so let the rest of the turn have it
-    files = ASKED.get("files")
-    ASKED.update(alias="", app="", text="", until=0.0, files=None)
+    files, back = ASKED.get("files"), ASKED.get("back")
+    ASKED.update(alias="", app="", text="", until=0.0, files=None, back=None)
     print(f"  learned contact: {saved}")
     if files:  # the files that were waiting for it
-        return stage_files(app, alias, files, text)
+        return stage_files(app, alias, files, text, back=back)
     if not text:
         return make_plan(say=f"Saved {saved}.")
-    return stage_message(app, alias, text)
+    return stage_message(app, alias, text, back=back)
 
 
 # Someone she doesn't know yet is often in your WhatsApp already, saved on your phone: rather than ask you for their
 # number, she looks them up there (messaging.whatsapp_people) and asks if who she found is them, one at a time with
 # the number, as you asked on 8 October. A yes saves them and carries on with the message or files, which she then
 # asks about as ever; a no to the last one asks you for the number. Her question's yes is the only way to save one.
-FOUND = {"alias": "", "text": "", "files": None, "people": [], "until": 0.0, "id": ""}  # id: the question's, so a
+FOUND = {"alias": "", "text": "", "files": None, "people": [], "until": 0.0, "id": "", "back": None}  # id: the question's, so a
 # yes to an older question, on the phone say, can't save who a later lookup found
 CANCEL = re.compile(r"\b(?:cancel|stop|never ?mind|forget|leave it|wait|hold on)\b")  # a no that ends the lookup
 
@@ -1098,10 +1137,11 @@ def look_up(alias, text, files, asked):
     """The plan when she doesn't know alias on WhatsApp: who she found there, asked about, or asked (NeedContact's
     question) if WhatsApp can't be looked in, or the number if it has nobody by that name."""
     said = " ".join(str(alias).split())[:40] or "them"
-    ASKED.update(alias="", app="", text="", until=0.0, files=None)  # an older question's: a number said now isn't
+    ASKED.update(alias="", app="", text="", until=0.0, files=None, back=None)  # an older question's: a number said now isn't
     # for it. And a message typed in before stays there unsent: once she's opened other chats, a no would clear the
     # wrong one
     STAGED.update(ready=None, until=0.0)
+    back = win.front_window()  # the lookup brings WhatsApp up: this is the window to put back once it's sent
     talking, stop = None, None
     if origin() == "voice":  # it takes a few seconds: said while she looks, never over the question that follows
         talking = threading.Thread(target=contextvars.copy_context().run, daemon=True,
@@ -1119,11 +1159,12 @@ def look_up(alias, text, files, asked):
     if stop and stop():
         return make_plan(say="Okay, I've stopped looking.")
     if not people:
-        ASKED.update(alias=str(alias), app="whatsapp", text=str(text or ""), until=staged_for(), files=files)
+        ASKED.update(alias=str(alias), app="whatsapp", text=str(text or ""), until=staged_for(), files=files,
+                     back=back)
         return make_plan(say=asked if people is None else
                          f"I couldn't find {said} in your WhatsApp. What's their phone number, with the country code?")
     FOUND.update(alias=str(alias), text=str(text or ""), files=files, people=list(people), until=staged_for(),
-                 id=os.urandom(8).hex())
+                 id=os.urandom(8).hex(), back=back)
     return found_question(True)
 
 
@@ -1158,7 +1199,7 @@ def use_found(step):
     """Yes, that's them, to the question step was: saved, then on with the message or the files waiting for them."""
     if not FOUND["id"] or step.get("id") != FOUND["id"] or time.time() > FOUND["until"] or not FOUND["people"]:
         return make_plan(say="That was a while ago now. Ask me again.")
-    person, alias, text, files = FOUND["people"][0], FOUND["alias"], FOUND["text"], FOUND["files"]
+    person, alias, text, files, back = FOUND["people"][0], FOUND["alias"], FOUND["text"], FOUND["files"], FOUND["back"]
     forget_found()
     try:
         saved = messaging.save_contact(alias, "whatsapp", person["number"])
@@ -1166,10 +1207,10 @@ def use_found(step):
         return make_plan(say=f"I couldn't save them: {exc}.")
     print(f"  learned contact from WhatsApp: {saved}")
     if files:
-        return stage_files("whatsapp", alias, files, text)
+        return stage_files("whatsapp", alias, files, text, back=back)
     if not text:
         return make_plan(say=f"Saved {saved}.")
-    return stage_message("whatsapp", alias, text)
+    return stage_message("whatsapp", alias, text, back=back)
 
 
 def not_them(step):
@@ -1179,14 +1220,84 @@ def not_them(step):
     FOUND["people"] = FOUND["people"][1:]
     if FOUND["people"] and time.time() < FOUND["until"]:
         return found_question(False)
-    alias, text, files = FOUND["alias"], FOUND["text"], FOUND["files"]
+    alias, text, files, back = FOUND["alias"], FOUND["text"], FOUND["files"], FOUND["back"]
     forget_found()
-    ASKED.update(alias=alias, app="whatsapp", text=text, until=staged_for(), files=files)
+    ASKED.update(alias=alias, app="whatsapp", text=text, until=staged_for(), files=files, back=back)
     return make_plan(say="Okay. What's their phone number, with the country code?")
 
 
 def forget_found():
-    FOUND.update(alias="", text="", files=None, people=[], until=0.0, id="")
+    FOUND.update(alias="", text="", files=None, people=[], until=0.0, id="", back=None)
+
+
+# When someone she's messaging for you replies (watch.Watcher.take_replies), she tells you on the PC and on your
+# phone, with what they wrote, and asks what to reply. "Tell him I'm on my way" then drafts the reply to them, asked
+# about as ever. Her line is kept without their words: they go to the model only when you ask her to read them
+# who replied last as you heard it, out loud and on the phone apart: an answer to an older reply on the phone isn't
+# for whoever was said on the PC since
+REPLYING = {"voice": {"contact": "", "app": "", "until": 0.0}, "phone": {"contact": "", "app": "", "until": 0.0}}
+REPLY_FOR = 3600.0
+# only "him", "her" or "them": "reply to Amma saying ..." is Amma's, the model's to plan, never the last who replied
+REPLY = re.compile(r"(?!(?:reply|answer|respond) (?:to (?!(?:him|her|them)\b)|(?:with|the|all|this|my)\b|it$))"
+                   r"(?:(?:reply|answer|respond)(?: (?:to )?(?:him|her|them))?(?: back)?|(?:tell|text|message|ask) "
+                   r"(?:him|her|them)(?: back)?|say to (?:him|her|them))(?:,? (?:saying|that))?[:,]? "
+                   r"(?!(?:back|saying|that|all|(?:him|her|them)(?: back)?)$|to (?:him|her|them)\b)(?P<text>.+)", re.I)
+
+
+def replied(replies):
+    """[{"say", "keep", "phone", "contact", "app"}] for replies from watch.Watcher, one per person: what to say on the
+    PC, what to keep of it (not their words), and what to send your phone. Named as the app names their chat."""
+    by = {}
+    for r in replies:
+        by.setdefault((r["contact"], r["app"]), []).append(r)
+    out = []
+    for (contact, app), rs in by.items():
+        words = " ".join(" ".join(str(r.get("text") or "").split()) for r in rs).strip()[:300]
+        shown = " ".join(str(rs[-1].get("from") or contact).split())
+        name = watch.spoken_sender(re.sub(r"[^\w\s'.+-]", "", shown).strip() or contact)
+        said = f": \u201c{words}\u201d" if words else "."
+        out.append({"say": f"{name} replied on {app}{said} What should I reply?",
+                    "keep": f"{name} replied on {app}. What should I reply?",
+                    "phone": f"{shown} replied on {app}{said}\nWhat should I reply?", "contact": contact, "app": app})
+    return out
+
+
+def told_reply(reply, where):
+    """You've heard of that reply, out loud or on the phone (where): "tell him ..." there is for them."""
+    REPLYING[where].update(contact=reply["contact"], app=reply["app"], until=time.time() + REPLY_FOR)
+
+
+def deliver_replies(replies):
+    """Each reply to your paired phone straight away, day or night, then what's left to say on the PC: replied()'s
+    entries, with "sent" saying whether the phone got it."""
+    out = []
+    for r in replied(replies):
+        chat = telegram_bot.owner()
+        print(f"\n> reply: {r['keep']}")
+        r["sent"] = bool(chat is not None and PHONE["send"] is not None and PHONE["send"](chat, r["phone"]))
+        if r["sent"]:
+            told_reply(r, "phone")
+        out.append(r)
+    return out
+
+
+def voice_question_waiting():
+    """True while a question she asked out loud still waits for its answer: a reply's "What should I reply?" said now
+    would take the "yes" meant for it (a message to Mum waiting for its yes was sent that way)."""
+    now = time.time()
+    return (PENDING["plan"] is not None and now < PENDING["until"] and PENDING["origin"] == "voice") or \
+        (HEARD["words"] is not None and now < HEARD["until"]) or (bool(ASKED["alias"]) and now < ASKED["until"])
+
+
+def direct_reply(words):
+    """"Tell him I'm on my way", after she's told you someone replied: to them, on that app, asked about first."""
+    who = REPLYING[origin()]
+    if time.time() > who["until"] or not who["contact"]:
+        return None
+    m = REPLY.fullmatch(" ".join(str(words).split()).strip(" .!?"))
+    if not m or not m["text"].strip(" .,!?\"'"):
+        return None
+    return stage_message(who["app"], who["contact"], m["text"])
 
 
 KEY_WORDS = {"control": "ctrl", "ctrl": "ctrl", "shift": "shift", "alt": "alt", "option": "alt", "command": "cmd",
@@ -1672,6 +1783,10 @@ def _quick(words, gate=False):
     if message:
         print("  local message")
         return message
+    reply = direct_reply(words) if gate != "cold" else None
+    if reply:
+        print("  local reply")
+        return reply
     install = direct_install(words) if gate != "cold" else None
     if install:
         print("  local install")
@@ -3824,6 +3939,7 @@ def do_step(step):
         _, said = messaging.send(ready)
         SENT_LINE[0] = said
         print(f"  sent on {ready['app']} to {ready['contact']}")
+        sent_to(ready)
         return f"{ready['app']} {ready['contact']}"
     if do == "message":
         raise RuntimeError("I ask before sending a message")
@@ -5968,21 +6084,25 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         else:
             emit(notify, "Ready", ready_text(rec.wake))
 
-    def tell(line, said_for):
+    def tell(line, said_for, kept=None):
         """Say something she started herself, a welcome or a heads-up, once she's not in the middle of a turn and
         you're not mid-sentence. You can answer without "Hey Jev", the way you carry on after any reply: "read it",
-        "thanks". False if it wasn't said, as what you were saying started a dictation, which it never goes over."""
+        "thanks". False if it wasn't said, as what you were saying started a dictation, which it never goes over.
+        kept: what to keep of it in history, when that's less than she said."""
         wait_her_turn()
         if rec.dictating:
             return False
-        print(f"\n> {said_for}: {line}")
         with busy:
+            if said_for == "reply" and voice_question_waiting():
+                return False  # said once that one's answered or gone: never a second question over the first
+            print(f"\n> {said_for}: {line}")
             HER.begin()
             rec.paused = True
             shown[0] = None
             try:
                 say(line, notify)
-                history.add(f"({said_for})", "", line, json.dumps({"steps": [], "say": line}, ensure_ascii=False))
+                history.add(f"({said_for})", "", kept or line, json.dumps({"steps": [], "say": kept or line},
+                                                                          ensure_ascii=False))
             except Exception as exc:
                 print(f"  {said_for} failed: {exc!r}")
             finally:
@@ -6031,7 +6151,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         if tell(line, "first start"):
             settings.put("met", True)
 
-    watcher = watch.Watcher()
+    watcher = watch.Watcher(messaging.followed)
 
     def keep_warm():
         """With little memory free (2.6 of 16 GB here), Windows moves a model nobody has used for a while out of
@@ -6052,22 +6172,31 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         """What she noticed (see watch.Watcher): messages every few seconds, since WhatsApp takes its notification
         away again within moments, the rest every 20 seconds, and finished background work straight away."""
         next_look, next_message = time.time() + 20, time.time() + watch.MESSAGE_LOOK
-        later = []  # what came up during a dictation, told once it stops
+        later = []  # what came up during a dictation, told once it stops: (line, said for, kept, reply)
+        night = []  # replies in the quiet hours that didn't reach your phone
         while True:
             time.sleep(2)
             lines = []
             while not ANNOUNCE.empty():
                 lines.append(ANNOUNCE.get())
             now = time.time()
+            replies = []
             if now >= next_message:
                 next_message = now + watch.MESSAGE_LOOK
-                if settings.get("heads_ups") and settings.get("notifications"):
+                if settings.get("notifications"):  # replies are looked for with heads-ups off too, day and night
                     try:
                         line = watcher.messages(win.front_app_name)  # only asks which app is in front if needed
-                        if line:
+                        if line and settings.get("heads_ups"):
                             lines.append(line)
+                        replies = replied(watcher.take_replies())
                     except Exception as exc:
                         print(f"  message check failed: {exc!r}")
+            for r in deliver_replies(replies):  # your phone, day or night: it keeps its own quiet hours
+                if settings.get("heads_ups") and not (watch.quiet() and r["sent"]):  # the PC keeps its quiet hours
+                    (night if watch.quiet() else later).append((r["say"], "reply", r["keep"], r))
+            if night and not watch.quiet():  # the night's replies your phone didn't get, at 7
+                later += night
+                night.clear()
             if now >= next_look:
                 next_look = now + 20
                 if settings.get("heads_ups"):
@@ -6075,11 +6204,13 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                         lines += watcher.check(False, win.front_app_name())
                     except Exception as exc:
                         print(f"  heads-up check failed: {exc!r}")
-            later += [line for line in lines if line]
+            later += [(line, "heads-up", None, None) for line in lines if line]
             # never over a dictation, but once it stops: a reminder or a finished task that came up during one was
             # taken off the queue and lost, the reminder already marked done
-            while later and not rec.dictating and tell(later[0], "heads-up"):
-                later.pop(0)
+            while later and not rec.dictating and tell(*later[0][:3]):
+                reply = later.pop(0)[3]
+                if reply:
+                    told_reply(reply, "voice")
 
     phone_jobs = queue.Queue()  # (text or ("tap", yes, ask, message), chat) from your phone, one at a time
 
