@@ -4930,11 +4930,18 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     # kept through talk she lets go ("Hmm", a mumble, someone else), so the yes can still follow; gone once she acts
     pending = PENDING["plan"] if time.time() < PENDING["until"] and PENDING["origin"] == origin() and \
         (origin() == "voice" or TAPPED.get()) else None
-    answer = plain(words) if pending else ""
-    if origin() == "phone" and not TAPPED.get() and PENDING["origin"] == "phone" and PENDING["plan"] is not None \
-            and time.time() < PENDING["until"] and YES.fullmatch(plain(words)):
-        say("Tap Yes on my question to go ahead.", notify)  # only the button answers a question on the phone
+    typed = origin() == "phone" and not TAPPED.get() and PENDING["origin"] == "phone" and \
+        PENDING["plan"] is not None and time.time() < PENDING["until"]  # typed while her question waits for a tap
+    if typed and (YES.fullmatch(plain(words)) or said_yes(words, PENDING["plan"])):
+        # only the button answers a question on the phone. Any yes, not just a bare one: "Yes, type it" went to the
+        # model, which planned the step again and ran it with no tap
+        say("Tap Yes on my question to go ahead.", notify)
         return True
+    if typed and NO.fullmatch(plain(words)) and not COMMAND.search(plain(words)):
+        # a typed no is the No button, though "stop the music" stays a command: "no" got "Sure." and left the message
+        # typed in the chat
+        pending = PENDING["plan"]
+    answer = plain(words) if pending else ""
     # a mumbled yes isn't one; the phone's Yes button is as clear as a yes gets
     if pending and (said_yes(words, pending) or (TAPPED.get() and words == "yes")) and not (gate and sure < UNSURE):
         print("  (yes, doing what she asked about)")

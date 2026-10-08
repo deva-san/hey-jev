@@ -582,6 +582,30 @@ class Questions(unittest.TestCase):
         self.turn("yes", phone=True, tapped=True)
         self.assertTrue(self.ran_shutdown())
 
+    def test_a_typed_yes_in_other_words_is_sent_to_the_button_too(self):
+        """"Yes, type it" to her phone question went to the model, which planned the step again and typed with no
+        tap, and without the check a step steered by what she'd read gets."""
+        siri.PENDING.update(plan={"steps": [{"do": "type", "text": "on my way"}], "say": ""})
+        for words in ("Yes, type it", "yes please do that", "sure, go for it"):
+            self.assertEqual(self.turn(words, phone=True), ["Tap Yes on my question to go ahead."], words)
+        self.assertEqual(self.ran, [])
+        self.assertIsNotNone(siri.PENDING["plan"])  # still waiting for the tap
+
+    def test_a_typed_no_is_the_no_button(self):
+        """"Send hi to Mum?" on the phone, and you typed "no": she said "Sure.", and "hi" stayed typed in Mum's chat on
+        the PC, one Enter from going."""
+        siri.PENDING.update(plan={"steps": [{"do": "message_send"}], "say": ""})
+        siri.STAGED.update(ready={"app": "whatsapp", "contact": "Mum", "text": "hi"}, until=time.time() + 60)
+        self.addCleanup(siri.STAGED.update, ready=None, until=0.0)
+        cleared = []
+        for words in ("no", "No, cancel it", "don't send it"):
+            with mock.patch.object(siri.messaging, "discard", lambda ready: cleared.append(ready["text"]) or True):
+                lines = self.turn(words, phone=True)
+            self.assertIn(lines[0], siri.REPLIES["confirm_no"], words)
+            siri.PENDING.update(plan={"steps": [{"do": "message_send"}], "say": ""})
+            siri.STAGED.update(ready={"app": "whatsapp", "contact": "Mum", "text": "hi"}, until=time.time() + 60)
+        self.assertEqual(cleared, ["hi", "hi", "hi"])
+
     def test_on_the_phone_her_lines_go_back_to_the_chat(self):
         siri.PENDING.update(plan=None)
         lines = self.turn("what's the capital of Japan", phone=True)
