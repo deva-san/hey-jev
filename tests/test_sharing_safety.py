@@ -44,6 +44,23 @@ class OnlyAfterAYes(unittest.TestCase):
         siri.STAGED.update(ready=None, until=0.0)
 
 
+    def test_files_whose_question_ran_out_are_taken_out_of_the_preview(self):
+        """"Send report.pdf to Amma?" and nobody answered: the question ran out, but the file stayed in WhatsApp's
+        preview with the keyboard in its caption box, and the next Enter there sent it."""
+        cleared = []
+        self.addCleanup(siri.STAGED.update, ready=None, until=0.0)
+        with mock.patch.object(siri.messaging, "discard", lambda ready: cleared.append(ready["contact"]) or True):
+            for ready in ({"app": "whatsapp", "contact": "Amma", "files": ["report.pdf"]},
+                          {"app": "whatsapp", "contact": "Ravi", "text": "hi"}):  # words stay, as a draft would
+                siri.STAGED.update(ready=ready, until=time.time() + 60)
+                siri.drop_expired()
+                self.assertIs(siri.STAGED["ready"], ready)  # still waiting for its yes: left alone
+                siri.STAGED["until"] = time.time() - 1
+                siri.drop_expired()
+            self.assertEqual(cleared, ["Amma"])
+            self.assertEqual(siri.STAGED["ready"]["contact"], "Ravi")
+
+
 class ShareWords(unittest.TestCase):
     def setUp(self):
         self.staged = []

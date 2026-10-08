@@ -1073,15 +1073,31 @@ def sent_to(ready):
 
 def drop_staged():
     """A no to a message: forget it, and clear what she typed so it isn't left sitting in someone's chat, however
-    long it's been waiting."""
+    long it's been waiting. Returns what to say if the message still waiting for its yes is left there: the chat or
+    the box had changed, and only what she typed, where she typed it, is ever cleared."""
     agent.drop()  # a step of a task in an app held for the yes: forgotten, what it typed stays as a draft would
     STAGED_INSTALL.update(ready=None, until=0.0)  # a no to an install: nothing was downloaded, so just forget it
-    ready = STAGED["ready"]
+    ready, live = STAGED["ready"], time.time() < STAGED["until"]
     STAGED.update(ready=None, until=0.0)
     if ready and messaging.discard(ready):
         print(f"  cleared the unsent message to {ready['contact']}")
     elif ready and ready.get("files"):
         print(f"  couldn't take the files out of WhatsApp's preview for {ready['contact']}")
+    elif ready and live:
+        where = ready.get("say") or messaging.say_of(ready["app"])
+        return f"Okay, I won't send it. It's still typed in {where}, so clear it there."
+    return ""
+
+
+def drop_expired():
+    """Files staged in WhatsApp's preview whose question has run out, taken out: nothing did, and they waited there,
+    the keyboard in the caption box, for the next Enter to send them. A message's words stay, as a draft would, and
+    nothing else waiting for a yes is touched."""
+    ready = STAGED["ready"]
+    if (ready or {}).get("files") and time.time() >= STAGED["until"]:
+        STAGED.update(ready=None, until=0.0)
+        if not messaging.discard(ready):
+            print(f"  couldn't take the files out of WhatsApp's preview for {ready['contact']}")
 
 
 def staged_for():
@@ -4989,8 +5005,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
             if found:
                 forget_found()
             no = agent.drop()  # a step she held: what she says about leaving it, "Okay, it's left in your drafts."
-            drop_staged()
-            plan = make_plan(say=no or say_line("confirm_no"))
+            plan = make_plan(say=drop_staged() or no or say_line("confirm_no"))
     elif gate and sure < UNSURE:  # mumbling, another language or talk across the room, and no name
         print(f"  (no name and only {sure:.0%} sure of the words, staying quiet)")
         emit(notify, "Ready", None)
@@ -6236,6 +6251,12 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         night = []  # replies in the quiet hours that didn't reach your phone
         while True:
             time.sleep(2)
+            if (STAGED["ready"] or {}).get("files") and time.time() >= STAGED["until"] and \
+                    busy.acquire(blocking=False):  # not during a turn, which may be the yes to them
+                try:
+                    drop_expired()
+                finally:
+                    busy.release()
             lines = []
             while not ANNOUNCE.empty():
                 lines.append(ANNOUNCE.get())
@@ -6329,6 +6350,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                         PENDING["plan"] is not None and time.time() < PENDING["until"]
                     phone.settle(chat, message, ("Yes." if yes else "No.") if live else "Expired, not run.")
                     if not live:
+                        drop_expired()  # files left in WhatsApp's preview by the question that ran out go now
                         return
                     handle("yes" if yes else "no", None, None, notify)
                 else:

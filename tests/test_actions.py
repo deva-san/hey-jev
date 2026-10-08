@@ -362,6 +362,15 @@ class YesOrNo(Turn):
             self.assertIsNone(siri.PENDING["plan"])
         self.assertEqual(self.sent, [])
 
+    def test_a_message_she_couldnt_clear_is_said_to_be_still_there(self):
+        """A no clears only what she typed, in the chat she typed it in: with another chat open, it's left, and she
+        says so, rather than "Okay, I won't." with "hi" still in Mum's box."""
+        self.ask()
+        with mock.patch.object(siri.messaging, "discard", lambda ready: False):
+            siri.handle("No.", gate=True)
+        self.assertEqual(self.said, ["Okay, I won't send it. It's still typed in WhatsApp, so clear it there."])
+        self.assertIsNone(siri.STAGED["ready"])
+
     def test_a_command_once_the_first_seconds_are_gone_is_no_no(self):
         """"Jev, stop the music" 40 s after "Send it?" was taken as a no to the message, and the music played on."""
         paused = []
