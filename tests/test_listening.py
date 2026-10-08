@@ -703,6 +703,33 @@ class TalkOver(Case):
         self.assertEqual(a.rec.gen, gen)
 
 
+class Overhearing(Case):
+    """What the mic hears while she talks or does a task in an app goes to a second listener (overhear), so "stop"
+    stops her there and then, not once her turn is over."""
+
+    def test_stop_stops_her_with_parakeet_too(self):
+        """Parakeet is the default, and overhearing only started for Nemotron: "stop" said while she did a task in
+        an app, or read a long answer, wasn't heard until it was all over, the listening loop being inside the
+        turn. Parakeet writes a short phrase in about 0.3 s once you stop."""
+        for live in (False, True):
+            with self.subTest(live=live):
+                a = self.assistant(ears=FakeEars(live, write=lambda audio: "Stop." if len(audio) else ""))
+                self.assertIn("overhear", a.threads)
+                siri.HER.begin()
+                self.addCleanup(siri.HER.begin)
+                self.addCleanup(siri.agent.STOP.clear)
+                self.addCleanup(siri.voice_bits.take_speech_interrupted)
+                said = blocks(0.3, 0.0) + blocks(0.6, 1.0) + blocks(1.5, 0.0)  # "Stop." over her
+                side = types.SimpleNamespace(get=lambda: said.pop(0) if said else Controls().get())
+                with mock.patch.object(siri.queue, "Queue", lambda: side), \
+                        mock.patch.object(speech, "end_of_speech", lambda notify=None: FakeVAD()), \
+                        contextlib.redirect_stdout(a.out):
+                    with self.assertRaises(Stop):
+                        a.threads["overhear"]()
+                self.assertTrue(siri.HER.stop.is_set())
+                self.assertTrue(siri.agent.STOP.is_set())  # and a task she's doing with her
+
+
 # --------------------------------------------------------------------------- A7: the rest of a held phrase
 class HeldPhrase(Case):
     def test_held_phrase_waits_while_its_continuation_is_still_going(self):

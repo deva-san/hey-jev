@@ -5828,7 +5828,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         or "stop" stops her (HER.cut), other words turn her down a moment. It never acts on them: her turn ends,
         and the listening loop hears them whole, as said over her (act_on). Speech-to-text runs only while someone
         talks over her. And while she does a task in an app (agent.RUNNING), when only "stop" or her name stop her,
-        and the task with her: a TV's "open the door" doesn't."""
+        and the task with her: a TV's "open the door" doesn't. With Parakeet, which writes once you stop, only what's
+        finished is judged: no turning her down meanwhile."""
         turn = [None]  # her turn when the phrase over her began
 
         def judge(words, final, sure=1.0):
@@ -6366,7 +6367,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     threading.Thread(target=keep_warm, daemon=True).start()
     watch_return(lambda since: welcome(True, since))
     threading.Thread(target=listen_loop, daemon=True).start()
-    if ears.live:  # words as you talk, to judge them while she's still talking, or doing a task in an app
+    # what you say over her, judged while she's still talking or doing a task in an app: as you talk with Nemotron,
+    # once you stop with Parakeet (about 0.3 s a phrase). Started for Nemotron only, "stop" said to a task in an app
+    # went unheard with Parakeet until the task was over. Not Whisper, a second or two a phrase on this CPU
+    if ears.engine in ("nemotron", "parakeet"):
         threading.Thread(target=overhear, daemon=True).start()
     set_mode(mode)
     if not settings.get("met"):  # new, or her memory was just started fresh: she introduces herself instead

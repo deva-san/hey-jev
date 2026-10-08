@@ -24,8 +24,9 @@ pass.
 | 5 Telegram | Bot, pairing, buttons, voice notes, owner-only, "send me a screenshot" | Paired (done) | Listens whenever a token is saved, so `/start` always gets an answer. Before this, it stayed off until Pair was pressed, and a `/start` sent first got nothing. It keeps trying when Telegram can't be reached, and says so on the PC if the token stops working |
 | 6 Coding jobs | OpenCode over ACP, confined, git snapshot; Hermes' cron rules | Ask for one in a git project folder | Questions mid-job are asked only on the phone (buttons). For a job asked by voice, a command needing your OK is refused and listed in her report rather than interrupting you. Edits in the folder go ahead once you've said yes to the job, since the snapshot makes them undoable |
 
-Still to do: WhatsApp (later, as planned), interrupting her ("stop"), trimming the prompt, and switching the
-decider on once its shadow log looks good.
+Still to do: WhatsApp (later, as planned), trimming the prompt, and switching the decider on once its shadow log
+looks good. Interrupting her ("stop", her name or a request said over her) is done, with Nemotron and Parakeet: see
+the README, Talking over her.
 
 ## In short
 
@@ -531,6 +532,9 @@ needs a business account, and its terms from 15 Jan 2026 bar general-purpose AI 
 been stable for a while.
 
 ### Later: interrupting her ("stop")
+
+Done since, without Hermes' detector or a keyword spotter: in Windows' speech mode the mic keeps listening while
+she talks, and a second listener on it stops her (README, Talking over her). As first planned:
 
 Today `say()` mutes the mic for her whole reply.
 
