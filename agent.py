@@ -1250,6 +1250,31 @@ def _find_step(s):
     return None, "it isn't on screen", False
 
 
+# A button named for what it does next: pressed, it's named the other way ("Turn on now", then "Turn off now")
+OPPOSITE = {"on": "off", "off": "on", "show": "hide", "hide": "show", "start": "stop", "stop": "start",
+            "enable": "disable", "disable": "enable", "connect": "disconnect", "disconnect": "connect",
+            "mute": "unmute", "unmute": "mute", "lock": "unlock", "unlock": "lock", "pause": "play", "play": "pause"}
+
+
+def done_already(r, i):
+    """What she says if the control step i of r's procedure presses isn't there because it was pressed already, or
+    None: the procedure's last step checks for the same control named the other way (OPPOSITE), and that's on screen
+    now. "Turn on now" in Settings is "Turn off now" once night light's on, so "turn on night light" said again
+    stopped there, counted as a failure and called the model with a screenshot to mend it, and after 3 such the
+    procedure was put away. Only that control: a check for any other ("Compose" in Gmail, always there) says nothing
+    about why the one to press is gone. Not for one with slots, whose check is about what it wrote this time."""
+    steps = r.proc["steps"]
+    last, s = steps[-1], steps[i]
+    pressed, shown = (re.findall(r"[a-z]+", win.clean_name(x).lower()) for x in (s.get("name"), last.get("has")))
+    flipped = [(a, b) for a, b in zip(pressed, shown) if a != b]
+    if r.proc.get("slots") or last.get("do") != "expect" or last.get("gone") or i >= len(steps) - 1 or \
+            len(pressed) != len(shown) or len(flipped) != 1 or OPPOSITE.get(flipped[0][0]) != flipped[0][1] or \
+            expect(last, r, wait=0) is not True:
+        return None
+    print(f"  {label(s)} isn't there, it says {last['has']!r}: done already")
+    return f"It's already {flipped[0][0]}." if flipped[0][0] in ("on", "off") else "That's done already."
+
+
 def replay(r, start=0, notify=None):
     """r's procedure from step start: each step's place checked first (not_in_place, expect), its control found again
     by name and role, passed through the gate on what's live, done holding ACT, and what it typed read back from the
@@ -1310,7 +1335,8 @@ def replay(r, start=0, notify=None):
         if do == "ui":
             el, why, two = _find_step(s)
             if el is None:
-                return failed(r, i, s, why, env=two, notify=notify)
+                line = None if two else done_already(r, i)
+                return finish(r, "done", line) if line else failed(r, i, s, why, env=two, notify=notify)
             try:
                 live = win.ui_info(el)
             except Exception as exc:  # gone, or not answering, since it was found: a page that drew itself again

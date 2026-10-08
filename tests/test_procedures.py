@@ -317,6 +317,31 @@ class Replay(Agent):
         self.assertEqual((self.said[-1], self.ui.done), ("Night light's on.", [("Night light", "on")]))
         self.assertEqual(agent.load_stats()["night-light"]["ok"], 2)
 
+    def test_a_button_named_the_other_way_now_was_pressed_already(self):
+        """Night light learned from Settings' "Turn on now", checked by "Turn off now" (8 October): said again while
+        it was on, "Turn on now" wasn't there, which counted as a failure, called the model with a screenshot to
+        mend it, and the third time put the procedure away. A check for some other control says nothing about why
+        the one to press is gone, though: that's still a step that didn't work."""
+        self.ui.exe, self.ui.title, self.ui.site = "systemsettings.exe", "Settings", None
+        self.ui.add("Turn off now")
+        learned("night-light", {"goal": "Turn on night light", "slots": {}, "say": "Night light's on.", "steps": [
+            {"do": "ui", "name": "Turn on now", "role": "button", "in": "systemsettings.exe"},
+            {"do": "expect", "has": "Turn off now", "role": "button", "wait": 10, "fail": "I couldn't see it worked"}]})
+        for _ in range(3):
+            with self.model({"steps": [{"do": "procedure", "name": "night-light"}], "say": ""}):
+                siri.handle("turn on night light")
+            self.assertEqual(self.said[-1], "It's already on.")
+        self.assertEqual((self.ui.done, agent.load_stats()["night-light"]["fails_in_row"]), ([], 0))
+        self.assertIsNotNone(skills.find_skill("night-light"))
+        self.ui.add("Compose")
+        learned("open-lunch", {"goal": "Open the lunch mail", "slots": {}, "steps": [
+            {"do": "ui", "name": "Lunch on Friday", "role": "listitem"}, {"do": "expect", "has": "Compose"}]})
+        with self.model({"steps": [{"do": "procedure", "name": "open-lunch"}], "say": ""}), \
+                mock.patch.dict(siri.settings._load(), {"vision": False}):
+            siri.handle("open the lunch mail")
+        self.assertIn("isn't on screen", self.said[-1])
+        self.assertEqual(agent.load_stats()["open-lunch"]["fails_in_row"], 1)
+
     def test_the_wrong_window_is_the_places_fault_not_the_procedures(self):
         self.ui.exe = "notepad.exe"
         self.ui.add("Night light", "checkbox", toggle="off")
