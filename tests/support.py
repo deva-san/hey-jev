@@ -44,6 +44,11 @@ WIN_ACTIONS = (
     "quit_app", "scroll", "open_url", "press", "type_text", "set_clipboard", "paste", "click", "speak_native",
     "find_and_click_ui_element", "maximize_foreground_window", "restore_foreground_window",
     "minimize_foreground_window", "show_desktop", "open_folder", "open_snipping_tool", "set_start_with_windows",
+    # UI Automation, for her procedures: it reads what's on the real screen and presses its controls
+    "uia", "find_ui", "find_all_ui", "ui_act", "ui_info", "ui_value", "ui_toggle", "ui_at", "ui_focused",
+    "ui_dialog_text", "ui_fields", "foreground", "browser_site", "window_at", "root_at", "owner_of", "window_exists",
+    # and what she reads of the screen for a task in an app: its controls, or a picture of it
+    "ui_snapshot", "screenshot",
 )
 for _name in WIN_ACTIONS:
     if hasattr(winplatform, _name):

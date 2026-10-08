@@ -62,6 +62,7 @@ _sig(user32.EnumChildWindows, [HWND, WNDENUMPROC, wintypes.LPARAM])
 _sig(user32.GetWindowThreadProcessId, [HWND, ctypes.POINTER(DWORD)], DWORD)
 _sig(user32.IsWindowVisible, [HWND])
 _sig(user32.IsIconic, [HWND])
+_sig(user32.IsWindow, [HWND])
 _sig(user32.GetWindow, [HWND, UINT], HWND)
 _sig(user32.GetAncestor, [HWND, UINT], HWND)
 _sig(user32.GetWindowLongW, [HWND, ctypes.c_int], LONG)
@@ -104,7 +105,7 @@ _sig(version.VerQueryValueW, [ctypes.c_void_p, wintypes.LPCWSTR, ctypes.POINTER(
 _sig(powrprof.SetSuspendState, [wintypes.BOOLEAN, wintypes.BOOLEAN, wintypes.BOOLEAN], wintypes.BOOLEAN)
 _sig(ole32.CoInitializeEx, [ctypes.c_void_p, DWORD], ctypes.c_long)
 
-GW_OWNER, GA_ROOT, GWL_EXSTYLE = 4, 2, -20
+GW_OWNER, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE = 4, 2, 3, -20
 WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_EX_TOOLWINDOW = 0x8, 0x20, 0x80
 WS_EX_LAYERED, WS_EX_NOACTIVATE = 0x80000, 0x08000000
 SW_HIDE, SW_MINIMIZE, SW_RESTORE = 0, 6, 9
@@ -1253,6 +1254,17 @@ def root_at(x, y):
     return user32.GetAncestor(hwnd, GA_ROOT) if hwnd else None
 
 
+def owner_of(hwnd):
+    """The app window a window is part of: itself, or for a dialog, a menu or a list that dropped down from it, the
+    window that owns it. None for none."""
+    return user32.GetAncestor(hwnd, GA_ROOTOWNER) if hwnd else None
+
+
+def window_exists(hwnd):
+    """True if hwnd is still a window: Outlook's new mail closes once it's sent, a dialog in front of it doesn't."""
+    return bool(hwnd) and bool(user32.IsWindow(hwnd))
+
+
 def click(x, y, button="left", double=False):
     """Click at a point on the screen, in real pixels. The pointer stays there, as if you'd clicked."""
     from pynput.mouse import Button, Controller
@@ -1426,6 +1438,460 @@ def find_and_click_ui_element(target_name, hwnd=None):
     except Exception as exc:
         print(f"  uia element click failed: {exc!r}")
     return False
+
+
+# --------------------------------------------------------------------------- UI Automation for her own procedures
+# What agent.py reads and presses: controls found by their name and role, never by where they are on the screen, so a
+# button that moved is still found and one that's gone is never pressed by mistake. Each call to UI Automation has a
+# time limit, so a slow or hung app makes it give up instead of holding her up, and no extra threads are needed.
+_ui = threading.local()  # this thread's UI Automation: a COM object made on one thread mustn't be used from another
+ROLES = {"button": 50000, "checkbox": 50002, "combobox": 50003, "edit": 50004, "link": 50005, "listitem": 50007,
+         "menuitem": 50011, "radio": 50013, "tab": 50019, "document": 50030}
+ROLE_OF = {v: k for k, v in ROLES.items()}
+UIA_LIMIT = 800  # ms one UI Automation call may take, then it raises
+BROWSER_EXES = {"chrome.exe", "msedge.exe", "brave.exe"}
+OMNIBOX = "Address and search bar"  # the address bar's name in Chrome, Edge and Brave
+# Direction marks and a shortcut hint on the end of a name: Gmail's Send button is "Send \u202a(Ctrl-Enter)\u202c"
+BIDI = re.compile("[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+SHORTCUT_HINT = re.compile(r"\s*\((?:ctrl|control|alt|shift|win|cmd)\s*[-+][^()]*\)$", re.I)
+_sleep, _clock = time.sleep, time.monotonic  # swapped for a fake clock in the tests, so polling takes no time
+
+
+def uia():
+    """This thread's UI Automation (CUIAutomation8, made once a thread), every call limited to UIA_LIMIT."""
+    got = getattr(_ui, "uia", None)
+    if got is None:
+        _com()
+        import comtypes.client
+        comtypes.client.GetModule("UIAutomationCore.dll")
+        from comtypes.gen.UIAutomationClient import CUIAutomation8, IUIAutomation2
+        got = comtypes.client.CreateObject(CUIAutomation8, interface=IUIAutomation2)
+        got.TransactionTimeout = got.ConnectionTimeout = UIA_LIMIT
+        _ui.uia = got
+    return got
+
+
+def clean_name(name):
+    """A control's name as a person reads it: no invisible direction marks, single spaces, and no shortcut hint on
+    the end, so "Send \u202a(Ctrl-Enter)\u202c" is "Send"."""
+    return SHORTCUT_HINT.sub("", " ".join(BIDI.sub("", str(name or "")).split())).strip()
+
+
+def _text(value):
+    """What's typed in a control, without direction marks and with single spaces, the way typed text is compared."""
+    return " ".join(BIDI.sub("", str(value or "")).split())
+
+
+def ui_info(el):
+    """What a control is: {"name", "role", "aid", "password", "el"}, role one of ROLES or ""."""
+    return {"name": clean_name(el.CurrentName), "role": ROLE_OF.get(el.CurrentControlType, ""),
+            "aid": str(el.CurrentAutomationId or ""), "password": bool(el.CurrentIsPassword), "el": el}
+
+
+def _shown(el):
+    """On the screen, enabled and with a size: one a person could use."""
+    if el.CurrentIsOffscreen or not el.CurrentIsEnabled:
+        return False
+    rect = el.CurrentBoundingRectangle
+    return rect.right > rect.left and rect.bottom > rect.top
+
+
+def _find(want, role, aid, hwnd):
+    """The shown controls of role (any of ROLES if None) in window hwnd, by AutomationId, else by clean name. Raises
+    LookupError when it couldn't really look (no window in front, or more controls than it reads, the one wanted
+    maybe among those left), rather than answer that it isn't there."""
+    a = uia()
+    hwnd = hwnd or user32.GetForegroundWindow()
+    root = a.ElementFromHandle(hwnd) if hwnd else None
+    if not root:
+        raise LookupError("no window in front to read")
+    types = [ROLES[role]] if role in ROLES else list(ROLES.values())
+    kinds = a.CreatePropertyCondition(30003, types[0])  # ControlType: one FindAll by role, never a walk of the tree
+    for t in types[1:]:
+        kinds = a.CreateOrCondition(kinds, a.CreatePropertyCondition(30003, t))
+    for by_id in ([True, False] if aid else [False]):  # an AutomationId can change with the app's version: then the name
+        found = root.FindAll(4, a.CreateAndCondition(kinds, a.CreatePropertyCondition(30011, str(aid))) if by_id
+                             else kinds)
+        hits = []
+        for i in range(min(500, found.Length if found else 0)):
+            el = found.GetElement(i)
+            if (by_id or (want and clean_name(el.CurrentName).lower() == want)) and _shown(el):
+                hits.append(el)
+        if hits or not want:
+            return hits
+        if not by_id and found and found.Length > 500:  # it may be one of those past the ones read
+            raise LookupError("more controls than she reads")
+    return []
+
+
+def find_ui(name=None, role=None, aid=None, hwnd=None, wait=0.0, unique=True, strict=False):
+    """The shown, enabled control of this role in the window in front (or hwnd): by its AutomationId, else exactly by
+    name (clean_name, any case). unique: only if there's exactly one, else None, since two Send buttons mean two mails
+    open and she can't tell which. Looks again every 0.3 s for up to wait seconds, for a page still loading.
+    strict: a window that couldn't be read (too slow, none in front, more controls than she reads) raises, rather
+    than passing for one without the control, since saying it's gone takes a clean read."""
+    want = clean_name(name).lower()
+    if not want and not aid:
+        return None
+    end = _clock() + wait
+    while True:
+        try:
+            hits = _find(want, role, aid, hwnd)
+        except Exception as exc:  # slow, gone or not answering: as good as not there, unless strict
+            if strict:
+                raise
+            print(f"  ui automation: {exc!r}")
+            hits = []
+        if hits and (len(hits) == 1 or not unique):
+            return hits[0]
+        if len(hits) > 1 or _clock() >= end:
+            return None
+        _sleep(0.3)
+
+
+def find_all_ui(name=None, role=None, aid=None, hwnd=None):
+    """Every shown, enabled control find_ui would find, in the window's order, or [] if none or it couldn't read the
+    window: a settings card is often named like the switch in it, and comes first."""
+    want = clean_name(name).lower()
+    if not want and not aid:
+        return []
+    try:
+        return _find(want, role, aid, hwnd)
+    except Exception as exc:  # slow, gone or not answering: as good as not there
+        print(f"  ui automation: {exc!r}")
+        return []
+
+
+UIA_E_TIMEOUT = -2146233083  # 0x80131505 as comtypes gives it: the app didn't answer within UIA_LIMIT
+
+
+def _pattern(el, pattern, interface):
+    """el's UI Automation pattern (Invoke 10000, Value 10002, Toggle 10015) as its interface, or None."""
+    try:
+        got = el.GetCurrentPattern(pattern)
+        if not got:
+            return None
+        _com()
+        from comtypes.gen import UIAutomationClient
+        return got.QueryInterface(getattr(UIAutomationClient, interface))
+    except Exception:
+        return None
+
+
+def ui_act(el, text=None, state=None, caret=False):
+    """Use a control as a person would, and say how: a switch turned "on" or "off" only if it isn't already
+    ("already"); text put in by its Value pattern, else by focusing it and pasting, the clipboard put back after; else
+    Invoked, the way its own keyboard shortcut would; else clicked in its middle. caret: the text is typed where the
+    cursor is (a "type" step), never by the Value pattern, which puts it in place of everything in the box: a list in
+    Notepad, a draft or its signature in Gmail, and in an Edit its undo too."""
+    if state in ("on", "off"):
+        toggle = _pattern(el, 10015, "IUIAutomationTogglePattern")
+        if toggle is None:
+            raise RuntimeError("That isn't something I can switch on or off")
+        if ("on" if toggle.CurrentToggleState == 1 else "off") == state:
+            return "already"
+        toggle.Toggle()
+        return "toggled"
+    if text is not None:
+        value = None if caret else _pattern(el, 10002, "IUIAutomationValuePattern")
+        if value is not None and not value.CurrentIsReadOnly:
+            value.SetValue(str(text))
+            return "set"
+        el.SetFocus()
+        kept = clipboard_snapshot()
+        try:
+            paste(str(text))
+            time.sleep(0.3)  # the app reads the clipboard after the keys: too soon and it pastes what was there
+        finally:
+            clipboard_restore(kept)
+        return "pasted"
+    invoke = _pattern(el, 10000, "IUIAutomationInvokePattern")
+    if invoke is not None:
+        try:
+            invoke.Invoke()
+        except Exception as exc:
+            # A WinForms or Win32 button that opens a modal dialog (Are you sure?, Save As) doesn't return from Invoke
+            # till the dialog closes, so UI Automation gives up at UIA_LIMIT though it was pressed. What's on the
+            # screen next says if it worked: it's never pressed again to find out
+            if getattr(exc, "hresult", None) != UIA_E_TIMEOUT:
+                raise
+            print("  ui automation: Invoke timed out, taken as pressed")
+        return "invoked"
+    with _real_pixels():  # in the real pixels click uses: read outside, a screen scaled unlike the main one is off
+        rect = el.CurrentBoundingRectangle
+    click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+    return "clicked"
+
+
+def ui_value(el):
+    """What's typed in a control, or None: it has no Value pattern, it's a password box, or it couldn't be read."""
+    try:
+        if el.CurrentIsPassword:
+            return None
+        value = _pattern(el, 10002, "IUIAutomationValuePattern")
+        return None if value is None else _text(value.CurrentValue)
+    except Exception:
+        return None
+
+
+def ui_toggle(el):
+    """"on" or "off" for a switch or a tick box, else None."""
+    toggle = _pattern(el, 10015, "IUIAutomationTogglePattern")
+    try:
+        return None if toggle is None else "on" if toggle.CurrentToggleState == 1 else "off"
+    except Exception:
+        return None
+
+
+def ui_at(x, y):
+    """What's at a point on the screen, in real pixels: the control there, or the nearest one around it that can be
+    pressed or switched, since a button's label is often a text inside it. Never the page around it: a picture, a
+    canvas or a button a web page doesn't show UI Automation isn't the page, whose name is only its title, so the
+    thing at the point is given as it is, often with no name, which the gate won't press after typing or hold for a
+    yes. ui_info with "climbed": it's one around the thing at the point (a button around its label, or a mail's row
+    around an icon in it that UI Automation doesn't show, which the gate won't hold for a yes: pressing the row opens
+    the mail). None if UI Automation can't say."""
+    try:
+        a = uia()
+        with _real_pixels():
+            el = a.ElementFromPoint(wintypes.POINT(int(x), int(y)))
+        first, walker = el, a.ControlViewWalker
+        for depth in range(8):
+            if not el or (depth and el.CurrentControlType == ROLES["document"]):
+                break
+            if el.CurrentControlType in ROLE_OF or el.GetCurrentPropertyValue(30031) or \
+                    el.GetCurrentPropertyValue(30041):  # can be Invoked or Toggled
+                return {**ui_info(el), "climbed": bool(depth)}
+            el = walker.GetParentElement(el)
+        return {**ui_info(first), "climbed": False} if first else None
+    except Exception as exc:
+        print(f"  ui automation: {exc!r}")
+        return None
+
+
+def ui_focused():
+    """The control with the keyboard focus, as ui_info, or None."""
+    try:
+        el = uia().GetFocusedElement()
+        return ui_info(el) if el else None
+    except Exception as exc:
+        print(f"  ui automation: {exc!r}")
+        return None
+
+
+def ui_dialog_text(el, most=300):
+    """The words of the dialog a control is in, up to most characters: its title and the text in it, so an OK is
+    judged by what it says yes to, like "Delete this conversation?". "" if it isn't in one."""
+    try:
+        a = uia()
+        box, walker = el, a.ControlViewWalker
+        for _ in range(12):
+            if not box:
+                return ""
+            if box.CurrentControlType == 50032 or str(box.CurrentAriaRole or "").lower() in ("dialog", "alertdialog"):
+                break  # a window, or a dialog in a web page
+            box = walker.GetParentElement(box)
+        else:
+            return ""
+        texts = box.FindAll(4, a.CreatePropertyCondition(30003, 50020))  # its texts
+        words = [clean_name(box.CurrentName)] + [clean_name(texts.GetElement(i).CurrentName)
+                                                 for i in range(min(20, texts.Length if texts else 0))]
+        return " ".join(w for w in words if w)[:most]
+    except Exception as exc:
+        print(f"  ui automation: {exc!r}")
+        return ""
+
+
+def foreground():
+    """(hwnd, exe, title) of the window in front, exe as a lower-case file name like "chrome.exe"."""
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return None, "", ""
+    return hwnd, os.path.basename(window_exe(hwnd)).lower(), window_title(hwnd)
+
+
+def site_of(url):
+    """The domain of a web address, without "www.": "https://www.Example.com/a" and "mail.google.com/mail/u/0" (as
+    the address bar shows it) give "example.com" and "mail.google.com". None if it isn't one."""
+    m = re.match(r"(?:[a-z][\w+.-]*://)?(?:[^@/\s]*@)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})(?::\d+)?(?:[/?#]|$)",
+                 str(url or "").strip(), re.I)
+    return m[1].lower().removeprefix("www.") if m else None
+
+
+def browser_site():
+    """The site in front, from the address bar of Chrome, Edge or Brave, as site_of has it. None for anything else."""
+    hwnd, exe, _ = foreground()
+    if exe not in BROWSER_EXES:
+        return None
+    box = find_ui(OMNIBOX, "edit", hwnd=hwnd)
+    return site_of(ui_value(box)) if box is not None else None
+
+
+# What a snapshot reads of each control, all in the one call: name, role, AutomationId, off screen, enabled,
+# password, where it is, keyboard focus, what's typed in it, and whether it's a switch and how it's set
+SNAP_PROPS = (30005, 30003, 30011, 30022, 30010, 30019, 30001, 30008, 30045, 30041, 30086)
+SNAP_LISTS = 15  # list items in a snapshot: a mailbox has hundreds, and the first screenful is what she needs
+SNAP_NAME = 60  # characters of a name
+SLOW_FOR = 60.0  # seconds a window UI Automation timed out on is left to a screenshot
+_slow = {}  # window -> until when it is
+
+
+def _cached(value, kind):
+    """A cached property's value if it's a kind (str, int, bool), else None: UI Automation's "not supported" comes
+    back as an object, and a bool is an int too."""
+    return value if type(value) is kind else None
+
+
+def _focus_box(a, walk=True):
+    """Where the dialog the keyboard focus is in sits, (left, top, right, bottom), or None if it isn't in one short of
+    the window itself (or not walk: not looked for); and the control with the focus as (role, name, what's typed in
+    it), or None. (None, None) if UI Automation can't say."""
+    try:
+        f = a.GetFocusedElement()
+        if not f:
+            return None, None
+        focused = (ROLE_OF.get(f.CurrentControlType, ""), clean_name(f.CurrentName)[:SNAP_NAME],
+                   None if f.CurrentIsPassword else _cached(f.GetCurrentPropertyValue(30045), str))
+        e, walker = f if walk else None, a.ControlViewWalker
+        for _ in range(12):  # as ui_dialog_text: a window, or a dialog in a web page (Gmail's new mail)
+            if not e:
+                break
+            if e.CurrentControlType == 50032 or str(e.CurrentAriaRole or "").lower() in ("dialog", "alertdialog"):
+                r = e.CurrentBoundingRectangle
+                return (r.left, r.top, r.right, r.bottom), focused
+            e = walker.GetParentElement(e)
+        return None, focused
+    except Exception:
+        return None, None
+
+
+def _inside(rect, box):
+    return box is not None and box[0] <= rect[0] and box[1] <= rect[1] and rect[2] <= box[2] and rect[3] <= box[3]
+
+
+def _snapshot(hwnd, most, browser=False, root=None, lists=SNAP_LISTS):
+    """The shown controls of window hwnd (or under root), of ROLES, read in one FindAllBuildCache: (items, web, total,
+    focused, cut), web being how many of them are inside the page of a browser (None if there's no page), total how
+    many there were before the first most were kept, focused the control with the focus (_focus_box), and cut True
+    if some were left out: past most, or list items past lists.
+    With more than most, the order they're in the window doesn't decide alone which are kept: Chrome's own buttons
+    and Gmail's inbox came first, and the new mail, last on the page, was never seen. So the address bar comes first
+    (the site is read from it), then what's in the dialog the focus is in (the new mail: Gmail puts the cursor in its
+    To), then the page, then the rest. In a browser, the tabs along its top are left out: every other tab's title,
+    your bank's too, went to the model each round."""
+    a = uia()
+    root = root or a.ElementFromHandle(hwnd)
+    if not root:
+        return [], None, 0, None, False
+    cache = a.CreateCacheRequest()
+    for prop in SNAP_PROPS:
+        cache.AddProperty(prop)
+    kinds = None
+    for t in ROLES.values():
+        one = a.CreatePropertyCondition(30003, t)
+        kinds = one if kinds is None else a.CreateOrCondition(kinds, one)
+    found = root.FindAllBuildCache(4, a.CreateAndCondition(kinds, a.CreatePropertyCondition(30022, False)), cache)
+    items, listed, page, cut = [], 0, None, False
+    for i in range(found.Length if found else 0):
+        el = found.GetElement(i)
+        rect = el.CachedBoundingRectangle
+        if el.CachedIsOffscreen or not el.CachedIsEnabled or rect.right <= rect.left or rect.bottom <= rect.top:
+            continue
+        role = ROLE_OF.get(el.CachedControlType, "")
+        name = clean_name(el.CachedName)[:SNAP_NAME]
+        value = None if el.CachedIsPassword else _cached(el.GetCachedPropertyValue(30045), str)
+        state = _cached(el.GetCachedPropertyValue(30086), int) if _cached(el.GetCachedPropertyValue(30041), bool) \
+            else None
+        if role == "document" and page is None:
+            page = (rect.left, rect.top, rect.right, rect.bottom)
+        if role == "listitem":
+            listed += 1
+            if listed > lists:
+                cut = True
+                continue
+        if not name and not value and role not in ("edit", "document", "combobox"):
+            continue  # a button with no name: nothing she could tell anyone about it
+        items.append({"id": len(items) + 1, "role": role, "name": name, "value": _text(value) if value else None,
+                      "state": {0: "off", 1: "on"}.get(state), "password": bool(el.CachedIsPassword),
+                      "focus": bool(el.CachedHasKeyboardFocus), "aid": str(el.CachedAutomationId or ""),
+                      "rect": (rect.left, rect.top, rect.right, rect.bottom), "el": el})
+    if browser and page is not None:  # the tab strip, above the page
+        items = [it for it in items if not (it["role"] == "tab" and it["rect"][3] <= page[1])]
+    web = None if page is None else sum(1 for it in items if it["role"] != "document" and _inside(it["rect"], page))
+    total = len(items)
+    box, focused = _focus_box(a, walk=total > most)
+    if total > most:
+        def rank(it):
+            if it["role"] == "edit" and it["name"] == OMNIBOX:
+                return 0
+            return 1 if _inside(it["rect"], box) else 2 if _inside(it["rect"], page) else 3
+        items, cut = sorted(items, key=rank)[:most], True  # sorted keeps the window's order within each
+    for n, it in enumerate(items):
+        it["id"] = n + 1
+    return items, web, total, focused, cut
+
+
+def ui_snapshot(hwnd=None, most=60):
+    """What's in the window in front (or hwnd) for her to read and press, in one go: {"hwnd", "title", "exe", "site",
+    "focus" (the id with the keyboard focus, or None), "total" (how many controls there were, most of them kept),
+    "focused" (the control with the focus as (role, name, value), kept or not), "cut" (some were left out, so a
+    name's only once in items maybe isn't in the window), "items": [{"id", "role", "name", "value", "state",
+    "password", "focus", "aid", "rect", "el"}]}, up to most controls in the order they're on the page (with more,
+    those that matter first: _snapshot), SNAP_LISTS list items of them, names cut to SNAP_NAME. A
+    password's value is never read. None if UI Automation timed out on the window: it's left to a screenshot for
+    SLOW_FOR seconds after, rather than held up each time.
+    Chrome fills in a page's controls lazily, when something first asks: with fewer than 5 in the page, it reads
+    once more after half a second. Only that read is timed for being slow: timed with the half second and the read
+    before it, a page still loading shut UI Automation off for the whole of Chrome, all its tabs, for a minute."""
+    hwnd = hwnd or user32.GetForegroundWindow()
+    if not hwnd or _clock() < _slow.get(hwnd, 0.0):
+        return None
+    exe, began = os.path.basename(window_exe(hwnd)).lower(), _clock()
+    browser = exe in BROWSER_EXES
+    try:
+        items, web, total, focused, cut = _snapshot(hwnd, most, browser)
+        if browser and web is not None and web < 5:
+            _sleep(0.5)
+            began = _clock()  # the read the next look will do: not the half second, nor a page still filling in
+            items, web, total, focused, cut = _snapshot(hwnd, most, browser)
+    except Exception as exc:  # UI Automation's time limit, or the window went away: a screenshot will do
+        print(f"  ui snapshot: {exc!r}")
+        _slow[hwnd] = _clock() + SLOW_FOR
+        return None
+    if _clock() - began > 2 * UIA_LIMIT / 1000:  # it got there, but slowly: next time straight to a screenshot
+        _slow[hwnd] = _clock() + SLOW_FOR
+    box = next((it for it in items if it["role"] == "edit" and it["name"] == OMNIBOX), None)
+    return {"hwnd": hwnd, "title": window_title(hwnd), "exe": exe,
+            "site": site_of(box["value"]) if box is not None and browser else None,
+            "focus": next((it["id"] for it in items if it["focus"]), None), "total": total, "focused": focused,
+            "cut": cut, "items": items}
+
+
+def ui_fields(el=None):
+    """What a send would send, read in one go as [(role, name, value)]: every shown control in the dialog el is in
+    (Gmail's new mail is one, in its page), else in the window in front, however many: a snapshot's caps could leave a
+    recipient out. A password's value is never read. None if UI Automation couldn't read it, never [] for that: who a
+    mail goes to that couldn't be read isn't a mail to nobody."""
+    try:
+        a = uia()
+        hwnd = user32.GetForegroundWindow()
+        box, walker, scope = el, a.ControlViewWalker, None
+        for _ in range(12):  # as ui_dialog_text: a window, or a dialog in a web page
+            if not box:
+                break
+            if box.CurrentControlType == 50032 or str(box.CurrentAriaRole or "").lower() in ("dialog", "alertdialog"):
+                scope = box
+                break
+            box = walker.GetParentElement(box)
+        scope = scope or (a.ElementFromHandle(hwnd) if hwnd else None)
+        if not scope:
+            return None
+        browser = bool(hwnd) and os.path.basename(window_exe(hwnd)).lower() in BROWSER_EXES
+        items = _snapshot(hwnd, 10 ** 5, browser, root=scope, lists=10 ** 5)[0]
+    except Exception as exc:
+        print(f"  ui automation: {exc!r}")
+        return None
+    return [(it["role"], it["name"], it["value"]) for it in items]
 
 
 # --------------------------------------------------------------------------- Native Window Management & Shell

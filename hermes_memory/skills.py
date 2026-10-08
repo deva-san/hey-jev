@@ -229,7 +229,8 @@ def skill_view(name: str) -> Dict[str, Any]:
 
 def plan_of(body: str) -> Optional[Dict[str, Any]]:
     """The ```json plan in a skill's body, {"steps": [...], "say": "..."}, or None. The last one: build_content puts
-    it after the notes, and an example plan in the notes would otherwise come first and run as the routine."""
+    it after the notes, and an example plan in the notes would otherwise come first and run as the routine.
+    A procedure (agent.py) comes with it as "procedure", its steps empty, so it never runs as a routine."""
     found = _PLAN_RE.findall(body or "")
     if not found:
         return None
@@ -240,13 +241,18 @@ def plan_of(body: str) -> Optional[Dict[str, Any]]:
     steps = plan.get("steps") if isinstance(plan, dict) else None
     if not isinstance(steps, list) or not all(isinstance(s, dict) and s.get("do") for s in steps):
         return None
-    return {"steps": steps, "say": str(plan.get("say") or "")}
+    out = {"steps": steps, "say": str(plan.get("say") or "")}
+    if isinstance(plan.get("procedure"), dict):
+        out["procedure"] = plan["procedure"]
+    return out
 
 
-def build_content(name: str, description: str, notes: str = "", triggers=(), steps=None, say: str = "") -> str:
+def build_content(name: str, description: str, notes: str = "", triggers=(), steps=None, say: str = "",
+                  procedure: Optional[Dict[str, Any]] = None) -> str:
     """A SKILL.md in Hermes' format from the parts the model sends. Hey Jev: each value written as JSON, which YAML
     reads the same way, so Hermes' parser takes it whatever it holds (a bare "on" is a boolean to YAML 1.1); the
-    description cut to Hermes' 60 letters for a new skill; triggers under "When to Use", where Hermes keeps them."""
+    description cut to Hermes' 60 letters for a new skill; triggers under "When to Use", where Hermes keeps them.
+    procedure: one of her procedures (agent.py), kept in the plan with no steps of its own."""
     description = " ".join(str(description).split())
     if len(description) > SKILL_PROMPT_DESC_LIMIT:
         description = description[:SKILL_PROMPT_DESC_LIMIT].rsplit(" ", 1)[0].rstrip(",.;:") or \
@@ -259,33 +265,61 @@ def build_content(name: str, description: str, notes: str = "", triggers=(), ste
     body = (notes or description).strip()
     if triggers:
         body = "## When to Use\n" + "\n".join(f'- "{t}"' for t in triggers) + "\n\n" + body
-    if steps:
-        body += "\n\n```json\n" + json.dumps({"steps": steps, "say": say or ""}, ensure_ascii=False) + "\n```"
+    if steps or procedure:
+        plan = {"steps": steps or [], "say": say or "", **({"procedure": procedure} if procedure else {})}
+        body += "\n\n```json\n" + json.dumps(plan, ensure_ascii=False) + "\n```"
     return "---\n" + "\n".join(head) + "\n---\n" + body + "\n"
 
 
 # --- The system prompt (agent/prompt_builder.py, build_skills_system_prompt) ---
 
 DETAIL_CHARS = 900  # the most of one skill's notes written out in her prompt
+MOST_PROCEDURES = 15  # Hey Jev: procedures listed, the ones used last first; the rest she does from scratch again
+
+
+def _procedure(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Hey Jev: the procedure in a skill (agent.py), or None. siri.routines() moves it out of the plan."""
+    proc = entry["procedure"] if "procedure" in entry else (entry.get("plan") or {}).get("procedure")
+    return proc if isinstance(proc, dict) else None
+
+
+def _last_used(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Hey Jev: entries, the one used most lately first (Hermes' usage records)."""
+    try:
+        usage = skill_usage.load_usage()
+    except Exception:
+        usage = {}
+    return sorted(entries, key=lambda e: skill_usage.latest_activity_at(usage.get(e["dir"]) or {})
+                  or (usage.get(e["dir"]) or {}).get("created_at") or "", reverse=True)
 
 
 def system_prompt_block(entries: Optional[List[Dict[str, Any]]] = None, detail=()) -> str:
     """The skills index for her prompt. Hey Jev: Hermes' wording and its 60-letter descriptions; the skills in detail
     (the ones that fit this request, see siri.skills_block) are written out in full, so the model needn't ask for
-    them with skill_view, a whole extra round trip; the rest by name and description."""
+    them with skill_view, a whole extra round trip; the rest by name and description. Her procedures (agent.py) are
+    listed with their slots and how to run one, never with the words that start them, which only code matches."""
     entries = list_skills() if entries is None else entries
     if not entries:
         return ""
     lines, full = [], []
-    for e in entries:
-        said = f" (the user says: {', '.join(e['triggers'])})" if e["triggers"] else ""  # Hey Jev: no fixed name
+    procedures = _last_used([e for e in entries if _procedure(e)])[:MOST_PROCEDURES]
+    for e in [e for e in entries if not _procedure(e)] + procedures:
+        proc = _procedure(e)
+        if proc:
+            slots = ", ".join(str(s) for s in (proc.get("slots") or {}))
+            said = f" (procedure{', slots: ' + slots if slots else ''})"
+        else:
+            said = f" (the user says: {', '.join(e['triggers'])})" if e["triggers"] else ""  # Hey Jev: no fixed name
         lines.append(f"    - {e['dir']}: {extract_skill_description({'description': e['description']})}{said}")
         if e["dir"] in detail and e.get("notes"):
             full.append(f"### {e['dir']}\n{e['notes'][:DETAIL_CHARS]}")
+    how = ("\nA procedure is a task you've done in an app before: run it with "
+           "{\"do\":\"procedure\",\"name\":\"...\",\"slots\":{...}}, each slot filled from their words now, and no other "
+           "steps for it." if procedures else "")
     return ("## Skills\n"
             "Before replying, scan the skills below. If a skill matches or is even partially relevant to the task, "
             "follow it: the ones that fit this request are written out after the list, load any other with "
             "{\"do\":\"skill_view\",\"name\":\"...\"}. Skills encode the user's preferred approach and what works on "
-            "this PC. If a skill was missing steps or wrong, fix it with a skill patch before finishing.\n"
+            "this PC. If a skill was missing steps or wrong, fix it with a skill patch before finishing." + how + "\n"
             "<available_skills>\n" + "\n".join(lines) + "\n</available_skills>"
             + ("\n\n" + "\n\n".join(full) if full else ""))
