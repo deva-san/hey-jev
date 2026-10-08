@@ -2345,6 +2345,11 @@ def learn_skill(step, agent=False):
     procs = procedure_skills()
     if name in procs and (action != "delete" or agent):
         raise RuntimeError("I learned that one by doing it, so I don't change it that way")
+    # nor does the review delete or write over a skill it didn't write itself (Hermes' created_by "agent"): one you
+    # taught her is yours, and a review told to fix "the skill it's about" after a plain "No" could have archived it.
+    # A fix to a line of it (patch) still goes in, and "forget what you just learned" undoes that
+    if agent and action != "patch" and skills.find_skill(name) and not skills.skill_usage.is_curator_managed(name):
+        raise RuntimeError("You taught me that one, so I don't change it on my own")
     taken, said = {t for words in procs.values() for t in words}, step.get("triggers") or []
     if action not in ("delete", "patch") and taken & {plain(str(t)) for t in (said if isinstance(said, list) else [said])}:
         raise RuntimeError("Those words already start something I learned by doing it")
@@ -2448,6 +2453,12 @@ Memory has """ + hermes_bits._MEMORY_ROUTING_BLOCK + hermes_bits._LESSON_LAYER_B
     "Do NOT capture, as a skill or as a fact" + hermes_bits._DO_NOT_CAPTURE_BLOCK
 CORRECTION = re.compile(r"(?:no|nope|not that|wrong|that's wrong|i said|i meant|actually|i told you|you got it wrong|"
                         r"not this|that's not)\b")
+# A no that only turns her down ("Send it?" "No.", "No, not now", "No, don't send it") doesn't correct her: each one
+# started a review at once, one more model call, told "They just corrected her: "No". Fix the fact or the skill it's
+# about first", which could rewrite a routine you taught her. After plain(), which takes "thanks" and "now" off the end
+DECLINE = re.compile(r"(?:no|nope|nah|not)(?: (?:no|nope|nah|not(?: now| yet)?|thanks|thank you|leave it|"
+                     r"forget (?:it|about it)|never ?mind|cancel(?: it| that)?|stop|wait|hold on|it's (?:fine|ok|okay)|"
+                     r"that's (?:fine|ok|okay|all)|i'm (?:good|fine|ok|okay)|(?:don't|dont|do not)(?: [\w']+){0,3}))*")
 _learning = {"turns": 0, "last": 0.0, "lock": threading.Lock(), "overheard": collections.deque(maxlen=20)}
 
 
@@ -2465,7 +2476,7 @@ def learn_later(words, steps, failed, gate=False):
     if any(s.get("do") in ("procedure", "agent_resume") or s.get("learned") for s in steps):
         return
     _learning["turns"] += 1
-    corrected = bool(CORRECTION.match(plain(words))) and gate != "cold"
+    corrected = bool(CORRECTION.match(plain(words))) and not DECLINE.fullmatch(plain(words)) and gate != "cold"
     worth = corrected or failed or len(steps) >= 3 or \
         any(s.get("do") == "skill" for s in steps) or _learning["turns"] >= 6
     # a correction is looked at straight away, so she has it right the next time you ask, a minute later or not
