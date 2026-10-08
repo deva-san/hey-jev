@@ -2084,29 +2084,50 @@ class LiveSay:
     """Her answer said while the model is still writing it. Only a plain answer: once the reply has started
     {"steps": [], "say": " there's nothing to do, so nothing to check before she talks, and "say" goes out a
     sentence at a time (SentenceChunker) as it comes, each sentence's voice made while the one before plays (Line).
+    A reply in plain words is a plain answer too, up to any JSON or tag in it: Ling answered 18 of 89 questions that
+    way, and they waited for the whole reply. Without her name (gate), only a reply that is to her, {"to": "you", ...
+    or {"steps": [], ... or plain words, and never a sentence let_go would keep quiet about ("Say that again?").
     Of several tries streaming at once (ask_model), the first to get that far is the one she says."""
-    START = re.compile(r'\s*(?:```(?:json)?\s*)?\{\s*"steps"\s*:\s*\[\s*\]\s*,\s*"say"\s*:\s*"')
+    START = re.compile(r'\s*(?:```(?:json)?\s*)?\{\s*(?:"to"\s*:\s*"(?i:you|jev|me|assistant)"\s*,\s*)?'
+                       r'"steps"\s*:\s*\[\s*\]\s*,\s*"say"\s*:\s*"')
+    PLAIN = re.compile(r'\s*[^\s{\[<`"]')  # not JSON, a tool call or a thinking tag
+    # a reply that starts like this is to her: what to do, or "to": "you" (COLD_NOTE), never {"to": "others"} or
+    # {"ignore": true}. Words said without her name get a "One moment" only then (FOR_HER)
+    MINE = re.compile(r'\s*(?:```(?:json)?\s*)?\{\s*(?:"(?:steps|say|do)"|"to"\s*:\s*"(?i:you|jev|me|assistant)")')
 
-    def __init__(self, notify, make=None):
-        self.notify, self.make = notify, make or Line
+    def __init__(self, notify, make=None, gate=False):
+        self.notify, self.make, self.gate = notify, make or Line, gate
         self.owner, self.player, self.used, self.said, self.error, self.started = None, None, 0, [], None, None
         self.chunker, self.lines, self.lock = SentenceChunker(), queue.Queue(), threading.Lock()
         self.first_text = None  # when the first words came, from any try
+        self.not_plain = set()  # tries whose plain words turned into JSON or a tag before a sentence was said
+        self.cut = False  # the one she's saying did, after: the rest of it isn't said as it's written
+        self.quiet = False  # without her name, a sentence let_go would keep quiet about: none of it is said
 
     def feed(self, key, text):
         """Try key's reply so far."""
         with self.lock:
             self.first_text = self.first_text or time.time()
-            if self.owner not in (None, key):
+            if self.owner not in (None, key) or key in self.not_plain or self.cut or self.quiet:
                 return
+            if self.gate and self.MINE.match(text):
+                FOR_HER.set()
             m = self.START.match(text)
-            if not m:
+            if m:
+                words = json_string_so_far(text[m.end():])
+                TURN_SPOKE.set()  # an answer's on its way: no "One moment" just ahead of it
+            elif self.PLAIN.match(text):
+                words = re.split(r"[{<`]", text, maxsplit=1)[0]
+                if len(words) < len(text):  # "Sure. {"steps": ...": the whole reply decides, as before
+                    if self.player is None:
+                        self.not_plain.add(key)
+                        self._forget(key)
+                    else:
+                        self.cut = True
+                    return
+            else:
                 return
-            if self.player is None:
-                self.owner = key
-                self.player = threading.Thread(target=self._play, daemon=True)
-                self.player.start()
-            words = json_string_so_far(text[m.end():])
+            self.owner = key
             new, self.used = words[self.used:], len(words)
             for sentence in self.chunker.feed(new):
                 self._queue(sentence)
@@ -2121,8 +2142,11 @@ class LiveSay:
     def release(self, key):
         """Try key failed: another may be used, if she hadn't started saying it."""
         with self.lock:
-            if self.owner == key and self.player is None:
-                self.owner = None
+            self._forget(key)
+
+    def _forget(self, key):
+        if self.owner == key and self.player is None:
+            self.owner, self.chunker, self.used = None, SentenceChunker(), 0
 
     @property
     def talking(self):
@@ -2130,8 +2154,17 @@ class LiveSay:
 
     def _queue(self, sentence):
         line = tidy(sentence)
-        if line:
-            self.lines.put((line, self.make(line)))
+        if not line or self.quiet:
+            return
+        if self.gate and (REPEAT_ASK.search(line) or NOT_FOR_ME.search(line)):
+            self.quiet = True
+            return
+        if self.player is None:  # from the first sentence: the mic pauses while she talks
+            self.player = threading.Thread(target=self._play, daemon=True)
+            self.player.start()
+            FOR_HER.set()
+            TURN_SPOKE.set()
+        self.lines.put((line, self.make(line)))
 
     def _play(self):
         rec = MIC[0]
@@ -2166,10 +2199,11 @@ class LiveSay:
     def finish(self):
         """Once the whole reply is in: the rest of it said, back when she's done. What she said, None if nothing."""
         with self.lock:
+            if self.owner is not None and not self.cut:
+                for sentence in self.chunker.flush():  # a short answer can be all tail: "Tokyo."
+                    self._queue(sentence)
             if self.player is None:
                 return None
-            for sentence in self.chunker.flush():
-                self._queue(sentence)
             self.lines.put(None)
         self.player.join()
         return self.said
@@ -2181,13 +2215,18 @@ class LiveSay:
 REASONING = "low"
 STREAM_SAY = True  # say plain answers as they're written, see LiveSay
 TURN_SPOKE = threading.Event()  # she's said something this turn, so no "One moment" (see fill_silence)
+# Clear only while words said without her name wait for the model's reply to show they were for her (LiveSay.MINE):
+# with Answer without her name on, 149 of 150 voice turns had no name, and none got a "One moment"
+FOR_HER = threading.Event()
+FOR_HER.set()
 FILLER_AFTER = 0.9  # seconds into thinking, about 1.2 s after you stopped: a natural "On it." rather than silence
 
 
 def fill_silence(words, notify):
     """A short "On it." or "Let me check." if she's still thinking FILLER_AFTER seconds in, from the cache so it
-    starts at once. Spoken fillers make a wait feel shorter where a beep doesn't (arXiv 2507.22352)."""
-    if TURN_SPOKE.wait(FILLER_AFTER):
+    starts at once. Spoken fillers make a wait feel shorter where a beep doesn't (arXiv 2507.22352). Without her
+    name, only once the model's reply shows it was for her (FOR_HER): never one over people talking in the room."""
+    if TURN_SPOKE.wait(FILLER_AFTER) or not FOR_HER.wait(60) or TURN_SPOKE.is_set():
         return
     TURN_SPOKE.set()
     say(say_line("filler_ask" if QUESTION.match(plain(words)) else "filler"), notify)
@@ -3086,19 +3125,23 @@ def think(text, gate, notify=None, sure=1.0):
     # "Google when is the next India match." is a question too, after the word Google, as _search reads it
     googled = re.fullmatch(r"(?:google|search(?: google)?(?: for| about)?|look up) (?P<q>.+?)(?: on google)?",
                            plain(text))
-    # a plain answer to a request with her name is said as it's written (LiveSay); without her name the whole plan
-    # decides first whether it was for her, and a task's claim is checked before she says it's done
-    stream = STREAM_SAY and not gate and not needs_task and origin() == "voice"
+    # a plain answer is said as it's written (LiveSay), without her name once the reply shows it's for her, and not
+    # while something plays that the mic hears, as let_go would keep quiet then. 0 of 113 turns were streamed when it
+    # took her name. A task's claim is checked before she says it's done
+    stream = STREAM_SAY and not needs_task and origin() == "voice" and \
+        (not gate or not media_playing() or (MIC[0] is not None and MIC[0].echo_cancelled))
     for round_ in range(ROUNDS + 1):
         t = time.time()
-        live = LiveSay(notify) if stream else None
+        live = LiveSay(notify, gate=gate) if stream else None
         try:
             raw, plan, usage, model = ask_plan(messages, again=not gate, live=live, **slow,
                                                deadline=(45 if round_ == 0 else 30) if pictures else
                                                DEADLINE if round_ == 0 else 14.0)
         finally:
             spoken_live = live.finish() if live is not None else None
-        if spoken_live is not None:
+        if spoken_live is not None and live.cut:  # plain words, then a plan: its own line is said after them
+            print(f"  (plain words, then a plan: {' '.join(spoken_live)[:80]!r} said first)")
+        elif spoken_live is not None:
             plan["said"], plan["voice_error"] = spoken_live, live.error
             TURN_SPOKE.set()
             if live.started:
@@ -5028,7 +5071,9 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         else:
             emit(notify, "Thinking", words or text)
             TURN_SPOKE.clear()
-            if not gate and STREAM_SAY and origin() == "voice":  # with her name it's for her: "One moment" if slow
+            if gate:
+                FOR_HER.clear()  # without her name, only once the model's reply shows it was for her (LiveSay)
+            if STREAM_SAY and origin() == "voice":  # "One moment" if slow
                 threading.Thread(target=fill_silence, args=(words or text, notify), daemon=True).start()
             try:  # without her name: with "Hey Jeff" in it, the model took you for Jeff
                 plan = think(words or text, gate, notify, sure)
@@ -5044,6 +5089,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
                     note = f"{settings.get('llm_model')}: {opencode.explain(str(exc))}. Pick another model in Settings"
             finally:
                 TURN_SPOKE.set()  # an answer's here, or she's given up: no filler now
+                FOR_HER.set()
             if plan is None:
                 print("  (not for me, staying quiet)")
                 emit(notify, "Ready", "That didn't sound like it was for me")

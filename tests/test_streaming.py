@@ -2,6 +2,8 @@
 second try only when the first hasn't started writing (ask_model), a "One moment" when she's slow (fill_silence),
 and the prompt kept small. No model, voice or network: fakes throughout."""
 import ast
+import contextlib
+import io
 import json
 import os
 import threading
@@ -71,8 +73,8 @@ class Live(unittest.TestCase):
 
     def test_anything_to_do_waits_for_the_whole_plan(self):
         for reply in ('{"steps": [{"do": "open", "app": "Notepad"}], "say": "Opening Notepad for you now. Done."}',
-                      '{"to": "you", "steps": [], "say": "Sure, here it is. And more."}',
-                      '{"say": "Said before the steps. Not this.", "steps": []}'):
+                      '{"say": "Said before the steps. Not this.", "steps": []}',
+                      'Sure. {"steps": [{"do": "open", "app": "Notepad"}], "say": "Opening Notepad for you now."}'):
             with self.subTest(reply=reply):
                 live = self.run_reply(reply)
                 self.assertIsNone(live.finish())
@@ -86,6 +88,132 @@ class Live(unittest.TestCase):
         self.assertTrue(live.claim(0))
         self.assertFalse(live.claim(1))
         self.assertEqual(live.finish(), ["The first answer to come in.", "Said in full."])
+
+    def test_plain_words_that_turn_into_a_plan_leave_the_answer_to_another_try(self):
+        live = siri.LiveSay(None, make=FakeLine)
+        self.run_reply('Sure. {"steps": [{"do": "open", "app": "Notepad"}], "say": "Opening it."}', key=0, live=live)
+        self.run_reply("Tokyo is the capital of Japan. It is also the biggest city there.", key=1, live=live)
+        self.assertEqual(live.finish(), ["Tokyo is the capital of Japan.", "It is also the biggest city there."])
+
+
+class Unnamed(unittest.TestCase):
+    """P1: with Answer without her name on, 149 of 150 voice turns had no name, and not one of 113 was said as it was
+    written or got a "One moment": think streamed only with her name, and only a reply that began {"steps": [],
+    "say": ", where Ling answered 18 of 89 questions in plain words. Never said over people talking in the room."""
+
+    def setUp(self):
+        FakeLine.said = []
+        for target, name, value in ((siri, "skills_block", lambda *a: ""), (siri, "memory_block", lambda: ""),
+                                    (siri, "context", lambda: ""), (siri, "soul", lambda: "You are Jev."),
+                                    (siri, "Line", FakeLine), (siri, "MIC", [None]), (siri, "STREAM_SAY", True),
+                                    (siri, "media_playing", lambda: False),
+                                    (siri.history, "recent", lambda *a, **k: [])):
+            p = mock.patch.object(target, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        siri.TURN_SPOKE.clear()
+        siri.FOR_HER.clear()
+        self.addCleanup(siri.FOR_HER.set)
+        self.addCleanup(siri.TURN_SPOKE.set)
+
+    def think(self, words, gate, reply):
+        """(the plan, sentences she'd begun saying as each piece of the reply came)."""
+        heard = []
+
+        def chat(key, messages, model=None, on_text=None, stop=None, **kw):
+            for so_far in stream_of(reply):
+                on_text(so_far)
+                time.sleep(0.01)
+                heard.append(len(FakeLine.said))
+            return reply, {}, model
+        with mock.patch.object(siri.opencode, "chat", chat), contextlib.redirect_stdout(io.StringIO()):
+            return siri.think(words, gate), heard
+
+    def test_an_answer_to_her_without_her_name_is_said_as_it_comes(self):
+        for gate, reply in (("cold", '{"to": "you", "steps": [], "say": "Tokyo is the capital of Japan. It is also '
+                                     'the biggest city there, with about fourteen million people."}'),
+                            (True, '{"steps": [], "say": "Tokyo is the capital of Japan. It is also the biggest city '
+                                   'there, with about fourteen million people."}')):
+            with self.subTest(gate=gate):
+                FakeLine.said = []
+                plan, heard = self.think("what's the capital of Japan", gate, reply)
+                self.assertGreater(heard[-5], 0)  # before the reply was all in
+                self.assertEqual(plan["said"], ["Tokyo is the capital of Japan.",
+                                                "It is also the biggest city there, with about fourteen million people."])
+                self.assertTrue(siri.FOR_HER.is_set())
+
+    def test_plain_words_are_said_as_they_come(self):
+        plan, heard = self.think("what's the capital of Japan", False,
+                                 "Tokyo is the capital of Japan. It is also the biggest city there, with about "
+                                 "fourteen million people.")
+        self.assertGreater(heard[-5], 0)
+        self.assertEqual(len(plan["said"]), 2)
+
+    def test_talk_to_others_and_what_she_would_let_go_are_never_said(self):
+        for gate, reply in (("cold", '{"to": "others"}'), (True, '{"ignore": true}'),
+                            ("cold", "Sorry, I didn't catch that. Could you say it again for me?"),
+                            ("cold", '{"to": "you", "steps": [], "say": "That sounded like it was meant for someone '
+                                     'else in the room. Carry on."}')):
+            with self.subTest(gate=gate, reply=reply):
+                self.think("why are you so late today", gate, reply)
+                self.assertEqual(FakeLine.said, [])
+                self.assertEqual(siri.FOR_HER.is_set(), reply.startswith('{"to": "you"'))  # else no "One moment"
+
+    def test_not_while_something_plays_that_the_mic_hears(self):
+        with mock.patch.object(siri, "media_playing", lambda: True):
+            plan, _ = self.think("what's the capital of Japan", "cold",
+                                 '{"to": "you", "steps": [], "say": "Tokyo is the capital of Japan. It is big."}')
+        self.assertEqual(FakeLine.said, [])
+        self.assertNotIn("said", plan)
+
+    def test_plain_words_then_a_plan_still_say_the_plans_line(self):
+        plan, _ = self.think("open notepad", False, 'Here is what I will do for you right now. {"steps": [], '
+                                                    '"say": "Notepad is open."}')
+        self.assertEqual(FakeLine.said, ["Here is what I will do for you right now."])
+        self.assertNotIn("said", plan)  # so run_plan says "Notepad is open." too
+        self.assertEqual(plan["say"], "Notepad is open.")
+
+    def test_one_moment_without_her_name_only_once_the_reply_shows_its_for_her(self):
+        said = []
+        with mock.patch.object(siri, "say", lambda line, notify: said.append(line)), \
+                mock.patch.object(siri, "FILLER_AFTER", 0.05):
+            for reply, after in (('{"to": "others"}', 0), ('{"to": "you", "steps": [{"do": "web"', 1)):
+                siri.TURN_SPOKE.clear()
+                siri.FOR_HER.clear()
+                said.clear()
+                filler = threading.Thread(target=siri.fill_silence, args=("what's the capital of Japan", None))
+                filler.start()
+                time.sleep(0.15)  # slow to answer, but it may be someone else's conversation
+                self.assertEqual(said, [])
+                siri.LiveSay(None, make=FakeLine, gate="cold").feed(0, reply)
+                time.sleep(0.05)
+                siri.TURN_SPOKE.set()  # the turn is over (handle)
+                siri.FOR_HER.set()
+                filler.join(1)
+                self.assertEqual(len(said), after)
+                self.assertTrue(all(line in siri.REPLIES["filler_ask"] for line in said))
+
+    def test_a_turn_without_her_name_gets_one_too(self):
+        said = []
+
+        def think(words, gate, notify=None, sure=1.0, reply='{"to": "you", "steps": [{"do": "web"'):
+            siri.LiveSay(None, make=FakeLine, gate=gate).feed(0, reply)  # her model, slow to look it up
+            time.sleep(0.2)
+            return siri.make_plan(say="Tokyo.") if "you" in reply else None
+        for gate, reply, after in (("cold", '{"to": "you", "steps": [{"do": "web"', 1), ("cold", '{"to": "others"}', 0),
+                                   (False, "", 1)):
+            with self.subTest(gate=gate, reply=reply), \
+                    mock.patch.object(siri, "think", lambda w, g, n=None, s=1.0: think(w, g, n, s, reply)), \
+                    mock.patch.object(siri, "say", lambda line, notify: said.append(line)), \
+                    mock.patch.object(siri, "FILLER_AFTER", 0.05), \
+                    mock.patch.object(siri, "run_plan", lambda plan, notify: ([], False, None, [])), \
+                    mock.patch.object(siri, "learn_later"), mock.patch.object(siri.history, "add"), \
+                    mock.patch.dict(siri.PENDING, {"plan": None, "until": 0.0}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                said.clear()
+                siri.handle("what's the capital of Japan", gate=gate)
+                time.sleep(0.05)
+                self.assertEqual(len(said), after)
 
 
 class Streamed(unittest.TestCase):
@@ -185,7 +313,8 @@ class Startup(unittest.TestCase):
     def test_her_compiled_code_is_kept_whatever_python_was_told(self):
         """Her modules' cached bytecode was found stale, as if she ran with PYTHONDONTWRITEBYTECODE or -B: each start
         compiled her 24k lines again. app.py turns writing it back on before it imports any of them."""
-        tree = ast.parse(open(os.path.join(ROOT, "app.py"), encoding="utf-8").read())
+        with open(os.path.join(ROOT, "app.py"), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
         before = []
         for node in tree.body:
             if isinstance(node, ast.ImportFrom) or (isinstance(node, ast.Import) and
