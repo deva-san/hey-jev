@@ -1,8 +1,10 @@
 """The decider (decider.py): its heads, its levels, its Jev-shaped answers, and in act_on only ever letting plain room
 talk go, and only when it's on. A fake encoder stands in for the model."""
 import os
+import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -66,6 +68,37 @@ class Heads(unittest.TestCase):
             again = decider.Decider()
         self.assertTrue(np.allclose(again.heads["for_me"]["w"], h["w"]))
         self.assertEqual(again.heads["for_me"]["lo"], 0.2)
+
+
+class Cost(unittest.TestCase):
+    def test_a_turns_words_go_through_the_encoder_once(self):
+        """Without her name a turn's words were worked out twice, about 15 ms each: is it for her (act_on), then
+        which skills fit it (skills_block)."""
+        seen = []
+
+        class Counting(FakeEncoder):
+            def __call__(self, text):
+                seen.append(text)
+                return super().__call__(text)
+        d = trained()
+        d.encoder = Counting()
+        skill = {"dir": "work-folder", "description": "Opens the work folder", "triggers": []}
+        with mock.patch.object(decider, "available", lambda: True), mock.patch.object(decider, "get", lambda: d):
+            d.for_me("open the work folder", "cold")
+            siri.relevant_skills("open the work folder", [skill])
+        self.assertEqual(seen.count("open the work folder"), 1)
+
+    def test_its_words_get_no_pool_of_threads(self):
+        """tokenizers started a thread for every CPU thread, 12 more idling in her process for one sentence at a
+        time."""
+        seen = []
+        tokenizers = SimpleNamespace(Tokenizer=SimpleNamespace(
+            from_file=lambda path: seen.append(os.environ.get("TOKENIZERS_PARALLELISM")) or mock.Mock()))
+        with mock.patch.dict(sys.modules, {"tokenizers": tokenizers}), mock.patch.dict(os.environ), \
+                mock.patch("onnxruntime.InferenceSession"):
+            os.environ.pop("TOKENIZERS_PARALLELISM", None)
+            decider.Encoder()
+        self.assertEqual(seen, ["false"])
 
 
 class InHerEars(unittest.TestCase):
