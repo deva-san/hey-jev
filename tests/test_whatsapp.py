@@ -478,6 +478,22 @@ class FindingThem(unittest.TestCase):
             self.assertFalse(self.siri.said_yes(words, plan), words)
 
 
+class LookingThemUp(unittest.TestCase):
+    def test_my_mum_is_looked_for_as_mum(self):
+        """"Message my mum on WhatsApp: running late": "my mum" typed into WhatsApp's search found nobody, and she
+        asked for the number, where "message mum" found Mum."""
+        m, searched = real_messaging(), []
+        with mock.patch.object(m, "bring_up", lambda app, link: 5), \
+                mock.patch.object(m, "_uia", lambda: SimpleNamespace(ElementFromHandle=lambda h: None)), \
+                mock.patch.object(m, "_search_box", lambda uia, root: "box"), \
+                mock.patch.object(m, "_look_for", lambda uia, root, hwnd, box, name, most, stop=None:
+                                  searched.append(name) or []), \
+                mock.patch.object(m, "_set_value", lambda box, text: None):
+            m.whatsapp_people("my mum")
+            m.whatsapp_people("Bunty Kumar")
+        self.assertEqual(searched, ["mum", "Bunty Kumar", "Bunty"])
+
+
 class ReadingThePanel(unittest.TestCase):
     """Review: the number is read only off the panel of the chat she clicked, and named as that panel names it."""
 

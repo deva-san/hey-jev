@@ -554,7 +554,8 @@ def whatsapp_people(name, most=LOOK_AT, stop=None):
     "number": "919573309199", "shown": "+91 95733 09199"}]. [] if it finds nobody. RuntimeError if WhatsApp can't
     be looked in. Not linked to the phone, it finds nobody: the message she then stages says why. stop: called
     before each chat is opened, True to open no more (you talked over her)."""
-    name = clean_search(name)
+    # the name as alias_key has it, in your own letters: "my mum" typed in found nobody, where "mum" finds Mum
+    name = clean_search(" ".join([w for w in str(name or "").split() if w.lower() not in ("my", "the")]) or name)
     hwnd = bring_up("whatsapp", "whatsapp:")
     uia = _uia()
     root = uia.ElementFromHandle(hwnd)
