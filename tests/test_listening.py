@@ -843,6 +843,92 @@ class DuringDictation(Case):
         self.assertEqual(told, [None, "Reminder: call Mum."])
 
 
+# --------------------------------------------------------------------------- B18/B21: replies, looked for and sent on
+class Replies(Case):
+    """Replies from the people she messaged for you: looked for every few seconds whatever she's in the middle of, and
+    sent to your phone with what they wrote."""
+
+    def setUp(self):
+        super().setUp()
+        self.sent, self.looks = [], 0
+        self.addCleanup(lambda: [w.update(contact="", app="", until=0.0) for w in siri.REPLYING.values()])
+        while not siri.ANNOUNCE.empty():
+            siri.ANNOUNCE.get()
+
+    def assistant(self, **kw):
+        a = super().assistant(**kw)  # it sets PHONE's send to its own bot's: your phone is faked after
+        for target, name, value in ((siri.telegram_bot, "owner", lambda: 7),
+                                    (siri, "PHONE", {**siri.PHONE, "send": lambda chat, line: self.sent.append(line)
+                                                     or True})):
+            p = mock.patch.object(target, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        return a
+
+    def watcher(self, replies):
+        def messages(front):
+            self.looks += 1
+            return ""
+        return types.SimpleNamespace(messages=messages, check=lambda *a: [],
+                                     take_replies=lambda: [replies.pop(0)] if replies else [])
+
+    def test_your_phone_gets_their_words_under_the_chats_own_name(self):
+        """Buntyyy's "ok see you at 5" reached the phone as "buntyyy replied on WhatsApp.": worded once, then worded
+        again from what that made, with their words and the chat's name gone."""
+        a = self.assistant()
+        a.put("watcher", self.watcher([{"app": "WhatsApp", "from": "Buntyyy \U0001f43c", "text": "ok see you at 5",
+                                        "when": time.time() - 10, "contact": "buntyyy"}]))
+        sleeps = [0]
+
+        def sleep(secs):
+            sleeps[0] += 1
+            if sleeps[0] > 1:
+                raise Stop
+        with mock.patch.object(siri, "time", types.SimpleNamespace(time=time.time, sleep=sleep)), \
+                contextlib.redirect_stdout(a.out):
+            try:
+                a.threads["look_around"]()
+            except Stop:
+                pass
+        self.assertEqual(self.sent, ["Buntyyy \U0001f43c replied on WhatsApp: “ok see you at 5”\n"
+                                     "What should I reply?"])
+
+    def test_the_looks_go_on_while_she_waits_to_tell_you_something(self):
+        """A task in an app held her turn for a minute or two while something waited to be told: the looks stopped
+        with it, and a reply whose notification WhatsApp took away in moments was never told or sent."""
+        import threading
+        a = self.assistant()
+        a.put("watcher", self.watcher([]))
+        free, done = threading.Event(), threading.Event()
+        a.put("tell", lambda line, said_for, kept=None: free.wait(10))  # the turn holds her until it's over
+        siri.ANNOUNCE.put("Your research on budget phones is done.")
+
+        def sleep(secs):
+            if done.is_set():
+                raise Stop
+            time.sleep(0.01)
+
+        def run(name):
+            try:
+                a.threads[name]()
+            except Stop:
+                pass
+        with mock.patch.object(siri, "time", types.SimpleNamespace(time=time.time, sleep=sleep)), \
+                mock.patch.object(siri.watch, "MESSAGE_LOOK", 0.05), contextlib.redirect_stdout(a.out):
+            threads = [threading.Thread(target=run, args=(name,), daemon=True) for name in ("heads_ups", "look_around")]
+            for t in threads:
+                t.start()
+            end = time.time() + 3
+            while self.looks < 3 and time.time() < end:
+                time.sleep(0.05)
+            looks = self.looks
+            done.set()
+            free.set()
+            for t in threads:
+                t.join(5)
+        self.assertGreaterEqual(looks, 3)
+
+
 # --------------------------------------------------------------------------- A3: dictation without her name
 class DictationStart(Case):
     def run_turn(self, text, words, gate, handled_as=False):

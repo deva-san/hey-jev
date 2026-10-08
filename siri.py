@@ -6168,43 +6168,55 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             except Exception as exc:
                 print(f"  keeping the models warm failed: {exc!r}")
 
-    def heads_ups():
+    noticed = queue.Queue()  # what look_around found to tell on the PC: (line, said for, kept, reply)
+
+    def look_around():
         """What she noticed (see watch.Watcher): messages every few seconds, since WhatsApp takes its notification
-        away again within moments, the rest every 20 seconds, and finished background work straight away."""
-        next_look, next_message = time.time() + 20, time.time() + watch.MESSAGE_LOOK
-        later = []  # what came up during a dictation, told once it stops: (line, said for, kept, reply)
+        away again within moments, replies to your phone straight away, and the rest every 20 seconds. On a thread
+        of its own, never waiting for her turn: in heads_ups the looks stopped while she waited to tell something,
+        and a turn of a minute or two (a task in an app) lost a reply that came in meanwhile."""
+        next_look = time.time() + 20
         night = []  # replies in the quiet hours that didn't reach your phone
         while True:
-            time.sleep(2)
-            lines = []
-            while not ANNOUNCE.empty():
-                lines.append(ANNOUNCE.get())
-            now = time.time()
-            replies = []
-            if now >= next_message:
-                next_message = now + watch.MESSAGE_LOOK
-                if settings.get("notifications"):  # replies are looked for with heads-ups off too, day and night
-                    try:
-                        line = watcher.messages(win.front_app_name)  # only asks which app is in front if needed
-                        if line and settings.get("heads_ups"):
-                            lines.append(line)
-                        replies = replied(watcher.take_replies())
-                    except Exception as exc:
-                        print(f"  message check failed: {exc!r}")
+            time.sleep(watch.MESSAGE_LOOK)
+            lines, replies = [], []
+            if settings.get("notifications"):  # replies are looked for with heads-ups off too, day and night
+                try:
+                    line = watcher.messages(win.front_app_name)  # only asks which app is in front if needed
+                    if line and settings.get("heads_ups"):
+                        lines.append(line)
+                    # as they came: deliver_replies words them. Worded here too, every reply reached you as
+                    # "buntyyy replied on WhatsApp", without what they wrote or the chat's own name
+                    replies = watcher.take_replies()
+                except Exception as exc:
+                    print(f"  message check failed: {exc!r}")
             for r in deliver_replies(replies):  # your phone, day or night: it keeps its own quiet hours
                 if settings.get("heads_ups") and not (watch.quiet() and r["sent"]):  # the PC keeps its quiet hours
-                    (night if watch.quiet() else later).append((r["say"], "reply", r["keep"], r))
+                    (night if watch.quiet() else lines).append((r["say"], "reply", r["keep"], r))
             if night and not watch.quiet():  # the night's replies your phone didn't get, at 7
-                later += night
+                lines += night
                 night.clear()
-            if now >= next_look:
-                next_look = now + 20
+            if time.time() >= next_look:
+                next_look = time.time() + 20
                 if settings.get("heads_ups"):
                     try:
                         lines += watcher.check(False, win.front_app_name())
                     except Exception as exc:
                         print(f"  heads-up check failed: {exc!r}")
-            later += [(line, "heads-up", None, None) for line in lines if line]
+            for line in lines:
+                if line:
+                    noticed.put(line if isinstance(line, tuple) else (line, "heads-up", None, None))
+
+    def heads_ups():
+        """What look_around noticed, and finished background work straight away, told once she's free."""
+        later = []  # what came up during a dictation, told once it stops: (line, said for, kept, reply)
+        while True:
+            time.sleep(2)
+            while not ANNOUNCE.empty():
+                later.append((ANNOUNCE.get(), "heads-up", None, None))
+            while not noticed.empty():
+                later.append(noticed.get())
+            later = [item for item in later if item[0]]
             # never over a dictation, but once it stops: a reminder or a finished task that came up during one was
             # taken off the queue and lost, the reminder already marked done
             while later and not rec.dictating and tell(*later[0][:3]):
@@ -6341,6 +6353,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     threading.Thread(target=task_worker, daemon=True).start()
     threading.Thread(target=warm_cache, daemon=True).start()
     threading.Thread(target=summarize_days, daemon=True).start()
+    threading.Thread(target=look_around, daemon=True).start()
     threading.Thread(target=heads_ups, daemon=True).start()
     threading.Thread(target=keep_warm, daemon=True).start()
     watch_return(lambda since: welcome(True, since))
