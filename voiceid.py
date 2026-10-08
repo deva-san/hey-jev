@@ -1,7 +1,7 @@
 """Only your voice: she answers you, not other people, the TV or a video.
 
 Each turn's speech becomes a voice print (speech.Speaker, 3D-Speaker's CAM++ through sherpa-onnx, on this PC), and
-it's compared with yours from 10 sentences you read once ("Hey Jev, learn my voice"). The prints and recordings stay
+it's compared with yours from 20 sentences you read once ("Hey Jev, learn my voice"). The prints and recordings stay
 in %LOCALAPPDATA%\\Hey Jev\\voice and never leave the PC.
 
 Settings "voice_id":
@@ -41,8 +41,13 @@ YOURS_PASS, OTHERS_PASS = 0.97, 0.05
 KEEP = 300  # of each, the latest: the levels follow how you sound now, and the log stays small
 ACTED = (True, "playing", "dictate")  # what a turn she acted on returns (siri.handle): yours, while learning
 GROW_ABOVE = 0.15  # a turn this far over the named level, with her name, adds to her picture of your voice
-MOST = 40  # prints kept: the 10 you read plus up to 30 from turns, the way "Hey Siri" fills in over time
-SENTENCES = (  # short enough for the popup, and mostly what you say to her anyway
+MOST = 40  # prints kept: the ones you read plus the rest from turns, the way "Hey Siri" fills in over time
+# A sentence whose print scores under this against the rest of what you read is left out, the least alike first, down
+# to ENROL_KEEP: on 8 Oct two scored 0.37 and 0.43 against the other eight and were kept. Your clips were 0.64 up
+ENROL_AGREE, ENROL_KEEP = 0.55, 12
+# Short enough for the popup, and mostly what you say to her anyway: commands, questions, a yes, and more without her
+# name than with it, since that's how you talk to her
+SENTENCES = (
     "Hey Jev, open Chrome and play some music.",
     "Hey Jev, what's the weather like today?",
     "Hey Jev, set a timer for five minutes.",
@@ -53,6 +58,16 @@ SENTENCES = (  # short enough for the popup, and mostly what you say to her anyw
     "What's on my screen right now?",
     "Hey Jev, pause the video, please.",
     "Scroll down and read the next part to me.",
+    "Open YouTube and play the next video.",
+    "Turn on the night light, please.",
+    "Yes, okay, go ahead and send it.",
+    "What time is the match on tonight?",
+    "Open Chrome and search for cricket scores.",
+    "Can you lock the computer for me?",
+    "How much battery is left on this laptop?",
+    "No, not that one, the one below it.",
+    "Read me today's news headlines.",
+    "Okay, that's enough for now, thank you.",
 )
 _lock = threading.Lock()
 
@@ -179,6 +194,25 @@ class Profile:
                 self.save()
         apart = (mine >= strict).mean() >= YOURS_PASS and (room >= strict).mean() <= OTHERS_PASS
         return "on" if apart else "unsure"
+
+
+def alike(prints):
+    """How like the rest each print is: its score against the middle of the others."""
+    v = np.asarray(prints, np.float32)
+    rest = v.sum(axis=0) - v
+    return (v * rest).sum(axis=1) / np.maximum(np.linalg.norm(rest, axis=1), 1e-9)
+
+
+def keep_alike(prints):
+    """Which of the sentences you read make her picture of your voice: the one least like the rest is left out while
+    it's under ENROL_AGREE, then the next, keeping ENROL_KEEP at least."""
+    keep = list(range(len(prints)))
+    while len(keep) > ENROL_KEEP:
+        scores = alike([prints[i] for i in keep])
+        if scores.min() >= ENROL_AGREE:
+            break
+        del keep[int(np.argmin(scores))]
+    return keep
 
 
 def level(named, kind):

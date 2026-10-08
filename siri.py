@@ -5504,11 +5504,19 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         if e["i"] < len(voiceid.SENTENCES):
             show_sentence()
             return
-        profile.enrol(e["prints"])
+        keep = voiceid.keep_alike(e["prints"])
+        for i in sorted(set(range(len(e["prints"]))) - set(keep)):  # read in another voice, or over a noise
+            print(f"  (sentence {i + 1} didn't sound like the others: left out)")
+            try:
+                os.remove(os.path.join(voiceid.folder(), "clips", f"sentence-{i + 1}.wav"))
+            except OSError:
+                pass
+        profile.enrol([e["prints"][i] for i in keep])
         enrolling[0] = None
         settings.put("voice_id", "learning")
-        threading.Thread(target=tell, args=("Thanks, I've got your voice. For the next few days I'll just learn it, "
-                                            "then I'll only answer you.", "voice learned"), daemon=True).start()
+        threading.Thread(target=tell, args=("Thanks, I've got your voice. For the next few days I'll just learn it "
+                                            "from what you ask me, then I'll only answer you.", "voice learned"),
+                         daemon=True).start()
 
     def voice_setup(which):
         """"Learn my voice", "only answer me", "answer everyone", inside a turn."""

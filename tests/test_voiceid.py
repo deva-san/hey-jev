@@ -184,6 +184,16 @@ class Learning(unittest.TestCase):
             voiceid.after_turn(p, SOMEONE, 0.95, 2.0, False, "other", True)  # without her name: never
         self.assertEqual(len(p.read) + len(p.grown), voiceid.MOST)
 
+    def test_the_least_alike_go_first_and_enough_are_always_kept(self):
+        rng = np.random.default_rng(1)
+        near = [unit(1, *rng.normal(0, 0.15, 3)) for _ in range(18)]
+        kept = voiceid.keep_alike(near[:5] + [SOMEONE] + near[5:12] + [unit(0.5, 0, 0, 1)] + near[12:])
+        self.assertEqual(len(kept), 18)
+        self.assertNotIn(5, kept)
+        self.assertNotIn(13, kept)
+        noisy = [unit(*rng.normal(0, 1, 8)) for _ in range(20)]  # nothing alike: the most alike are kept, never none
+        self.assertEqual(len(voiceid.keep_alike(noisy)), voiceid.ENROL_KEEP)
+
     def test_learning_your_voice_again_starts_the_levels_over(self):
         p = profile(named=0.5, strict=0.6, calibrated=True)
         p.log({"score": 0.9, "level": "named", "checked": True})
@@ -207,8 +217,13 @@ class Words(unittest.TestCase):
         self.assertFalse(siri.voice_like("pass me the water", want))
 
     def test_the_sentences_fit_the_popup(self):
-        self.assertEqual(len(voiceid.SENTENCES), 10)
         self.assertTrue(all(len(s) <= 50 for s in voiceid.SENTENCES))
+
+    def test_there_are_enough_sentences_and_most_without_her_name_the_way_you_talk_to_her(self):
+        """10 sentences, 7 starting with "Hey Jev": two unlike the rest left 8, and with "Answer without her name" on
+        you hardly say it."""
+        self.assertGreaterEqual(len(voiceid.SENTENCES), 20)
+        self.assertGreaterEqual(sum(not s.startswith("Hey Jev") for s in voiceid.SENTENCES), len(voiceid.SENTENCES) / 2)
 
 
 class InHerEars(unittest.TestCase):
@@ -261,7 +276,27 @@ class InHerEars(unittest.TestCase):
             self.assertIsNone(a.var("enrolling")[0])
             self.assertEqual(siri.settings.get("voice_id"), "learning")
             self.assertEqual(told, ["voice learned"])
-        self.assertEqual(len(a.var("profile").read), 10)
+        self.assertEqual(len(a.var("profile").read), len(voiceid.SENTENCES))
+
+    def test_a_sentence_unlike_the_rest_is_left_out_of_your_voice(self):
+        """On 8 Oct two of the ten sentences scored 0.37 and 0.43 against the other eight (the rest 0.54 to 0.80) and
+        were kept, and against that picture of your voice your own commands scored 0.33 to 0.54."""
+        a = self.assistant()
+        a.put("profile", voiceid.Profile(tempfile.mkdtemp(prefix="heyjev-voice-")))
+        a.var("enrolling")[0] = {"i": 0, "prints": [], "until": 1e12}
+        a.put("tell", lambda line, said_for: None)
+        where, audio = tempfile.mkdtemp(), np.zeros(16000, np.float32)
+        odd = (1, 7)
+        with mock.patch.dict(siri.settings._load(), {"voice_id": "off"}), \
+                mock.patch.object(voiceid, "folder", lambda: where):
+            for i, sentence in enumerate(voiceid.SENTENCES):
+                a.listener.on_phrase(audio, "other", turn(sentence, SOMEONE if i in odd else YOU), 100)
+        read = a.var("profile").read
+        self.assertEqual(len(read), len(voiceid.SENTENCES) - len(odd))
+        self.assertTrue(all(float(p @ YOU) > 0.99 for p in read))
+        clips = sorted(os.listdir(os.path.join(where, "clips")))  # what's kept is what her picture is made of
+        self.assertEqual(len(clips), len(read))
+        self.assertNotIn("sentence-2.wav", clips)
 
     def learning(self, a, voices):
         """act_on for each (words, voice), with voice ID learning and "Answer without her name" on: "open notepad
