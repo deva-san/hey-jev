@@ -4691,11 +4691,46 @@ def words_of(t):
     return " ".join(re.findall(r"[a-z0-9']+", str(t).lower().replace("\u2019", "'")))
 
 
+_echo_last = [None]  # ((words, her lines), the answer) last worked out: act_on asks twice in a row, barge often
+
+
 def echo_of(t, within=90.0):
     """True if t is her own voice heard back: long, and nearly word for word what she said in the last minute or so."""
     t = words_of(t)
-    hers = " ".join(line for when, line in list(HER_SAID) if time.time() - when < within)
-    return len(t.split()) >= ECHO_WORDS and voice_bits.is_tts_echo(t, words_of(hers), threshold=ECHO_SURE)
+    if len(t.split()) < ECHO_WORDS:
+        return False
+    hers = words_of(" ".join(line for when, line in list(HER_SAID) if time.time() - when < within))
+    last = _echo_last[0]
+    if last is None or last[0] != (t, hers):
+        last = _echo_last[0] = ((t, hers), tts_echo(t, hers))
+    return last[1]
+
+
+def tts_echo(a, b, sure=ECHO_SURE):
+    """voice_bits.is_tts_echo(a, b), the same answer, without a difflib match for every window that can't be one. It
+    slid a SequenceMatcher across her lines a letter at a time: 90-120 ms for a few words heard after a long answer,
+    on every word update while she talked (barge) and twice before such a turn (act_on). A window's letters in common
+    with a, counted as it slides, bound its ratio from above (difflib's quick_ratio), so only the few that could
+    reach sure are compared. a and b as words_of writes them, which is how is_tts_echo evens them out."""
+    if not a or not b:
+        return False
+    if 2.0 * min(len(a), len(b)) / (len(a) + len(b)) >= sure and difflib.SequenceMatcher(None, a, b).ratio() >= sure:
+        return True  # the whole of it, as is_tts_echo checks first (real_quick_ratio bounds it)
+    n = len(a)
+    if n < voice_bits.MIN_FRAGMENT_LENGTH_FOR_ECHO or n >= len(b):
+        return False
+    need, have = collections.Counter(a), collections.Counter(b[:n])
+    common = sum(min(k, have[c]) for c, k in need.items())
+    for start in range(len(b) - n + 1):
+        if start:
+            out, new = b[start - 1], b[start + n - 1]
+            have[out] -= 1
+            common -= have[out] < need[out]
+            common += have[new] < need[new]
+            have[new] += 1
+        if 2.0 * common / (2 * n) >= sure and difflib.SequenceMatcher(None, a, b[start:start + n]).ratio() >= sure:
+            return True
+    return False
 
 
 def stop_said(t):
