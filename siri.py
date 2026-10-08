@@ -1256,6 +1256,11 @@ def replied(replies):
         shown = " ".join(str(rs[-1].get("from") or contact).split())
         name = watch.spoken_sender(re.sub(r"[^\w\s'.+-]", "", shown).strip() or contact)
         said = f": \u201c{words}\u201d" if words else "."
+        if any(r.get("by_alias") for r in rs):  # a display name anyone can give themselves: never said to be them
+            who, ask = f"Someone called {name} wrote", "If that's who you messaged, what should I reply?"
+            out.append({"say": f"{who} on {app}{said} {ask}", "keep": f"{who} on {app}. {ask}",
+                        "phone": f"Someone called {shown} wrote on {app}{said}\n{ask}", "contact": contact, "app": app})
+            continue
         out.append({"say": f"{name} replied on {app}{said} What should I reply?",
                     "keep": f"{name} replied on {app}. What should I reply?",
                     "phone": f"{shown} replied on {app}{said}\nWhat should I reply?", "contact": contact, "app": app})

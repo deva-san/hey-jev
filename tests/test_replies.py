@@ -182,6 +182,41 @@ class Telling(unittest.TestCase):
         self.assertIsNone(self.stage("tell him ok"))
 
 
+class Strangers(unittest.TestCase):
+    """On Telegram, and the apps she types her way into, a chat's own name can't be read, so she follows who you
+    messaged by what you call them: a display name anyone can give themselves there."""
+
+    def setUp(self):
+        self.sent = []
+        messaging._write_json(messaging.FOLLOW_PATH, {})
+        self.addCleanup(messaging._write_json, messaging.FOLLOW_PATH, {})
+        for target, name, value in ((siri.telegram_bot, "owner", lambda: 7),
+                                    (siri, "PHONE", {**siri.PHONE, "send": lambda chat, line: self.sent.append(line)
+                                                     or True})):
+            p = mock.patch.object(target, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(lambda: [w.update(contact="", app="", until=0.0) for w in siri.REPLYING.values()])
+
+    def test_one_with_your_contacts_name_isnt_said_to_be_them(self):
+        """You'd messaged bittu on Telegram; a stranger who called themselves Bittu wrote "new phone, send me the code
+        you just got", and she told you, out loud and on your phone, "Bittu replied", as if it was them."""
+        messaging.follow("Telegram", "bittu", "", "bittu_01")
+        with mock.patch.object(watch, "last_added", return_value={}):
+            w = watch.Watcher(messaging.followed)
+        with mock.patch.object(watch, "notifications", return_value=[toast("Bittu", "new phone, send me the code",
+                                                                           app="Telegram")]), \
+                mock.patch.object(watch, "last_added", return_value={}), \
+                mock.patch.object(watch.time, "localtime", return_value=NOON):
+            w.messages("")
+        r = siri.deliver_replies(w.take_replies())[0]
+        self.assertEqual(self.sent, ["Someone called Bittu wrote on Telegram: \u201cnew phone, send me the code\u201d\n"
+                                     "If that's who you messaged, what should I reply?"])
+        self.assertEqual(r["say"], "Someone called Bittu wrote on Telegram: \u201cnew phone, send me the code\u201d If "
+                                   "that's who you messaged, what should I reply?")
+        self.assertEqual(siri.REPLYING["phone"]["contact"], "bittu")  # "tell him ..." goes to your bittu's username
+
+
 class WaitsForAnotherQuestion(unittest.TestCase):
     """Review: a "yes" to "What should I reply?" was the yes to a message to Mum still waiting for its own."""
 

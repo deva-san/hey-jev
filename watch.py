@@ -231,7 +231,7 @@ class Watcher:
 
     def take_replies(self):
         """The replies from people who've sent nothing more for REPLY_SETTLE seconds: [{"app", "from", "text", "when",
-        "contact"}], oldest first. Someone still sending waits, so a burst is told once."""
+        "contact", "by_alias"}], oldest first. Someone still sending waits, so a burst is told once."""
         now = time.time()
         typing = {r["contact"] for r in self.replies if now - r["when"] < REPLY_SETTLE}
         out = [r for r in self.replies if r["contact"] not in typing]
@@ -256,7 +256,8 @@ class Watcher:
             if abs(self.recent_replies.get(mark, float("-inf")) - n["when"]) < SAME_MESSAGE:
                 continue
             self.recent_replies[mark] = n["when"]
-            self.replies.append({**n, "contact": who["contact"]})
+            # by_alias: matched by a name anyone can give themselves there (Telegram), so it's never vouched for
+            self.replies.append({**n, "contact": who["contact"], "by_alias": bool(who.get("by_alias"))})
         self.answered = {k: t for k, t in self.answered.items() if now - t < 24 * 3600}
         self.recent_replies = {k: t for k, t in self.recent_replies.items() if now - t < 2 * SAME_MESSAGE}
 
