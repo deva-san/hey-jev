@@ -41,8 +41,9 @@ APPS = {
         "classes": ("WinUIDesktopWin32WindowClass",),
         "link": "whatsapp://send?phone={id}&text={text}",
         "needs": "number",
-        # its search box is a real element, and a Reconnect button means the desktop app has no link to the phone
-        "search_box": "Search or start a new chat",
+        # its message box is a real element, named "Type a message to Amma" in the 2025 app ("Type a message"
+        # before), and a Reconnect button means the desktop app has no link to the phone
+        "compose": "Type a message",
         "offline_button": "Reconnect",
     },
     "telegram": {
@@ -51,7 +52,7 @@ APPS = {
         "classes": ("Qt51519QWindowIcon", "Qt5QWindowIcon", "Qt6QWindowIcon"),
         "link": "tg://resolve?domain={id}&text={text}",
         "needs": "username",
-        "search_box": None,  # Telegram draws its own interface, so Windows exposes nothing inside it
+        "compose": None,  # Telegram draws its own interface, so Windows exposes nothing inside it
         "offline_button": None,
     },
 }
@@ -324,23 +325,68 @@ def offline_reason(app, hwnd):
     return None
 
 
+def compose_box(app, hwnd):
+    """The app's message box, and who the app says it's to: WhatsApp's 2025 app names it "Type a message to Amma",
+    the one before "Type a message". (None, "") where Windows can't see it (Telegram draws its own)."""
+    prefix = APPS[app]["compose"]
+    if not prefix or hwnd is None:
+        return None, ""
+    uia = _uia()
+    root = uia.ElementFromHandle(hwnd)
+    # one lookup for an Edit whose name starts so (MatchSubstring | IgnoreCase), not a walk of the whole tree
+    box = root.FindFirst(4, uia.CreateAndCondition(uia.CreatePropertyCondition(30003, 50004),
+                                                    uia.CreatePropertyConditionEx(30005, prefix, 3)))
+    if not box:  # a NULL element, not None: reading it was "NULL COM pointer access", every time
+        return None, ""
+    name = str(box.CurrentName or "")
+    to = name[len(prefix):].strip() if name.lower().startswith(prefix.lower()) else ""
+    return box, re.sub(r"^to\s+", "", to, flags=re.I).strip()
+
+
+def box_value(box):
+    """What a message box holds: "" when it's empty (WhatsApp's holds a line break then)."""
+    from comtypes.gen.UIAutomationClient import IUIAutomationValuePattern
+    value = box.GetCurrentPattern(10002)  # UIA_ValuePatternId
+    return " ".join(str(value.QueryInterface(IUIAutomationValuePattern).CurrentValue or "").split()) if value else ""
+
+
 def typed_text(app, hwnd):
-    """What the app's compose box holds, where Windows exposes it, else None (Telegram draws its own)."""
-    if not APPS[app]["search_box"] or hwnd is None:
-        return None
+    """What the app's message box holds, where Windows exposes it, else None (Telegram draws its own)."""
     try:
-        uia = _uia()
-        root = uia.ElementFromHandle(hwnd)
-        box = _find(uia, root, 50004, "Type a message")  # 50004 = Edit
-        if box is None:
-            return None
-        value = box.GetCurrentPattern(10002)  # UIA_ValuePatternId
-        import comtypes
-        from comtypes.gen.UIAutomationClient import IUIAutomationValuePattern
-        return value and value.QueryInterface(IUIAutomationValuePattern).CurrentValue
+        box, _ = compose_box(app, hwnd)
+        return box_value(box) if box else None
     except Exception as exc:
         print(f"  couldn't read the message box: {exc!r}")
         return None
+
+
+def type_into(app, hwnd, text):
+    """Type text into the chat's message box, as WhatsApp's 2025 app leaves its link's text out: the box is put in
+    focus first, with the app in front, and whatever was in it cleared. Then read back. Raises if it isn't there, so
+    nothing half typed is ever asked about."""
+    end = time.time() + 3.0  # the chat the link opened may still be drawing its box: a moment, then again
+    while True:
+        box, _ = compose_box(app, hwnd)
+        if box and in_front(app, hwnd):
+            if not box.CurrentHasKeyboardFocus:  # the link usually leaves it there already
+                box.SetFocus()
+                time.sleep(0.2)
+            if box.CurrentHasKeyboardFocus and in_front(app, hwnd):
+                break
+        if time.time() > end:
+            raise RuntimeError(f"I couldn't get to the message box in {APPS[app]['say']}, so I've not typed "
+                               f"anything" if box else f"{APPS[app]['say']} didn't come to the front, so I've not "
+                               f"typed anything")
+        time.sleep(0.3)
+    if box_value(box):  # a draft from before: it would be sent along with this
+        win.press("ctrl", "a")
+        win.press("backspace")
+    win.type_text(text)
+    time.sleep(0.4)
+    if box_value(box) != text:
+        win.press("ctrl", "a")
+        win.press("backspace")
+        raise RuntimeError(f"{APPS[app]['say']} didn't take the message, so I've not sent anything")
 
 
 def open_chat(app, handle, text):
@@ -368,10 +414,33 @@ def open_chat(app, handle, text):
 
 
 def in_front(app, hwnd):
-    """True if that app's window is the one in front, so Enter goes to the chat and nowhere else."""
+    """True if that app's window is the one in front, so Enter goes to the chat and nowhere else: its own window, or
+    the web view inside it, which WhatsApp's 2025 app puts in front once its message box has the keyboard."""
     front = user32.GetForegroundWindow()
-    return bool(front) and front == hwnd and os.path.basename(win.foreground_exe()).lower() in \
-        {e.lower() for e in APPS[app]["exes"]}
+    if not front or not hwnd:
+        return False
+    if front == hwnd:
+        return os.path.basename(win.foreground_exe()).lower() in {e.lower() for e in APPS[app]["exes"]}
+    return _hosted_by(front, hwnd)
+
+
+def _hosted_by(front, hwnd):
+    """True if window front is a web view (msedgewebview2.exe) that the program of window hwnd started: inside that
+    app, not another one that happens to use a web view too."""
+    if os.path.basename(win.window_exe(front)).lower() != "msedgewebview2.exe":
+        return False
+    import psutil
+    try:
+        owner, proc = win._pid(hwnd), psutil.Process(win._pid(front))
+        for _ in range(4):  # the view's own process, the web view's main one, then the app
+            proc = proc.parent()
+            if proc is None:
+                return False
+            if proc.pid == owner:
+                return True
+    except (psutil.Error, OSError):
+        return False
+    return False
 
 
 def prepare(app, contact, text):
@@ -381,19 +450,19 @@ def prepare(app, contact, text):
         raise RuntimeError("I can only message on WhatsApp or Telegram so far")
     text = clean_text(text)
     name, handle = find_contact(contact, app)
-    hwnd = window_of(app)
-    why = offline_reason(app, hwnd)
-    if why:
-        raise RuntimeError(why)
     hwnd = open_chat(app, handle, text)
-    why = offline_reason(app, hwnd)
-    if why:
-        raise RuntimeError(why)
+    if APPS[app]["compose"] and typed_text(app, hwnd) is None:
+        # no message box: not linked to the phone (the Reconnect button: a 7 s look on the 2025 app's big page, so
+        # only now), or the chat didn't open, as for a number not on WhatsApp. Never Enter into whatever that is
+        why = offline_reason(app, hwnd)
+        raise RuntimeError(why or f"{APPS[app]['say']} didn't open the chat with {name}, so I've not typed anything")
     shown = typed_text(app, hwnd)
-    if shown is not None and clean_text(shown or "x") != text:
-        raise RuntimeError(f"{APPS[app]['say']} didn't take the message, so I've not sent anything")
+    if shown is not None and shown != text:  # the link left the text out (WhatsApp's 2025 app): she types it
+        type_into(app, hwnd, text)
+        shown = text
+    _, to = compose_box(app, hwnd) if shown is not None else (None, "")
     return {"app": app, "say": APPS[app]["say"], "contact": name, "handle": handle, "text": text, "hwnd": hwnd,
-            "checked": shown is not None, "other": False}
+            "checked": shown is not None, "other": False, "to": to}
 
 
 def send(ready):
@@ -410,14 +479,24 @@ def send(ready):
     time.sleep(0.5)
     if not in_front(app, hwnd):
         raise RuntimeError(f"{APPS[app]['say']} isn't in front, so I've not sent it")
-    shown = typed_text(app, hwnd)
-    if shown is not None and clean_text(shown or "x") != text:
-        raise RuntimeError("the message in the box changed, so I've not sent it")
+    box, to = compose_box(app, hwnd) if APPS[app]["compose"] else (None, "")
+    if box:
+        if ready.get("to") and to != ready["to"]:
+            raise RuntimeError("another chat is open now, so I've not sent it")
+        if box_value(box) != text:
+            raise RuntimeError("the message in the box changed, so I've not sent it")
+        if not box.CurrentHasKeyboardFocus:  # Enter in the box, where it sends
+            box.SetFocus()
+            time.sleep(0.15)
+        if not box.CurrentHasKeyboardFocus or not in_front(app, hwnd):
+            raise RuntimeError(f"I couldn't get to the message box in {APPS[app]['say']}, so I've not sent it")
+    elif ready.get("checked"):
+        raise RuntimeError(f"I can't see the message box in {APPS[app]['say']} now, so I've not sent it")
     win.press("enter")
     time.sleep(1.0)
     left = typed_text(app, hwnd)
     if left is not None:  # the box empties when WhatsApp takes the message
-        if clean_text(left or "x") == text:
+        if left == text:
             raise RuntimeError("it's still sitting in the message box, so it may not have sent")
         return True, f"Sent to {ready['contact']}."
     return True, f"Sent to {ready['contact']}, as far as I can tell. {APPS[app]['say']} doesn't let me read it back."

@@ -887,7 +887,10 @@ def stage_message(app, contact, text):
         return make_plan(say=f"I've not sent anything: {exc}.")
     STAGED.update(ready=ready, until=time.time() + MESSAGE_WAIT)
     where = ready.get("say") or messaging.say_of(ready["app"])
-    if ready["checked"]:
+    to = re.sub(r"[^\w\s'.-]", "", str(ready.get("to") or "")).strip()  # the chat's name in the app, emoji off
+    if ready["checked"] and to and messaging.alias_key(to) != messaging.alias_key(ready["contact"]):
+        unseen = f" The chat open is {to}."  # the yes is to that chat: say it if it isn't the name you used
+    elif ready["checked"]:
         unseen = ""
     elif ready.get("other"):  # she found that chat by typing a name, so the yes confirms the person too
         unseen = f" I can't read {where}, so check that's the right chat before I do."
