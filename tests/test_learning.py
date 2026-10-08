@@ -116,6 +116,25 @@ class Skills(Home):
             self.assertEqual(siri.relevant_skills("set the tea timer for green tea", skills.list_skills()),
                              ["tea-timer"])
 
+    def test_with_many_skills_the_best_fits_are_described_and_the_rest_named(self):
+        """40 skills listed with what they do and their words took about 600 tokens of every request (B35, P3). The
+        ones that fit best are described, the rest named, none left out: Hermes found a skill missing from the list
+        isn't found again."""
+        for i in range(12):
+            skills.create_skill(f"chore-{i:02}", skills.build_content(f"chore-{i:02}", f"Does chore {i} their way",
+                                                                      "Step one.", [f"chore {i}"]))
+        skills.create_skill("tea-timer", skills.build_content("tea-timer", "Timer for green tea", "Steep it 3 min.",
+                                                              ["tea time"]))
+        siri._skill_cache[0] = 0.0
+        with mock.patch.object(siri.decider, "available", lambda: False):
+            block = siri.skills_block("set the tea timer for green tea")
+        self.assertIn("    - tea-timer: Timer for green tea (the user says: tea time)", block)
+        self.assertIn("### tea-timer\n", block)
+        self.assertEqual(block.count("(the user says: chore"), skills.MOST_DESCRIBED - 1)
+        named = block.split("    - also: ")[1].split("\n")[0].split(", ")
+        self.assertEqual(len(named), 13 - skills.MOST_DESCRIBED)
+        self.assertTrue(all(f"chore-{i:02}" in block for i in range(12)))
+
 
 class Curator(Home):
     def test_a_skill_she_wrote_and_never_used_is_archived_one_you_taught_her_is_not(self):
@@ -217,7 +236,10 @@ class Corrections(unittest.TestCase):
 
 
 class PromptSize(Home):
-    def test_with_full_memory_and_40_skills_her_prompt_stays_near_4000_tokens(self):
+    def test_with_full_memory_and_40_skills_her_prompt_stays_within_its_budget(self):
+        """PLAN's budget: 3,000 tokens or less for the fixed part, 4,000 in total with full memory, and a test fails if
+        it grows. With full memory and 40 skills it measured 5,059 tokens against a test that let it reach 6,000 (B35).
+        A request for a command or a schedule, which has those steps written out, stays within it too."""
         store = hermes_memory.MemoryStore()
         for i in range(60):
             hermes_memory.memory_tool(store, "add", "user", f"Fact number {i} about them, a few words long here.")
@@ -225,13 +247,18 @@ class PromptSize(Home):
         for i in range(40):
             skills.create_skill(f"skill-{i}", skills.build_content(f"skill-{i}", f"Does task number {i} their way",
                                                                     "Step one. Step two. " * 30, [f"do {i}"]))
-        with mock.patch.object(siri, "MEMORY", store):
-            entries = skills.list_skills()
-            system = siri.DEFAULT_SOUL + "\n\n" + siri.PROMPT + "\n\n" + \
-                skills.system_prompt_block(entries, ["skill-1", "skill-2"]) + siri.memory_block()
-        tokens = (len(system) + 700) / 4  # + the PC's context, about 4 characters a token
-        print(f"\n  prompt with full memory and 40 skills: {len(system) + 700} chars, about {tokens:.0f} tokens")
-        self.assertLess(tokens, 6000)  # today's measure; the step list is the part to trim next (see PLAN.md)
+        with mock.patch.object(siri, "MEMORY", store), mock.patch.object(siri.decider, "available", lambda: False):
+            known = siri.skills_block("do task number 1 their way")
+            memory = siri.memory_block()
+        self.assertIn("### skill-", known)  # the one that fits, written out
+        fixed = len(siri.DEFAULT_SOUL + "\n\n" + siri.PROMPT) + 700  # + the PC's context, about 630 characters
+        total = fixed + len("\n\n" + known) + len(memory)
+        tasks = total + len(siri.TASK_STEPS) - len(siri.TASK_STUB)
+        print(f"\n  prompt with full memory and 40 skills, about 4 characters a token: fixed {fixed / 4:.0f}, "
+              f"total {total / 4:.0f}, for a command or schedule {tasks / 4:.0f} tokens")
+        self.assertLessEqual(fixed / 4, 3000)
+        self.assertLessEqual(total / 4, 4000)
+        self.assertLessEqual(tasks / 4, 4000)
 
 
 if __name__ == "__main__":

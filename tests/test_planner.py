@@ -107,6 +107,34 @@ class CommandRetry(Turn):
         self.assertEqual(plan["steps"][0]["do"], "schedule")
 
 
+class TaskSteps(Turn):
+    """P3: the steps for commands, schedules and coding jobs were a thousand characters of every request's prompt,
+    which few ask for. They're written out for words that may ask for one, or a follow-up to one; the rest get a line
+    naming them."""
+
+    def system(self, words, recent=()):
+        with patch.object(siri.history, "recent", lambda *a, **k: list(recent)):
+            self.think(words, False, '{"steps": [], "say": "Okay."}')
+        return self.model.calls[0][0][0]["content"]
+
+    def test_written_out_only_for_words_that_may_ask_for_one(self):
+        for words in ("run the tests in hey-jev", "every Monday at 9 check my C drive", "git status in hey-jev",
+                      "remind me at 6 to call Mum", "add a dark mode toggle to my project", "cancel task 3",
+                      "schedule a disk check for tomorrow"):
+            with self.subTest(words=words):
+                self.assertIn(siri.TASK_STEPS, self.system(words))
+        for words in ("open notepad", "what's the capital of Japan", "play some lofi music"):
+            with self.subTest(words=words):
+                system = self.system(words)
+                self.assertIn(siri.TASK_STUB, system)
+                self.assertNotIn('"kind":"reminder"', system)
+
+    def test_and_for_a_follow_up_to_one(self):
+        recent = [(0, "remind me every day at 9 to take my medicine",
+                   '{"steps": [{"do": "schedule", "when": "", "repeat": "daily at 9 AM"}], "say": ""}')]
+        self.assertIn(siri.TASK_STEPS, self.system("make it 10 instead", recent))
+
+
 class GoogleQuestion(Turn):
     """A22: "Google when is ..." is a question, with or without a question mark."""
 

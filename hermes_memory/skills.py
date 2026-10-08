@@ -275,6 +275,7 @@ def build_content(name: str, description: str, notes: str = "", triggers=(), ste
 
 DETAIL_CHARS = 900  # the most of one skill's notes written out in her prompt
 MOST_PROCEDURES = 15  # Hey Jev: procedures listed, the ones used last first; the rest she does from scratch again
+MOST_DESCRIBED = 6  # Hey Jev: skills listed with what they do, the request's best fits; the rest by name only
 
 
 def _procedure(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -293,18 +294,25 @@ def _last_used(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                   or (usage.get(e["dir"]) or {}).get("created_at") or "", reverse=True)
 
 
-def system_prompt_block(entries: Optional[List[Dict[str, Any]]] = None, detail=()) -> str:
-    """The skills index for her prompt. Hey Jev: Hermes' wording and its 60-letter descriptions; the skills in detail
-    (the ones that fit this request, see siri.skills_block) are written out in full, so the model needn't ask for
-    them with skill_view, a whole extra round trip; the rest by name and description. Her procedures (agent.py) are
-    listed with their slots and how to run one, never with the words that start them, which only code matches."""
+def system_prompt_block(entries: Optional[List[Dict[str, Any]]] = None, detail=(), fits=None) -> str:
+    """The skills index for her prompt. Hey Jev: Hermes' wording, shortened, and its 60-letter descriptions; the
+    skills in detail (the ones that fit this request, see siri.skills_block) are written out in full, so the model
+    needn't ask for them with skill_view, a whole extra round trip; the rest by name and description. fits: names,
+    the request's best fit first: only the first MOST_DESCRIBED are described, the rest named, so 40 skills keep her
+    prompt in its budget, and none is left out (Hermes #2045: a skill missing from the list isn't found again). Her
+    procedures (agent.py) are listed with their slots and how to run one, never with the words that start them, which
+    only code matches."""
     entries = list_skills() if entries is None else entries
     if not entries:
         return ""
-    lines, full = [], []
+    described = None if fits is None else set(list(fits)[:MOST_DESCRIBED]) | set(detail)
+    lines, named, full = [], [], []
     procedures = _last_used([e for e in entries if _procedure(e)])[:MOST_PROCEDURES]
     for e in [e for e in entries if not _procedure(e)] + procedures:
         proc = _procedure(e)
+        if described is not None and e["dir"] not in described:
+            named.append(e["dir"] + (" (procedure)" if proc else ""))
+            continue
         if proc:
             slots = ", ".join(str(s) for s in (proc.get("slots") or {}))
             said = f" (procedure{', slots: ' + slots if slots else ''})"
@@ -313,13 +321,15 @@ def system_prompt_block(entries: Optional[List[Dict[str, Any]]] = None, detail=(
         lines.append(f"    - {e['dir']}: {extract_skill_description({'description': e['description']})}{said}")
         if e["dir"] in detail and e.get("notes"):
             full.append(f"### {e['dir']}\n{e['notes'][:DETAIL_CHARS]}")
+    if named:
+        lines.append("    - also: " + ", ".join(named))
     how = ("\nA procedure is a task you've done in an app before: run it with "
            "{\"do\":\"procedure\",\"name\":\"...\",\"slots\":{...}}, each slot filled from their words now, and no other "
            "steps for it." if procedures else "")
     return ("## Skills\n"
-            "Before replying, scan the skills below. If a skill matches or is even partially relevant to the task, "
-            "follow it: the ones that fit this request are written out after the list, load any other with "
-            "{\"do\":\"skill_view\",\"name\":\"...\"}. Skills encode the user's preferred approach and what works on "
-            "this PC. If a skill was missing steps or wrong, fix it with a skill patch before finishing." + how + "\n"
+            "Scan your skills before replying and follow one that fits, even partly: they hold their way of doing it "
+            "and what works on this PC. The ones that fit this request are written out after the list; load another "
+            "with {\"do\":\"skill_view\",\"name\":\"...\"}. If one was missing steps or wrong, fix it with a skill "
+            "patch before finishing." + how + "\n"
             "<available_skills>\n" + "\n".join(lines) + "\n</available_skills>"
             + ("\n\n" + "\n\n".join(full) if full else ""))
