@@ -40,7 +40,9 @@ CALIBRATE_AFTER = 30
 YOURS_PASS, OTHERS_PASS = 0.97, 0.05
 KEEP = 300  # of each, the latest: the levels follow how you sound now, and the log stays small
 ACTED = (True, "playing", "dictate")  # what a turn she acted on returns (siri.handle): yours, while learning
-GROW_ABOVE = 0.15  # a turn this far over the named level, with her name, adds to her picture of your voice
+# A turn of yours she acted on, once she's on, that scores this far over the level without her name against the
+# sentences you read, adds to her picture of your voice. Never one with her name just for that: anyone can say it
+GROW_ABOVE = 0.15
 MOST = 40  # prints kept: the ones you read plus the rest from turns, the way "Hey Siri" fills in over time
 # A sentence whose print scores under this against the rest of what you read is left out, the least alike first, down
 # to ENROL_KEEP: on 8 Oct two scored 0.37 and 0.43 against the other eight and were kept. Your clips were 0.64 up
@@ -116,14 +118,17 @@ class Profile:
                  calibrated=self.calibrated, told=self.told)
         os.replace(tmp, os.path.join(self.path, "profile.npz"))
 
-    def centre(self):
-        prints = [p for p in (self.read, self.grown) if len(p)]
-        c = np.concatenate(prints).mean(axis=0)
-        return c / (np.linalg.norm(c) or 1.0)
+    def centre(self, read_only=False):
+        """The middle of your prints. The ones added from turns count for half at most, and each was checked against
+        the ones you read (after_turn), so turns that weren't quite you can't walk it over to another voice: the
+        guard against drift PLAN promised."""
+        unit = lambda c: c / (np.linalg.norm(c) or 1.0)
+        c = unit(self.read.mean(axis=0))
+        return c if read_only or not len(self.grown) else unit(c + unit(self.grown.mean(axis=0)))
 
-    def score(self, print_):
-        """How like your voice, -1 to 1 (cosine with the middle of your prints)."""
-        return float(np.dot(self.centre(), print_))
+    def score(self, print_, read_only=False):
+        """How like your voice, -1 to 1 (cosine with the middle of your prints, or of the ones you read)."""
+        return float(np.dot(self.centre(read_only), print_))
 
     def enrol(self, prints):
         """The prints from the sentences you read: a new picture of your voice, levels back to the start."""
@@ -253,8 +258,8 @@ def after_turn(profile, print_, score, speech_secs, named, kind, counted, result
     """Once a turn is over, result being what she did with it (siri's run_turn; False: let go). While learning the
     score of one of a second or more is kept, as yours if she acted on it (ACTED: a command she did, a yes to her
     question) and as room talk if she let it go, and the levels are set once there are enough (calibrate). Returns
-    "on" when that switched her on, "unsure" the first time it couldn't, else None. A turn that was plainly you adds
-    to her picture of your voice."""
+    "on" when that switched her on, "unsure" the first time it couldn't, else None. Once she's on, a turn she acted on
+    that was plainly you adds to her picture of your voice (see GROW_ABOVE)."""
     if not profile.ready or score is None or mode() == "off" or speech_secs < MIN_SPEECH:
         return None  # under a second it's the words that match, not the voice: kept out of the levels
     said = None
@@ -270,6 +275,7 @@ def after_turn(profile, print_, score, speech_secs, named, kind, counted, result
                 profile.save()
         else:
             said = None
-    if counted and named and print_ is not None and score >= profile.named + GROW_ABOVE:
+    if mode() == "on" and profile.calibrated and counted and result in ACTED and print_ is not None \
+            and profile.score(print_, read_only=True) >= profile.strict + GROW_ABOVE:
         profile.grow(print_)
     return said

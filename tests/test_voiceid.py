@@ -177,12 +177,35 @@ class Learning(unittest.TestCase):
         self.assertEqual(sum(e["who"] == "room" for e in again), 10)
 
     def test_plainly_you_adds_to_her_picture_of_your_voice_up_to_a_limit(self):
-        p = profile()
+        p = profile(calibrated=True)
         with mock.patch.dict(siri.settings._load(), {"voice_id": "on"}):
-            for _ in range(50):
-                voiceid.after_turn(p, YOU, 0.95, 2.0, True, "other", True)
-            voiceid.after_turn(p, SOMEONE, 0.95, 2.0, False, "other", True)  # without her name: never
+            for _ in range(50):  # with her name or without: you hardly say it
+                voiceid.after_turn(p, YOU, 0.95, 2.0, False, "other", True, True)
+            voiceid.after_turn(p, SOMEONE, 0.95, 2.0, True, "other", True, True)  # unlike the sentences you read
+            voiceid.after_turn(p, YOU, 0.95, 2.0, True, "other", True, False)  # or let go: never
         self.assertEqual(len(p.read) + len(p.grown), voiceid.MOST)
+        self.assertTrue(all(float(g @ YOU) > 0.99 for g in p.grown))
+
+    def test_her_picture_of_your_voice_cant_be_walked_over_to_someone_elses(self):
+        """PLAN promised a guard against drift and there was none: each turn added was checked against the picture
+        it was moving, and they could make up 30 of its 40 prints. A voice a little further from yours each time took
+        it all the way."""
+        p = profile(calibrated=True)
+        with mock.patch.dict(siri.settings._load(), {"voice_id": "on"}):
+            for angle in np.linspace(0.1, 1.47, 60):  # from yours to someone else's
+                v = unit(np.cos(angle), np.sin(angle))
+                s = p.score(v)
+                voiceid.after_turn(p, v, s, 2.0, True, "other", voiceid.judge(p, s, 2.0, True, "other")[0], True)
+        self.assertGreater(len(p.grown), 0)
+        self.assertGreater(p.score(YOU), 0.9)
+        self.assertLess(p.score(SOMEONE), 0.5)
+
+    def test_nothing_is_added_while_learning_or_before_the_levels_are_set(self):
+        for setting, calibrated in (("learning", True), ("on", False)):
+            p = profile(calibrated=calibrated)
+            with self.subTest(setting=setting), mock.patch.dict(siri.settings._load(), {"voice_id": setting}):
+                voiceid.after_turn(p, YOU, 0.95, 2.0, True, "other", True, True)
+                self.assertEqual(len(p.grown), 0)
 
     def test_the_least_alike_go_first_and_enough_are_always_kept(self):
         rng = np.random.default_rng(1)
