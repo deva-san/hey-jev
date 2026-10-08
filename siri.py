@@ -5568,7 +5568,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             first, first_kind, first_ms, _ = held[0]
             held[0] = None
             at[0] = held_at[0]
+            voice = voiceid.joined(first, text)  # and its voice, checked as for any turn
             text = speech.heard(f"{first} {text}".strip(), min(getattr(first, "sure", 1.0), getattr(text, "sure", 1.0)))
+            text.voice, text.spoke = voice
             ms, kind = first_ms + ms, kind if first_kind == "other" else first_kind
         if unfinished(text) and isinstance(route(text, kind), tuple):  # "... we need to": wait for the rest
             held[0], held_at[0] = (text, kind, ms, time.time() + HOLD), at[0]

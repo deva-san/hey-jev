@@ -146,6 +146,18 @@ def level(named, kind):
     return "named" if named or kind == "armed" else "strict"
 
 
+def joined(*parts):
+    """(voice print, seconds of speech) of a phrase held for the rest of what was said, from its parts': their prints
+    put together by how long each spoke, and the seconds of the ones that had a print. Joined as new words it had
+    neither: "Hey Jev, open [pause] YouTube" in someone else's voice passed as too short to check, and yours without
+    her name was let go however long it was."""
+    prints = [(p.voice, p.spoke) for p in parts if getattr(p, "voice", None) is not None]
+    if not prints:
+        return None, 0.0
+    v = sum(np.asarray(v, np.float32) * max(secs, 1e-3) for v, secs in prints)
+    return v / (np.linalg.norm(v) or 1.0), float(sum(secs for _, secs in prints))
+
+
 def judge(profile, score, speech_secs, named, kind):
     """(counts, why) for a turn with this score (None: not scored) and seconds of speech. counts is False only
     for a turn that isn't your voice while voice ID is on; while learning everything counts."""

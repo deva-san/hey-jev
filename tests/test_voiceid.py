@@ -183,6 +183,33 @@ class InHerEars(unittest.TestCase):
             self.assertEqual(told, ["voice learned"])
         self.assertEqual(len(a.var("profile").read), 10)
 
+    def test_a_phrase_held_for_the_rest_keeps_its_voice(self):
+        """"Hey Jev, open [pause] YouTube" in someone else's voice was joined as new words with no voice print, so it
+        passed as too short to check, her name being in it; and yours, "open [pause] recycle bin" without her name,
+        was let go as too short however long it was."""
+        a = self.assistant()
+        handled = []
+        audio = np.zeros(16000, np.float32)
+        with mock.patch.object(siri, "handle", lambda text, *args, **kw: handled.append(str(text))), \
+                mock.patch.dict(siri.settings._load(), {"voice_id": "on", "no_name": True}):
+            for voice in (SOMEONE, YOU):
+                a.listener.on_phrase(audio, "other", turn("Hey Jev, open", voice, spoke=0.8), 100)
+                a.listener.on_phrase(audio, "other", turn("YouTube", voice, spoke=0.7), 100)
+            a.listener.on_phrase(audio, "other", turn("open", YOU, spoke=0.5), 100)
+            a.listener.on_phrase(audio, "other", turn("recycle bin", YOU, spoke=0.7), 100)
+        self.assertEqual(handled, ["Hey Jev, open YouTube", "open recycle bin"])
+
+    def test_a_joined_phrase_has_its_parts_voices_by_how_long_each_spoke(self):
+        """Only the parts with a print count: one too short for a print (under 0.3 s) adds no seconds."""
+        held, rest = turn("open", None, spoke=0.2), turn("the downloads folder", YOU, spoke=1.3)
+        voice, spoke = voiceid.joined(held, rest)
+        self.assertAlmostEqual(float(voice @ YOU), 1.0, places=5)
+        self.assertEqual(spoke, 1.3)
+        voice, spoke = voiceid.joined(turn("open the", SOMEONE, spoke=0.5), rest)
+        self.assertGreater(float(voice @ YOU), float(voice @ SOMEONE))
+        self.assertEqual(spoke, 1.8)
+        self.assertEqual(voiceid.joined(held, turn("bin", None, spoke=0.1)), (None, 0.0))
+
     def test_saying_stop_stops_learning_your_voice(self):
         a = self.assistant()
         a.var("enrolling")[0] = {"i": 3, "prints": [YOU] * 3, "until": 1e12}
