@@ -16,6 +16,7 @@ a cloud service (it does pass through Telegram's servers, as every Telegram voic
 the way Hermes splits them. Runs on its own thread, so voice turns aren't held up.
 """
 import asyncio
+import collections
 import io
 import logging
 import os
@@ -32,6 +33,22 @@ from secrets_store import get_secret
 
 TOKEN = "TELEGRAM_BOT_TOKEN"
 OLDEST = 120  # seconds: a message older than this is dropped
+PICTURE_SIDE = 1600  # pixels: the biggest of Telegram's sizes of a photo up to this, plenty for a model to read
+# a picture sent as a file comes as it is, full size, with nothing here to make it smaller: up to this, else it's
+# sent as a photo, which Telegram makes smaller. A 6 MB camera file took longer to send the model than it waits
+FILE_BYTES = 2 * 1024 * 1024
+PICTURE_KINDS = ("image/jpeg", "image/png", "image/webp")  # what the answer model takes
+ALBUM_WAIT = 1.2  # seconds after an album's last picture comes in before it's taken as one message
+ALBUM_MOST = 4  # pictures of an album she looks at
+# when the bot sent you something, [start, end] each: Telegram on this PC shows it too, see watch.own_reply
+SENDS = collections.deque(maxlen=50)
+
+
+def _sending():
+    """A send starting: its [start, end], end set once it's done."""
+    now = time.time()
+    SENDS.append([now, now + 30])
+    return SENDS[-1]
 PAIR_FOR = 600  # seconds a pairing stays open after you press Pair
 POLLING = "Updater:start_polling:polling_task"  # python-telegram-bot's name for the task asking for messages (22.8)
 for _name in ("httpx", "httpcore", "telegram", "telegram.ext"):
@@ -152,6 +169,7 @@ class Pairing:
 class Bot:
     def __init__(self, on_message, on_tap, transcribe=None, on_pair=None, on_stop=None):
         """on_message(text, chat): a message from you, to run as a turn (on Jev's side, not this thread).
+        on_message(text, chat, pictures) when it came with pictures: [(bytes, type)], an album's together.
         on_tap(yes, ask, chat, message): you tapped Yes or No on her question ask. transcribe(16 kHz audio) ->
         (text, ms), for voice notes. on_pair(name): someone sent /start while pairing was open and got a code, or
         None: they didn't, 3 others had asked first. on_stop(why): it gave up, by the error's class name
@@ -160,6 +178,7 @@ class Bot:
         self.on_stop = on_stop
         self.pairing, self.strangers, self.told, self.name = Pairing(), set(), set(), ""
         self.answered = {}  # her questions already answered with a tap: (chat, message) -> when
+        self.albums = {}  # (chat, album) -> the pictures of an album that have come in, see _album
         self.loop, self.app, self.thread, self.why = None, None, None, ""
         self.stopping, self.again = False, False  # stop() asked for, and start() asked for again meanwhile
         self.lock = threading.Lock()
@@ -337,19 +356,82 @@ class Bot:
         if user.id != me:
             if user.id not in self.strangers:  # once each, so you know, and nothing else
                 self.strangers.add(user.id)
-                await context.bot.send_message(me, f"{who(user)} messaged me on Telegram. I didn't answer, I only "
-                                                   f"talk to you here.")
+                sent = _sending()
+                try:
+                    await context.bot.send_message(me, f"{who(user)} messaged me on Telegram. I didn't answer, I "
+                                                       f"only talk to you here.")
+                finally:
+                    sent[1] = time.time()
             return
+        doc = msg.document
+        if any(getattr(msg, k, None) for k in ("video", "animation", "video_note", "sticker")) or (
+                doc and doc.mime_type not in PICTURE_KINDS):
+            # a video, a GIF, a .heic or a PDF: said so, never its words answered about an older picture
+            await self._reply(msg, "I can only look at photos, and JPEG, PNG or WebP pictures. Send it as a photo.")
+            return
+        picture = None
+        if msg.photo or doc:
+            if doc and (doc.file_size or 0) > FILE_BYTES:
+                await self._reply(msg, "That picture's too big for me as a file. Send it as a photo instead.")
+                return
+            picture = await self._picture(msg)
+            if picture is None:
+                await self._reply(msg, "I couldn't get that picture. Try sending it again, as a photo.")
+                return
+            if getattr(msg, "media_group_id", None):  # one of an album: they come one by one, taken as one
+                self._album(chat.id, msg.media_group_id, text, picture)
+                return
         if msg.voice or msg.audio:
             text = await self._hear(msg)
             if not text:
-                await msg.reply_text("I couldn't make out that voice note.")
+                await self._reply(msg, "I couldn't make out that voice note.")
                 return
-            await msg.reply_text(f"\U0001f3a4 {text}")
+            await self._reply(msg, f"\U0001f3a4 {text}")
         if text == "/start":
-            await msg.reply_text("I'm here. Ask me anything, or tell me what to do on the PC.")
+            await self._reply(msg, "I'm here. Ask me anything, or tell me what to do on the PC.")
+        elif picture:  # the words with it, if any, are about it
+            self.on_message(text, chat.id, [picture])
         elif text:
             self.on_message(text, chat.id)
+
+    async def _reply(self, msg, text):
+        sent = _sending()
+        try:
+            await msg.reply_text(text)
+        finally:
+            sent[1] = time.time()
+
+    def _album(self, chat, group, text, picture):
+        """A picture of an album: kept with the others until ALBUM_WAIT after the last, then all of them (up to
+        ALBUM_MOST) go as one message, with the album's caption, which Telegram puts on one of them."""
+        album = self.albums.setdefault((chat, group), {"text": "", "pictures": [], "timer": None})
+        album["text"] = album["text"] or text
+        if len(album["pictures"]) < ALBUM_MOST:
+            album["pictures"].append(picture)
+        if album["timer"] is not None:
+            album["timer"].cancel()
+        album["timer"] = asyncio.get_running_loop().call_later(ALBUM_WAIT, self._album_done, chat, group)
+
+    def _album_done(self, chat, group):
+        album = self.albums.pop((chat, group), None)
+        if album and album["pictures"]:
+            self.on_message(album["text"], chat, album["pictures"])
+
+    async def _picture(self, msg):
+        """A picture you sent: (its bytes, its type), Telegram's biggest size of a photo up to PICTURE_SIDE. None if
+        it couldn't be had or is too big."""
+        try:
+            if msg.photo:  # smallest first
+                item = ([p for p in msg.photo if max(p.width, p.height) <= PICTURE_SIDE] or msg.photo[:1])[-1]
+                kind = "image/jpeg"
+            else:
+                item, kind = msg.document, msg.document.mime_type
+            if (item.file_size or 0) > 20 * 1024 * 1024:  # Telegram's own limit for a bot downloading a file
+                return None
+            return bytes(await (await item.get_file()).download_as_bytearray()), kind
+        except Exception as exc:
+            print(f"  picture from the phone failed: {type(exc).__name__}")
+            return None
 
     async def _hear(self, msg):
         """A voice note in words, written on this PC."""
@@ -394,12 +476,15 @@ class Bot:
         loop = self.loop
         if loop is None:
             return False
+        sent = _sending()
         try:
             asyncio.run_coroutine_threadsafe(coro_fn(), loop).result(30)
             return True
         except Exception as exc:  # including Telegram's flood control: a failed send, not a long sleep
             print(f"  telegram send failed: {type(exc).__name__}")
             return False
+        finally:
+            sent[1] = time.time()
 
     def send(self, chat, text, ask=None):
         """Her reply, split Hermes' way if it's long. ask: Yes and No buttons on it, for her question ask."""

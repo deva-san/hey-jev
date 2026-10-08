@@ -384,7 +384,12 @@ class App:
         if base in self.exes:
             return True
         stem = re.sub(r"[^a-z0-9]", "", base[:-4] if base.endswith(".exe") else base)
-        if stem == self.joined or stem in self.words:  # Spotify.exe, chrome.exe for "Google Chrome", Code.exe for "VS Code"
+        # Spotify.exe, chrome.exe for "Google Chrome", Code.exe for "VS Code", and Store apps' own names with
+        # Windows or Microsoft in front: WindowsCamera.exe for "Camera" ("Close camera": "Camera isn't running")
+        if stem == self.joined or stem in self.words:
+            return True
+        bare = re.sub(r"^(?:windows|microsoft)", "", stem)  # the whole name only: "Camera Hub" isn't WindowsCamera
+        if bare and bare != stem and bare == self.joined:
             return True
         return _norm(file_description(exe_path)).replace(" ", "") == self.joined
 

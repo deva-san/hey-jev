@@ -10,6 +10,7 @@ import os
 import re
 import socket
 import sqlite3
+import sys
 import time
 import winreg
 import xml.etree.ElementTree as ET
@@ -76,13 +77,32 @@ def notifications(since=0.0, messages_only=True, limit=30):
         if messages_only and not messaging:
             continue
         texts = _texts(payload)
-        if not texts or (bot and texts[0].strip().lower() == bot):  # her own replies on your phone's Telegram
+        if not texts:
+            continue
+        if bot and texts[0].strip().lower() == bot:  # her own replies on your phone's Telegram
+            OWN_SEEN[app] = max(OWN_SEEN.get(app, 0.0), (arrived - FILETIME_1970) / 1e7)  # covered, not new
             continue
         out.append({"app": app, "from": texts[0][:60], "text": " ".join(texts[1:])[:300],
                     "when": (arrived - FILETIME_1970) / 1e7})
         if len(out) >= limit:
             break
     return out[::-1]
+
+
+OWN_SEEN = {}  # app -> when the latest of her own replies (on Telegram, from your bot) showed on this PC
+
+
+def bot_sending(when):
+    """True if the bot was sending you something on Telegram around when (seconds since 1970): from 2 s before a
+    send began to 10 s after it was done, about when Telegram on this PC shows it (telegram_bot.SENDS)."""
+    bot = sys.modules.get("telegram_bot")
+    return bot is not None and any(start - 2 <= when <= end + 10 for start, end in list(bot.SENDS))
+
+
+def own_reply(name, when):
+    """Telegram here noting a message at when that was her own reply to you, sent from your bot: the list had it
+    (OWN_SEEN), or the bot was sending you something then. A friend's message a minute later still counts."""
+    return "telegram" in name.lower() and (OWN_SEEN.get(name, 0.0) >= when - 15 or bot_sending(when))
 
 
 def last_added():
@@ -112,7 +132,7 @@ def vanished(since, found):
     """Message apps that notified after since but have nothing left in the list for it, like WhatsApp Desktop."""
     have = {n["app"] for n in found}
     return list(dict.fromkeys(_app(a)[0] for a, when in last_added().items()
-                              if when > since and _app(a)[0] not in have))
+                              if when > since and _app(a)[0] not in have and not own_reply(_app(a)[0], when)))
 
 
 def ago(when):
@@ -210,6 +230,8 @@ class Watcher:
             self.seen = found[-1]["when"] + 1e-6
         for n in found:
             self.covered[n["app"]] = max(self.covered.get(n["app"], 0.0), n["when"])
+        for app, when in OWN_SEEN.items():  # her own replies, which the list had: Windows' note of them isn't news
+            self.covered[app] = max(self.covered.get(app, 0.0), when)
         for app_id, when in last_added().items():  # what Windows noted, whatever happened to it afterwards
             if when > self.added.get(app_id, 0.0) + 1e-6:
                 self.added[app_id] = when
@@ -221,7 +243,10 @@ class Watcher:
                 del self.waiting[app_id]
             elif noticed < now - 1.0:  # give the list one look to catch up before saying it without a name
                 del self.waiting[app_id]
-                gone.append(name)
+                # not Telegram here showing what the bot sent your phone ("You've got a new message on Telegram",
+                # as she answered you there), its toast gone before she looked
+                if not own_reply(name, when):
+                    gone.append(name)
         if not (found or gone):
             return ""
         front = (front() if callable(front) else front or "").lower()

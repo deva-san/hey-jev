@@ -2,6 +2,7 @@
 questions answered only by a tap there, and a yes at the PC never answering a phone question. Telegram is faked."""
 import asyncio
 import datetime
+import json
 import time
 import unittest
 from types import SimpleNamespace
@@ -17,7 +18,8 @@ def update(text="hi", user_id=7, chat_type="private", ago=0, voice=None):
 
     async def reply_text(t, **kw):
         replies.append(t)
-    msg = SimpleNamespace(text=text, caption=None, voice=voice, audio=None, reply_text=reply_text,
+    msg = SimpleNamespace(text=text, caption=None, voice=voice, audio=None, reply_text=reply_text, photo=(),
+                          document=None,
                           date=datetime.datetime.fromtimestamp(time.time() - ago, datetime.timezone.utc))
     u = SimpleNamespace(effective_message=msg, effective_user=SimpleNamespace(id=user_id, first_name="Hari",
                                                                               last_name=None, username="hari"),
@@ -240,6 +242,176 @@ class Fixes(unittest.TestCase):
             bot.thread.join(5)
         self.assertEqual(stops, ["InvalidToken"])
         self.assertFalse(bot.running)
+
+
+class Pictures(unittest.TestCase):
+    """A photo you send her: downloaded on this PC, and what your words with it (or a moment after) are about."""
+
+    def photo_update(self, caption=None, size=900):
+        upd, replies = update(None)
+        got = []
+
+        async def download():
+            return bytearray(b"jpeg picture")
+
+        async def get_file():
+            return SimpleNamespace(download_as_bytearray=download)
+        sizes = [SimpleNamespace(width=w, height=w * 3 // 4, file_size=w * 100,
+                                 get_file=(lambda w=w: (got.append(w), get_file())[1])) for w in (90, 320, size, 2560)]
+        upd.effective_message.photo, upd.effective_message.document = sizes, None
+        upd.effective_message.caption, upd.effective_message.media_group_id = caption, None
+        return upd, replies, got
+
+    def send_in(self, bot, upd):
+        with mock.patch.dict(siri.settings._load(), {"telegram_owner": 7}):
+            asyncio.run(bot._message(upd, Context()))
+
+    def test_a_photo_goes_through_with_its_caption_at_a_readable_size(self):
+        seen = []
+        bot = telegram_bot.Bot(on_message=lambda *a: seen.append(a), on_tap=None)
+        upd, _, got = self.photo_update("which is cheaper")
+        with mock.patch.dict(siri.settings._load(), {"telegram_owner": 7}):
+            asyncio.run(bot._message(upd, Context()))
+        self.assertEqual(seen, [("which is cheaper", 7, [(b"jpeg picture", "image/jpeg")])])
+        self.assertEqual(got, [900])  # the biggest up to PICTURE_SIDE, not the 2560 original
+
+    def test_a_stranger_s_photo_is_never_downloaded(self):
+        bot = telegram_bot.Bot(on_message=lambda *a: None, on_tap=None)
+        upd, _, got = self.photo_update("hi")
+        upd.effective_user.id = 99
+        with mock.patch.dict(siri.settings._load(), {"telegram_owner": 7}):
+            asyncio.run(bot._message(upd, Context()))
+        self.assertEqual(got, [])
+
+    def test_an_album_is_one_message_with_its_caption(self):
+        seen = []
+        bot = telegram_bot.Bot(on_message=lambda *a: seen.append(a), on_tap=None)
+
+        async def album():
+            for caption in ("which is cheaper", None, None):
+                upd, _, _ = self.photo_update(caption)
+                upd.effective_message.media_group_id = "g1"
+                await bot._message(upd, Context())
+            await asyncio.sleep(telegram_bot.ALBUM_WAIT + 0.3)
+        with mock.patch.dict(siri.settings._load(), {"telegram_owner": 7}),                 mock.patch.object(telegram_bot, "ALBUM_WAIT", 0.05):
+            asyncio.run(album())
+        self.assertEqual(len(seen), 1)
+        self.assertEqual((seen[0][0], len(seen[0][2])), ("which is cheaper", 3))
+
+    def test_videos_gifs_and_other_files_are_said_so_never_answered_as_text(self):
+        for field, value in (("video", object()), ("animation", object()), ("sticker", object()),
+                             ("document", SimpleNamespace(mime_type="image/heic", file_size=10))):
+            seen = []
+            bot = telegram_bot.Bot(on_message=lambda *a: seen.append(a), on_tap=None)
+            upd, replies = update("and what about this one?")
+            setattr(upd.effective_message, field, value)
+            self.send_in(bot, upd)
+            self.assertEqual(seen, [], field)
+            self.assertIn("Send it as a photo", replies[0], field)
+
+    def test_a_big_picture_file_is_sent_back_as_a_photo(self):
+        seen = []
+        bot = telegram_bot.Bot(on_message=lambda *a: seen.append(a), on_tap=None)
+        upd, replies = update("compare")
+        upd.effective_message.document = SimpleNamespace(mime_type="image/jpeg", file_size=6 * 1024 * 1024)
+        self.send_in(bot, upd)
+        self.assertEqual(seen, [])
+        self.assertIn("as a photo", replies[0])
+
+    def test_the_model_sees_it_on_the_phone_only(self):
+        siri.PHONE_PICTURES[7] = ([siri.picture_url(b"x")], time.time())
+        self.addCleanup(siri.PHONE_PICTURES.clear)
+        sent = []
+        plan = {"steps": [], "say": "The left one."}
+
+        def ask(messages, **kw):
+            sent.append(messages[-1]["content"])
+            return json.dumps(plan), dict(plan), {}, "test"
+        with mock.patch.object(siri, "ask_plan", ask), mock.patch.object(siri, "context", return_value=""):
+            to, chat = siri.REPLY_TO.set([]), siri.PHONE_CHAT.set(7)
+            try:
+                siri.think("which is cheaper", False)
+            finally:
+                siri.REPLY_TO.reset(to)
+                siri.PHONE_CHAT.reset(chat)
+            siri.think("which is cheaper", False)  # at the PC
+        self.assertEqual(sent[0][1]["image_url"]["url"], "data:image/jpeg;base64,eA==")
+        self.assertIn("which is cheaper", sent[0][0]["text"])
+        self.assertEqual(sent[1], "which is cheaper")
+
+    def test_an_old_picture_is_forgotten(self):
+        siri.PHONE_PICTURES[7] = ([siri.picture_url(b"x")], time.time() - siri.PICTURE_FOR - 1)
+        self.addCleanup(siri.PHONE_PICTURES.clear)
+        to, chat = siri.REPLY_TO.set([]), siri.PHONE_CHAT.set(7)
+        try:
+            self.assertIsNone(siri.phone_picture())
+        finally:
+            siri.REPLY_TO.reset(to)
+            siri.PHONE_CHAT.reset(chat)
+        self.assertNotIn(7, siri.PHONE_PICTURES)  # and let go of
+
+    def phone_turn(self, words, plan):
+        """handle() on the phone with a picture sent a minute ago: (her lines, whether it looked at the screen)."""
+        siri.PHONE_PICTURES[7] = ([siri.picture_url(b"x")], time.time() - 60)
+        self.addCleanup(siri.PHONE_PICTURES.clear)
+        lines, looked = [], []
+        with mock.patch.object(siri, "ask_plan", return_value=(json.dumps(plan), dict(plan), {}, "test")),                 mock.patch.object(siri, "context", return_value=""),                 mock.patch.object(siri, "learn_later", lambda *a, **k: None),                 mock.patch.object(siri, "see", lambda task, notify=None: looked.append(task) or ("Done.", [])):
+            to, chat = siri.REPLY_TO.set(lines), siri.PHONE_CHAT.set(7)
+            try:
+                siri.handle(words, words)
+            finally:
+                siri.REPLY_TO.reset(to)
+                siri.PHONE_CHAT.reset(chat)
+        return lines, looked
+
+    def test_the_pc_screen_is_still_the_pc_screen(self):
+        _, looked = self.phone_turn("what's on my screen", {"steps": [], "say": "A phone."})
+        self.assertTrue(looked)
+
+    def test_what_a_picture_says_cant_change_things_without_a_yes(self):
+        lines, _ = self.phone_turn("what should I do about this", {"steps": [{"do": "lock"}], "say": "Locking."})
+        self.assertTrue(lines and lines[-1].endswith("?"), lines)  # asked first, with the phone's buttons
+        siri.PENDING.update(plan=None, until=0.0, origin="voice")
+
+
+class Answers(unittest.TestCase):
+    """A question that needs looking up gets an answer, never "say that again"; typed, nothing was misheard."""
+
+    def test_after_the_last_look_it_answers(self):
+        looks, asked = [], []
+
+        def ask(messages, **kw):
+            asked.append(messages[-1]["content"])
+            p = {"steps": [{"do": "web", "query": f"phones {len(asked)}"}], "say": ""}
+            return json.dumps(p), p, {}, "test"
+        with mock.patch.object(siri, "ask_plan", ask), mock.patch.object(siri, "context", return_value=""),                 mock.patch.object(siri, "run_info", lambda info, *a: looks.append(info) or "[]"):
+            plan = siri.think("best phone under 20000", False)
+        self.assertEqual(len(looks), siri.ROUNDS)
+        self.assertIn("last look-up", asked[-1])  # told before its last go
+        self.assertNotIn("last look-up", asked[-2])
+        self.assertIn(plan["say"], siri.REPLIES["looked_no_answer"])  # and if it still wants more, says so
+        self.assertEqual(plan["steps"], [])
+
+    def test_without_her_name_she_stays_quiet_instead(self):
+        def ask(messages, **kw):
+            p = {"steps": [{"do": "web", "query": "match"}], "say": ""}
+            return json.dumps(p), p, {}, "test"
+        with mock.patch.object(siri, "ask_plan", ask), mock.patch.object(siri, "context", return_value=""),                 mock.patch.object(siri, "run_info", lambda info, *a: "[]"):
+            for gate in (True, "cold"):
+                plan = siri.think("who won the match yesterday", gate)
+                self.assertEqual((plan["steps"], plan["say"]), ([], ""), gate)
+                self.assertIsNotNone(siri.let_go(plan), gate)
+
+    def test_on_the_phone_nothing_was_misheard(self):
+        plan = {"steps": [], "say": ""}
+        lines = []
+        with mock.patch.object(siri, "ask_plan", return_value=(json.dumps(plan), plan, {}, "test")),                 mock.patch.object(siri, "context", return_value=""),                 mock.patch.object(siri, "learn_later", lambda *a, **k: None):
+            to = siri.REPLY_TO.set(lines)
+            try:
+                siri.handle("M17 e or M17", "M17 e or M17")
+            finally:
+                siri.REPLY_TO.reset(to)
+        self.assertIn(lines[0], siri.REPLIES["not_worked_out"])
 
 
 class Questions(unittest.TestCase):
