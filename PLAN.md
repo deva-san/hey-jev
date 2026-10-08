@@ -24,8 +24,8 @@ pass.
 | 5 Telegram | Bot, pairing, buttons, voice notes, owner-only, "send me a screenshot" | Paired (done) | Listens whenever a token is saved, so `/start` always gets an answer. Before this, it stayed off until Pair was pressed, and a `/start` sent first got nothing. It keeps trying when Telegram can't be reached, and says so on the PC if the token stops working |
 | 6 Coding jobs | OpenCode over ACP, confined, git snapshot; Hermes' cron rules | Ask for one in a git project folder | Questions mid-job are asked only on the phone (buttons). For a job asked by voice, a command needing your OK is refused and listed in her report rather than interrupting you. Edits in the folder go ahead once you've said yes to the job, since the snapshot makes them undoable |
 
-Still to do: WhatsApp (later, as planned), interrupting her ("stop"), trimming the prompt, and switching the
-decider on once its shadow log looks good.
+Still to do: WhatsApp (later, as planned), interrupting her with "stop" said at the PC with Parakeet (it works with
+Nemotron, and right Alt always does), trimming the prompt, and switching the decider on once its shadow log looks good.
 
 ## In short
 
@@ -61,7 +61,7 @@ Today's numbers come from her own log, 1–7 Oct 2026: 566 turns, 422 of them wi
 | Model calls per question | 1, or 2 with a look-up (`skill_view` is the most common look-up) | 1 for nearly all; look-ups announced with a filler | Phase 2 |
 | Memory (RAM), running | 797 MB working set | **+120–205 MB** without Pocket: voice ID 40–70, decider 60–100, Telegram 20–35. **Pocket adds ~350 MB loaded and ~600 MB at its peak**, so about 1.3 GB in all. It could load only when needed and unload when idle, but loading costs its fast start; measured in phase 2 | Every phase |
 | Startup (`import siri`) | 0.65 s | No slower. New models load in the background | Every phase |
-| New pip packages | – | **One:** python-telegram-bot (phase 5). No PyTorch, no Electron, no new program. Telegram is a thread inside Jev that checks for messages, off until you pair it | – |
+| New pip packages | – | **One:** python-telegram-bot (phase 5). No PyTorch, no Electron, no new program. Telegram is a thread inside Jev that checks for messages whenever a bot token is saved, and only answers `/start` until you pair it | – |
 | Tests | 216 pass in 9.5 s | All pass, plus each phase's new ones | Every phase |
 
 ## How it fits together
@@ -339,7 +339,7 @@ That is 54 errors, against 22 wrong actions or replies (13 + 9).
   `handle()` between `quick()` and `think()` (3712–3733), and `let_go()` (3602). `history.add()` logs its answers.
 - **Expected (estimate, checked offline before going live):** model path right 46% → ~55%; requests for her that are
   let go or answered wrongly fall; room talk answered 28% → ~15%. Look-up turns save ~3 s.
-- **Tests:** `test_routing`, `YesOrNo`, `test_safety` and `test_open_mic.py`, plus:
+- **Tests:** `test_routing`, `YesOrNo`, `test_safety` and `checks/open_mic.py`, plus:
   - no decider answer can remove a question or clear `gate`;
   - negations never flip a safety ask;
   - low confidence falls back to today's behaviour.
@@ -427,14 +427,15 @@ finds the right moment in past chats.
     answer.
 - **How it works:**
   - It runs on its own thread inside Jev, because python-telegram-bot needs its own asyncio loop. It's imported
-    only when switched on, so startup isn't slower, and it stays **off until you pair your phone**. It only works
-    while the PC is on.
+    only once a bot token is saved, so startup isn't slower. From then on it listens, paired or not, so `/start`
+    always gets an answer (see the status above). It only works while the PC is on.
   - The thread starts inside `run_voice_assistant`, where the `busy` lock lives.
   - Text goes into the same `handle()` as voice. Replies go back to the chat instead of `say()`.
   - Long polling only, so nothing on the PC is open to the internet.
 - **Owner only, failing closed:**
-  - Private chats only, and only your numeric Telegram ID. It refuses to poll at all until that ID is set. A bare
-    Hermes adapter lets everyone in without an allowlist (adapter.py:987-990).
+  - Private chats only, and only your numeric Telegram ID. Until that ID is set, `/start` is all it answers: with a
+    code while pairing is open, else with how to open it, and nothing else runs. A bare Hermes adapter lets everyone
+    in without an allowlist (adapter.py:987-990).
   - Only plain messages and button taps are accepted.
   - Strangers are ignored, and you get one notice per stranger.
   - **Messages waiting from while the PC was off are dropped at start, as are any older than 2 min**
@@ -452,8 +453,10 @@ finds the right moment in past chats.
 - **Yes/No buttons** sit on Jev's own rules, which are stricter than Hermes': Jev asks for anything not on a
   read-only list, approvals survive a restart, and an interrupted command asks again.
   - A tap resolves a waiting plan or a task (`TASK_STORE.approve/cancel`).
-  - Today there is one global waiting plan (`PENDING`, siri.py:3640). It becomes **one per place it was asked from**,
-    so a "yes" said at the PC can't approve something asked on the phone, and the other way round.
+  - There is still one waiting plan (`PENDING` in siri.py), tagged with the place it was asked from, so a "yes" said
+    at the PC can't approve something asked on the phone, and the other way round. It is **not** one per place,
+    though: a question from the phone replaces one waiting at the PC, and the other way round, so the first has to
+    be asked again.
   - Risky steps asked from the phone need the button.
   - Hermes' "approve for the session" and its model-judged auto-approve are **not** taken. No PIN, as you decided.
 - **Voice notes:** decoded on the PC (soundfile / PyAV, already installed), then written by the speech-to-text engine
@@ -467,7 +470,7 @@ finds the right moment in past chats.
   - a tap from another account does nothing;
   - an expired card can't run;
   - a message older than 2 min is dropped;
-  - the bot won't poll before pairing;
+  - before pairing, the bot answers only `/start`;
   - a voice "yes" can't approve a phone request;
   - long replies split correctly;
   - a voice note is transcribed without network.
