@@ -188,6 +188,36 @@
      ]
     }
    ]
+  },
+  {
+   "to": "voice_bits.py",
+   "doc": "Pieces of Hermes Agent's voice mode Hey Jev uses while she talks (tools/voice_mode_transcript.py,\ntools/tts_streaming.py): whole-utterance stop phrases, her own words heard back (the TTS echo guard), and the\nnote that you cut her off.",
+   "imports": "import difflib\nimport re\nimport time\nfrom contextlib import suppress\nfrom typing import Optional",
+   "extract": [
+    {
+     "from": "tools/voice_mode_transcript.py",
+     "names": [
+      "_voice_config",
+      "DEFAULT_VOICE_STOP_PHRASES",
+      "_load_voice_stop_phrases",
+      "is_voice_stop_phrase",
+      "DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD",
+      "MIN_FRAGMENT_LENGTH_FOR_ECHO",
+      "_normalize_for_echo_compare",
+      "is_tts_echo"
+     ]
+    },
+    {
+     "from": "tools/tts_streaming.py",
+     "names": [
+      "SPEECH_INTERRUPTED_NOTE",
+      "_INTERRUPT_TTL_S",
+      "_interrupted_at",
+      "mark_speech_interrupted",
+      "take_speech_interrupted"
+     ]
+    }
+   ]
   }
  ]
 }

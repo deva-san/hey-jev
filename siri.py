@@ -9,7 +9,7 @@ import subprocess
 import numpy as np, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
 import coder, decider, fast_intent, hermes_memory, history, installer, messaging, opencode, pocket, settings, telegram_bot, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
-from hermes_memory import curator, hermes_bits, skills
+from hermes_memory import curator, hermes_bits, skills, voice_bits
 from hermes_memory.threat_patterns import INVISIBLE_CHARS, first_threat_message
 from secrets_store import get_secret, missing_secrets
 from dictation import Dictation, START as DICTATE_START, USER_VOCAB, fix_vocab, read_vocab, save_vocab
@@ -229,11 +229,13 @@ def find_name(text):
     return None
 
 
-def route(text, kind, open_mic=None):
+def route(text, kind, open_mic=None, strict=False):
     """What a phrase is for, kind as in speech.Listener. None: not for her. "wake": just her name, the request comes
     next. Else (text, words, gate): words is the request without her name, gate lets her decide it wasn't for her:
     True just after she answered, "cold" for anything else said without her name, with Settings > Answer without
-    her name on (open_mic, by default from Settings)."""
+    her name on (open_mic, by default from Settings). strict: a follow_up said over her, or after an answer with nothing
+    to carry on from, counts as one only if it starts the way people carry on ("okay, now ...") or answers her
+    question; otherwise it's taken as said without her name."""
     if BARE_DO.fullmatch(text):
         return "wake"
     found = find_name(text)
@@ -242,6 +244,8 @@ def route(text, kind, open_mic=None):
         return (text, words, not sure) if words else "wake"
     if not text.strip(" .,!?"):
         return None
+    if kind == "follow_up" and strict and not (CARRY_ON.match(words_of(text)) or answering()):
+        kind = "other"  # not carrying on, nor answering her: as if said without her name
     if kind == "other":
         # Alfred's call-aware idea, on Windows: almost everything you say on a call is for the other person. The
         # name was checked above, so "Jev, mute" and "Jarvis, open Notepad" still work.
@@ -1781,6 +1785,7 @@ class LiveSay:
                     break
                 line, voice = item
                 print(f"  say: {line}  (as it's written)")
+                HER_SAID.append((time.time(), line))
                 emit(self.notify, "Speaking", " ".join(self.said + [line]))
                 TURN_SPOKE.set()  # no "One moment" now
                 try:
@@ -1793,7 +1798,7 @@ class LiveSay:
                 self.said.append(line)
         finally:
             if own:
-                time.sleep(0.3)  # the last of her voice from the speakers
+                rec.tail()  # the last of her voice from the speakers
                 rec.paused = False
 
     def finish(self):
@@ -4161,6 +4166,46 @@ COMMAND = re.compile(r"\b(?:open|close|quit|play|pause|stop|resume|search|google
                      re.I)
 
 
+# What you say while she talks, or as she ends, is heard (Recorder.keeps): Windows' speech mode takes all of her
+# voice out of the mic on this laptop (measured: nothing left over its -83 dB floor, Nemotron wrote nothing), so the
+# mic no longer goes deaf for her lines, a median 3.7 s and up to 28 s a turn, and "okay, now open Notepad" said over
+# her last words isn't lost. It's decided once her turn is over, more strictly than after her answer: a TV talking
+# over her mustn't become a request.
+CARRY = 4.0  # seconds after an answer with nothing to carry on from (a chat, a heads-up) when "okay, now ..." counts
+YES_EARLY = 2.5  # seconds: a yes begun this long before she finished asking wasn't an answer to it
+ECHO_WORDS, ECHO_SURE = 6, 0.85  # her own words heard back: this many, this alike (Hermes' is_tts_echo)
+STOPS = ("stop", "stop it", "stop talking", "ok stop", "okay stop", "wait", "hold on", "enough", "be quiet", "shut up",
+         "never mind", "nevermind")
+# how a request said over her, or just after, starts when it's to her: not "and", "so", "then", a TV's lines start so
+CARRY_ON = re.compile(r"(?:ok|okay|yeah|yes|no|now|also|actually|instead|what about|how about|hey|jev) \w")
+NODS = {"ok", "okay", "mm", "mhm", "hmm", "right", "uh huh", "alright", "all right"}  # said along as she talks
+HER_SAID = collections.deque(maxlen=12)  # (when, line) she said out loud lately, for her own words heard back
+
+
+def words_of(t):
+    """Lower-case words only."""
+    return " ".join(re.findall(r"[a-z0-9']+", str(t).lower().replace("\u2019", "'")))
+
+
+def echo_of(t, within=90.0):
+    """True if t is her own voice heard back: long, and nearly word for word what she said in the last minute or so."""
+    t = words_of(t)
+    hers = " ".join(line for when, line in list(HER_SAID) if time.time() - when < within)
+    return len(t.split()) >= ECHO_WORDS and voice_bits.is_tts_echo(t, words_of(hers), threshold=ECHO_SURE)
+
+
+def stop_said(t):
+    """"Stop", "Jev, stop": the whole of it a stop phrase (Hermes' is_voice_stop_phrase)."""
+    found = find_name(t)
+    return voice_bits.is_voice_stop_phrase(words_of(found[1] if found else t), STOPS)
+
+
+def answering():
+    """True if she's waiting on an answer from you: a question asked out loud a moment ago."""
+    return (PENDING["plan"] is not None and time.time() < PENDING["until"] and PENDING["origin"] == "voice") \
+        or asked_last()
+
+
 def side_talk(t):
     """True for words that are only fillers, greetings or thanks: "Mm-hmm.", "Hello?", "Okay, okay.", "Thank you."."""
     words = re.findall(r"[a-z']+", t.lower())
@@ -4469,6 +4514,7 @@ def say(line, notify):
         return None
     print(f"  say: {line}")
     emit(notify, "Speaking", line)
+    HER_SAID.append((time.time(), line))
     rec = MIC[0]
     own = rec is not None and not rec.paused  # not already paused, by a heads-up or a timer
     if own:
@@ -4480,7 +4526,7 @@ def say(line, notify):
         return f"Her voice: {opencode.explain(str(exc))}"
     finally:
         if own:
-            time.sleep(0.3)  # the last of her voice from the speakers
+            rec.tail()  # the last of her voice from the speakers
             rec.paused = False
     print(f"  fish {'cached' if ms == 0 else f'talking after {ms}ms'}")
     return None
@@ -4550,6 +4596,11 @@ def tidy_skills():
 
 
 # --------------------------------------------------------------------------- Mic + push to talk
+# in the mic's queue among the audio, where she starts ("on") and stops ("off") a line, and where her turn is over
+# ("ask", with the window it asks for), while the mic keeps listening (Recorder.keeps)
+Mark = collections.namedtuple("Mark", "kind secs strict", defaults=(0.0, False))
+
+
 class Recorder:
     BLOCK = 512  # 32 ms at 16 kHz, the piece Silero VAD looks at, so a pause is noticed within 32 ms
 
@@ -4560,6 +4611,10 @@ class Recorder:
         self._level = [0.0, 0]  # loudness so far, summed over 100 ms for the popup's bars
         self.gen = 0  # goes up at every break in the audio, so the listener knows to start over
         self.echo_cancelled = False  # True when the mic doesn't hear what the PC plays, see _open_speech
+        self.category = None  # "speech" or "communications": the Windows mode the mic is open in, see _open_speech
+        self.heard_herself = False  # her own words came back through the mic: it goes deaf while she talks again
+        self._soft = False  # paused, but her lines are only marked in the audio, which keeps coming (keeps)
+        self.marked = False  # her lines were marked since her last turn ended: its end is marked too (ask)
         self.stream = self._open(mic)
         self.mic_lock = threading.Lock()
 
@@ -4569,14 +4624,46 @@ class Recorder:
 
     @paused.setter
     def paused(self, value):  # while she talks, so she doesn't hear her own reply
+        if self._soft or (value and self.keeps):  # the mic keeps listening: where her line starts and ends is marked
+            if value:  # _soft first going on and last going off, so _cb never drops a block between
+                self._soft = self.marked = True
+                self._paused = True
+            else:
+                self._paused = False
+                self._soft = False
+            self.blocks.put((self.gen, Mark("on" if value else "off")))
+            return
         self._paused = value
-        self.gen += 1
+        self.gen += 1  # the mic goes deaf: a break in the audio, the listener starts over after it
+
+    @property
+    def keeps(self):
+        """True if the mic keeps listening while she talks: in Windows' speech mode, which takes her voice out of it
+        (communications mode wasn't measured), until she's heard herself through it once."""
+        return self.category == "speech" and not self.heard_herself and settings.get("talk_over") is not False
+
+    @property
+    def marking(self):
+        """True if her turn's end is to be marked (ask): the mic keeps listening, or it did for a line of this turn,
+        whose start was marked: unmarked, everything said after would wait for it, and she'd be deaf."""
+        return self.keeps or self.marked
+
+    def ask(self, secs, strict):
+        """Her turn is over, here in the audio: what you say next counts without her name for secs, strictly if
+        strict (route). Only while the mic keeps listening; else the break she made does it, see listen_loop."""
+        self.marked = False
+        self.blocks.put((self.gen, Mark("ask", secs, strict)))
+
+    def tail(self):
+        """The last of her voice from the speakers, while the mic is deaf for it; listening, there's no need."""
+        if not self._soft:
+            time.sleep(0.3)
 
     def _open(self, mic):
         stream = self._open_speech(mic) if settings.get("echo_cancel") else None
         if stream:
             return stream
-        self.echo_cancelled = False
+        self.echo_cancelled, self.category = False, None
         if mic:
             try:  # by index, since Windows lists the same mic under several audio APIs and a name alone is ambiguous
                 device = win.input_device(mic)
@@ -4607,7 +4694,7 @@ class Recorder:
             except Exception as exc:
                 print(f"\n[mic: {category[14:].lower()} mode didn't open: {exc}]")
                 continue
-            self.echo_cancelled = True
+            self.echo_cancelled, self.category = True, category[14:].lower()
             print(f"\n[mic: {found[1]}, {category[14:].lower()} mode, so she hears you over what the PC plays]")
             return stream
         return None
@@ -4645,7 +4732,7 @@ class Recorder:
             self._level[:] = [0.0, 0]
         if self.on:  # right Alt is held, so this is a command, not something to listen for "Hey Jev" in
             self.frames.append(indata.copy())
-        elif (self.wake or self.dictating) and not self._paused:
+        elif (self.wake or self.dictating) and (not self._paused or self._soft):
             self.blocks.put((self.gen, block))
 
     def start(self):
@@ -4719,7 +4806,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     win.warm_start_apps()  # read the Start menu now, so the first "open" is quick
     late_timers = []  # timers that went off mid-dictation, announced once it stops
 
-    def run_turn(text, words, stt_ms, gate=False):
+    def run_turn(text, words, stt_ms, gate=False, carried=False):
         """One turn. The mic stays on while she thinks and acts, and only pauses while she talks (see say), so what
         you say meanwhile is heard once she's done, not lost."""
         result = False
@@ -4756,7 +4843,13 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 # doesn't hear it, or she'd take what it says for you
                 follow = result and result != "chat" and (result != "playing" or rec.echo_cancelled) and rec.wake \
                     and not rec.dictating
-                next_window[0] = window_ask[0] = FOLLOW_UP if follow else 0.0
+                if rec.marking:  # the mic kept listening: the window is marked where her turn ended in the audio
+                    # after a chat answer, "okay, now ..." for a moment (CARRY): never off one that was itself carried
+                    chat = result == "chat" and rec.wake and not rec.dictating and not carried
+                    next_window[0], window_ask[0] = 0.0, None
+                    rec.ask(FOLLOW_UP if follow else CARRY if chat else 0.0, not follow)
+                else:
+                    next_window[0] = window_ask[0] = FOLLOW_UP if follow else 0.0
                 if gate and result is False:  # someone else's conversation: the model sees it with what comes next
                     ROOM.append((time.time(), str(words)))
                 show_sentence()  # "learn my voice": the first sentence to read, once she's said how it goes
@@ -4862,22 +4955,105 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             enrol_turn(audio, text)
             return
         last_audio[0] = audio  # for keep_missed
+        at[0] = getattr(listener, "onset", None)  # where in the audio it began
         if held[0]:  # the rest of a phrase that a pause cut off
             first, first_kind, first_ms, _ = held[0]
             held[0] = None
+            at[0] = held_at[0]
             text = speech.heard(f"{first} {text}".strip(), min(getattr(first, "sure", 1.0), getattr(text, "sure", 1.0)))
             ms, kind = first_ms + ms, kind if first_kind == "other" else first_kind
         if unfinished(text) and isinstance(route(text, kind), tuple):  # "... we need to": wait for the rest
-            held[0] = (text, kind, ms, time.time() + HOLD)
+            held[0], held_at[0] = (text, kind, ms, time.time() + HOLD), at[0]
             print(f"\n  (waiting for the rest: {text!r})")
             emit(notify, "Listening", text + " \u2026")
             return
         act_on(text, kind, ms)
 
+    def where(begun):
+        """Where a phrase that began at begun (Listener.pos) is, against her last turn: "before" it, while she was
+        "thinking", "talking" (over her, still going), "over" her (her turn is over), in the "gap" after her last
+        word before her turn was over, or "after" it."""
+        h = her
+        first = h["asked"] if h["asked"] is not None else h["start"]
+        if begun is None or first is None or begun < first:
+            return "before"
+        if h["start"] is None or begun < h["start"]:
+            return "thinking" if h["done"] is None or begun < h["done"] else "after"
+        if h["done"] is None:
+            return "talking"
+        if begun < h["done"]:
+            return "over" if begun < h["spoke"] else "gap"
+        return "after"
+
+    def her_mark(m):
+        """A mark in the audio: she starts or stops a line, or her turn is over (see Recorder.ask)."""
+        pos = getattr(listener, "pos", 0)
+        if m.kind == "on":
+            if her["start"] is None or her["done"] is not None:  # her first line of a turn
+                if her["done"] is not None:
+                    her["asked"] = None  # a heads-up or a timer, not a turn of yours
+                her.update(start=pos, spoke=pos, done=None)
+        elif m.kind == "off":
+            her["spoke"] = pos
+        else:
+            if her["done"] is None:
+                her["done"] = pos
+                if her["start"] is None and her["asked"] is None:
+                    her["asked"] = pos
+            her["strict"] = m.strict
+            if listener.state() != "armed":  # "Hey Jev" said over her keeps the request it's waiting for
+                listener.open(m.secs)
+            window_from[0], window_strict[0] = pos, m.strict
+            # what was said over her, now she's done: all placed against this turn before any runs one of its own
+            jobs = [(job, (where(job[3]), her["spoke"], her["strict"])) for job in later]
+            later.clear()
+            for job, placed in jobs:
+                at[0], placed_as[0] = job[3], placed
+                act_on(*job[:3])
+
+    def over_her(text, begun, spoke):
+        """Why to let go of a phrase begun over her (her last word ended at spoke), or None."""
+        if echo_of(text):
+            if not rec.heard_herself:
+                rec.heard_herself = True  # speech mode isn't taking her voice out here: deaf while she talks again
+                print("\n[mic: she heard herself, so it pauses while she talks again]")
+            return "her own words"
+        plan = PENDING["plan"] if time.time() < PENDING["until"] and PENDING["origin"] == "voice" else None
+        if stop_said(text) and not plan:
+            return "a stop"  # she can't be stopped mid-line yet; once she's done it would pause the music
+        if plan and said_yes(text, plan):
+            if begun < spoke - YES_EARLY * SAMPLE_RATE:
+                return "a yes before she'd asked"
+            if any(s.get("do") in STRICT_YES for s in plan.get("steps") or []) and words_of(text) in NODS:
+                return "a nod, not a clear yes"  # "okay" as she reads it back; "yes" or "okay, send it" is one
+        return None
+
     def act_on(text, kind, ms):
-        what = route(text, kind)
+        begun, placed = at[0], placed_as[0]
+        placed_as[0] = None
+        zone, spoke, her_strict = placed or ((where(begun), her["spoke"], her["strict"])
+                                             if rec.keeps or her["start"] is not None else ("before", None, False))
+        if zone == "talking":  # begun over her, still talking: decided once her turn is over
+            later.append((text, kind, ms, begun))
+            return
+        strict = False
+        if zone == "thinking" and kind == "follow_up":
+            kind = "other"  # said while she thought: not carrying on from her answer, which hadn't come
+        elif zone in ("over", "gap") and kind != "armed":
+            kind, strict = "follow_up", zone == "over" or her_strict
+        elif zone in ("after", "before") and kind == "follow_up" and begun is not None and window_from[0] is not None \
+                and begun >= window_from[0]:
+            strict = window_strict[0]
+        what = route(text, kind, strict=strict)
         was_named, named[0] = named[0], False
-        if ears.live and kind in ("other", "follow_up") and GREETING_ONLY.fullmatch(text) \
+        if zone in ("over", "gap") and (isinstance(what, tuple) or echo_of(text)):
+            why = over_her(what[1] if isinstance(what, tuple) else str(text), begun, spoke)
+            if why:
+                print(f"\n  (over her, {why}: {str(text)[:80]!r})")
+                if was_named:
+                    emit(notify, "Ready", None)
+                return
+        if ears.live and kind in ("other", "follow_up") and GREETING_ONLY.fullmatch(text) and zone != "over" \
                 and not (settings.get("call_aware") and win.call_apps()):
             what = "maybe"  # "Hello Jev" with her name lost, see GREETING_ONLY
         # only your voice: too short to check for a bare name, the command after it is checked (voiceid.py)
@@ -4896,6 +5072,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 emit(notify, "Ready", "That didn’t sound like you")
             return
         chance, quiet = listener.ended  # why the turn ended there: Smart Turn's chance, and how much quiet
+        if zone in ("over", "gap"):
+            print(f"\n  (said {'over her' if zone == 'over' else 'as she finished'})", end="")
         late = rec.blocks.qsize() * Recorder.BLOCK / SAMPLE_RATE  # mic audio still waiting: how far behind she is
         print(f"\n  ({kind}: {text!r}  stt {ms}ms, ended after {quiet:.2f}s quiet"
               + (f", {chance:.0%} finished" if chance is not None else "")
@@ -4907,10 +5085,12 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 if clip:
                     print(f"  (kept as {os.path.basename(clip)})")
             listener.open(MAYBE_FOR)
+            window_from[0], window_strict[0] = None, False  # this window is the greeting's: "open notepad" counts
             maybe[0] = True
             threading.Thread(target=win.chime, args=("wake",), daemon=True).start()
         elif what == "wake":  # just her name: a chime, and the next phrase is for her
             listener.arm(WAKE_WINDOW)
+            window_from[0], window_strict[0] = None, False
             threading.Thread(target=win.chime, args=("wake",), daemon=True).start()
         else:
             waiting = (PENDING["plan"] is not None and time.time() < PENDING["until"]) or asked_last()
@@ -4924,7 +5104,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                     emit(notify, "Ready", None)
                 return
             before = rec.blocks.qsize()
-            result = run_turn(what[0], what[1], ms, gate=what[2])
+            if rec.keeps:  # a turn of yours: what's said from here till her first word is said while she thinks
+                her.update(asked=getattr(listener, "pos", 0), start=None, spoke=None, done=None)
+            result = run_turn(what[0], what[1], ms, gate=what[2], carried=strict and what[2] is True)
             if judged:  # what it said and what happened, to train it again later
                 decider.log({"when": round(time.time()), "said": str(what[1]), "kind": str(what[2]),
                              "for_me": round(judged[0], 3), "verdict": judged[1], "mode": decider.mode(),
@@ -4960,6 +5142,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             emit(notify, "Dictating", latest(words))
             return
         found = find_name(words)
+        if kind == "follow_up" and window_strict[0] and not CARRY_ON.match(words_of(words)):
+            kind = "other"  # after a chat answer or a heads-up: a TV's words don't bring the popup up
         # with Answer without her name on, anything that could be a request shows as you say it
         if kind == "other" and not found and not (settings.get("no_name") and could_be_request(words)):
             return
@@ -4968,6 +5152,14 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         emit(notify, "Listening", latest(rest) + " \u2026" if rest else "Go ahead\u2026")
 
     held = [None]  # (text, kind, ms, until): a phrase cut off mid-sentence, waiting for the rest
+    at, held_at = [None], [None]  # where the phrase being acted on began, and the held one (Listener.pos)
+    placed_as = [None]  # (where, her last word, strict) of a phrase begun over her, placed once her turn was over
+    # her last turn in the audio, in Listener.pos: when you finished asking, her first word, the end of her last line,
+    # and where her turn was over; strict: the window it asked for is (route). Only while the mic keeps listening
+    her = {"asked": None, "start": None, "spoke": None, "done": None, "strict": False}
+    later = []  # phrases begun over her, decided once her turn is over
+    window_from, window_strict = [None], [False]  # where the window her last turn asked for opened, and how strict
+    again = collections.deque()  # (gen, block) to go through again, before the mic's queue: see the catch-up
     named = [False]  # the popup came up for her name while you were still talking
     maybe = [False]  # listening after a bare "Hello", in case it was her name that got lost (GREETING_ONLY)
     last_audio = [None]  # the latest turn's audio, kept if it was a bare greeting
@@ -4986,6 +5178,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     def show_listening():
         """Listening after a bare "Hey Jev" or "Hello", Still listening during a follow-up window, Ready after."""
         now = listener.state()
+        if now == "window" and window_strict[0] and not maybe[0]:
+            now = None  # after a chat answer or a heads-up: only "okay, now ..." counts, so nothing shows for it
         if now is None:
             maybe[0] = False
         elif now == "window" and maybe[0]:
@@ -5000,10 +5194,15 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             emit(notify, "Ready", None if shown[0] == "window" else ready_text(rec.wake))
         shown[0] = now
 
+    def forget_her():
+        her.update(asked=None, start=None, spoke=None, done=None, strict=False)
+        later.clear()
+        window_from[0], window_strict[0] = None, False
+
     def listen_loop():
-        gen = None
+        gen, dictating = None, [False]
         while True:
-            g, block = rec.blocks.get()
+            g, block = again.popleft() if again else rec.blocks.get()
             # what was said before she talked is heard too: dropping it lost what you said while she thought, nearly
             # every turn, as her reply paused the mic. The listener starts over at the break, see below
             if not (rec.wake or rec.dictating):
@@ -5014,6 +5213,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                     calls[0] = now_calls
                     print(f"\n[call: {', '.join(now_calls) if now_calls else 'ended'}; "
                           f"{'say Jev or Jarvis' if now_calls else 'unnamed requests count again'}]")
+                if g != gen or rec.dictating != dictating[0]:
+                    dictating[0] = rec.dictating  # Listener.feed starts over at a dictation's start or end
+                    forget_her()  # a real break: the listener starts over, and where her turn was with it
                 if g != gen:
                     gen = g
                     # a break in the audio. Her answer: a turn in a pause counts as finished. Not right Alt or a mode
@@ -5029,6 +5231,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 # a turn ended without her talking, so no reset: open or close it here. If she talked, what's still
                 # waiting from before that was said before her answer, and with the window opened on it "pass the
                 # salt" went to her as a follow-up: the window opens at the break instead
+                if isinstance(block, Mark):  # where she spoke, in the audio that kept coming
+                    allow[0] = max(0, allow[0] - 1)
+                    her_mark(block)
+                    continue
                 if window_ask[0] is not None and g == rec.gen:
                     listener.open(window_ask[0])
                     window_ask[0] = None
@@ -5038,26 +5244,38 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 late = max(0, rec.blocks.qsize() - allow[0]) * Recorder.BLOCK / SAMPLE_RATE
                 # a dictation keeps every word, however late
                 if (late > LAG or waiting > CATCH_UP) and not rec.dictating:
-                    skipped = 0
+                    backlog = list(again)
+                    again.clear()
                     try:
                         while True:
-                            rec.blocks.get_nowait()
-                            skipped += 1
+                            backlog.append(rec.blocks.get_nowait())
                     except queue.Empty:
                         pass
                     held[0] = None
                     allow[0] = 0
                     listener.reset(0.0)
-                    gone = skipped * Recorder.BLOCK / SAMPLE_RATE
-                    print(f"\n  (listening was {waiting:.1f}s behind, skipped {gone:.1f}s to now, "
-                          f"{time.strftime('%H:%M:%S')})")
+                    forget_her()
+                    # what's said over her is kept, from her first line on: a long look-up and a long answer went over
+                    # CATCH_UP, and "okay, now ..." said over its end was thrown away with the rest
+                    first = next((i for i, (_, b) in enumerate(backlog) if isinstance(b, Mark) and b.kind == "on"), None)
+                    kept = backlog[first:] if rec.keeps and first is not None else []
+                    most = int(CATCH_UP * SAMPLE_RATE / Recorder.BLOCK)
+                    audio = [i for i, (_, b) in enumerate(kept) if not isinstance(b, Mark)]
+                    if len(audio) > most:  # only the newest of it, from inside a line of hers
+                        kept = [(g, Mark("on"))] + kept[audio[-most]:]
+                    again.extend(kept)
+                    allow[0] = len(kept)
+                    gone = sum(not isinstance(b, Mark) for _, b in backlog[:len(backlog) - len(kept)])
+                    print(f"\n  (listening was {waiting:.1f}s behind, skipped {gone * Recorder.BLOCK / SAMPLE_RATE:.1f}s"
+                          + (f", kept {len(audio[-most:]) * Recorder.BLOCK / SAMPLE_RATE:.1f}s from her first line"
+                             if kept else " to now") + f", {time.strftime('%H:%M:%S')})")
                     continue
                 listener.feed(block, dictating=rec.dictating)
                 # the rest never came. Not while it's still coming: a pause in it let "Hey Jev, search" go alone, and
                 # her reply to that threw "for flights to Delhi next Friday" away
                 if held[0] and time.time() > held[0][3] and not listener.talking and listener.session is None:
                     text, kind, ms, _ = held[0]
-                    held[0] = None
+                    held[0], at[0] = None, held_at[0]
                     act_on(text, kind, ms)
                 elif (not ears.live and not rec.dictating and listener.talking_for() >= 1.2
                       and listener.speech_start != checked[0] and listener.state() is None and not busy.locked()
@@ -5199,8 +5417,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 win.chime("timer")
                 say(timer_done_line(t), notify)
             finally:
-                time.sleep(0.3)
+                rec.tail()
                 rec.paused = False
+                if rec.marking and rec.wake:
+                    rec.ask(CARRY, True)  # "okay, set another one" straight after
         if rec.dictating:
             emit(notify, "Dictating", "Say \u201cstop transcribing\u201d when you\u2019re done")
         else:
@@ -5223,16 +5443,21 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             except Exception as exc:
                 print(f"  {said_for} failed: {exc!r}")
             finally:
-                time.sleep(0.3)
+                rec.tail()
                 # carry on without the name only if she asked something ("Anything you'd like me to do?"): after "Your C
-                # drive is nearly full" she answered "I'm off to home in Derby", said to someone else
-                next_window[0] = FOLLOW_UP if rec.wake and line.rstrip().endswith("?") else 0.0
+                # drive is nearly full" she answered "I'm off to home in Derby", said to someone else. Only "okay, copy
+                # that link" and the like after one that isn't a question (CARRY)
+                asks = rec.wake and line.rstrip().endswith("?")
+                marking = rec.marking and rec.wake
+                next_window[0] = FOLLOW_UP if asks and not marking else 0.0
                 rec.paused = False
+                if marking:
+                    rec.ask(FOLLOW_UP if asks else CARRY, not asks)
         # the popup goes once she's said it. In Always listening nothing else put it away: a message's heads-up stayed
         # up until the next turn. With a follow-up window open, show_listening shows that, then puts it away
         if not rec.wake:
             emit(notify, "Ready", ready_text(rec.wake))
-        elif not next_window[0]:
+        elif not asks:
             emit(notify, "Ready", None)
         return True
 

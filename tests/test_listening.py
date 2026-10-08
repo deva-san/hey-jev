@@ -391,7 +391,7 @@ class CatchUp(Case):
         a = self.assistant()
         ran = []
 
-        def run_turn(text, words, ms, gate=False):  # she thinks for secs, and the mic keeps going meanwhile
+        def run_turn(text, words, ms, gate=False, **kw):  # she thinks for secs, and the mic keeps going meanwhile
             ran.append(words)
             a.queue(blocks(secs, 0.0))
         a.put("run_turn", run_turn)
@@ -538,6 +538,153 @@ class WhileSheThinks(Case):
             a.speak(blocks(0.5, 0.0) + blocks(2.0, 0.9) + blocks(1.5, 0.0))
             a.listen()
         self.assertEqual(handled, [(self.FIRST, False), (self.SECOND, False)])
+
+
+# --------------------------------------------------------------------------- said over her (speech mode)
+class TalkOver(Case):
+    """In Windows' speech mode the mic keeps listening while she talks (Recorder.keeps): what you say over her last
+    words, or as she finishes, is heard whole and acted on once her turn is over, more strictly than after an answer,
+    so a TV talking over her isn't taken for a request."""
+    FIRST = "Hey Jev, what's the weather?"
+    REPLY = "It's sunny and thirty one degrees in Chennai today."
+
+    def turns(self, over=(), after=(), words="", result="chat", speech_mode=True, no_name=True, before=()):
+        """'Hey Jev, what's the weather?', and she answers REPLY: the mic hears over while she says it (after
+        before, while she thinks), then after once her turn is over. The second phrase (0.8 in its audio) is written
+        as words, if at least 1.2 s of it was heard, else only its end, "pad". What reached handle(), as (text, gate)."""
+        def write(audio):
+            said = np.sum(np.isclose(audio, 0.8))
+            return self.FIRST if not said else words if said >= 1.2 * RATE else "pad"
+        a = self.assistant(ears=FakeEars(write=write))
+        a.rec.category = "speech" if speech_mode else None
+        handled = []
+
+        def speak(line):  # what the mic hears while she says it: kept in speech mode, dropped on a raw mic
+            for block in over:
+                a.rec._cb(block.reshape(-1, 1))
+            return 0
+
+        def handle(text, w, stt_ms=None, notify=None, gate=False):
+            handled.append((str(text), gate))
+            if len(handled) == 1:
+                a.queue(before)
+                siri.say(self.REPLY, None)
+                a.then(lambda: a.speak(after))  # as the mic hands it over, once her turn is over
+                return result
+            return True
+        with mock.patch.object(siri, "handle", handle), mock.patch.object(siri, "speak", speak),                 mock.patch.dict(siri.settings._load(), {"no_name": no_name}):
+            a.speak(blocks(0.5, 0.0) + blocks(2.0, 0.9) + blocks(0.52, 0.0))  # it ends with the last of this
+            a.listen()
+        self.a = a
+        return handled[1:]
+
+    OVER_END = blocks(2.0, 0.0) + blocks(1.0, 0.8)  # the last second of her line
+    AFTER = blocks(0.5, 0.8) + blocks(1.5, 0.0)  # and half a second after she's done
+
+    def test_a_request_said_over_her_last_words_is_heard_whole(self):
+        self.assertEqual(self.turns(self.OVER_END, self.AFTER, "okay now open notepad"),
+                         [("okay now open notepad", True)])
+        self.assertIn("(said over her)", self.a.out.getvalue())
+
+    def test_with_the_mic_deaf_for_her_only_its_end_was_heard(self):
+        self.assertNotIn("okay now open notepad", str(self.turns(self.OVER_END, self.AFTER, "okay now open notepad",
+                                                                 speech_mode=False)))
+
+    def test_a_plain_request_over_her_still_gets_is_it_for_her(self):
+        self.assertEqual(self.turns(self.OVER_END, self.AFTER, "open notepad"), [("open notepad", "cold")])
+
+    def test_a_tv_talking_over_her_isnt_a_request(self):
+        self.assertEqual(self.turns(self.OVER_END, self.AFTER, "and then we went to the market together"), [])
+
+    def test_a_stop_over_her_isnt_acted_on_after(self):
+        self.assertEqual(self.turns(self.OVER_END, self.AFTER, "Stop."), [])
+        self.assertIn("over her, a stop", self.a.out.getvalue())
+
+    def test_her_own_words_heard_back_make_the_mic_deaf_for_her_again(self):
+        self.assertEqual(self.turns(self.OVER_END, self.AFTER, "sunny and thirty one degrees in Chennai today"), [])
+        self.assertIn("her own words", self.a.out.getvalue())
+        self.assertTrue(self.a.rec.heard_herself)
+        self.assertFalse(self.a.rec.keeps)
+
+    def test_after_a_chat_answer_okay_now_carries_on_for_a_moment(self):
+        after = blocks(1.0, 0.0) + blocks(1.5, 0.8) + blocks(1.5, 0.0)
+        self.assertEqual(self.turns(after=after, words="okay send a WhatsApp to Ravi"),
+                         [("okay send a WhatsApp to Ravi", True)])
+        self.assertEqual(self.turns(after=after, words="and then we went to the market together"), [])
+        late = blocks(5.0, 0.0) + blocks(1.5, 0.8) + blocks(1.5, 0.0)
+        self.assertEqual(self.turns(after=late, words="okay send a WhatsApp to Ravi"),
+                         [("okay send a WhatsApp to Ravi", "cold")])
+
+    def test_after_a_real_answer_the_window_is_as_before(self):
+        after = blocks(1.0, 0.0) + blocks(1.5, 0.8) + blocks(1.5, 0.0)
+        self.assertEqual(self.turns(after=after, words="and the day after", result=True),
+                         [("and the day after", True)])
+
+    def test_what_the_room_says_while_she_thinks_isnt_a_follow_up(self):
+        before = blocks(0.5, 0.0) + blocks(1.5, 0.8) + blocks(1.0, 0.0)
+        self.assertEqual(self.turns(before=before, words="pass the salt please"), [])
+
+    def test_a_long_turn_over_catch_up_keeps_what_was_said_over_her(self):
+        before = blocks(siri.CATCH_UP - 5, 0.0)  # a long look-up
+        over = blocks(9.0, 0.0) + blocks(1.0, 0.8)  # and a long answer
+        self.assertEqual(self.turns(over, self.AFTER, "okay now open notepad", before=before),
+                         [("okay now open notepad", True)])
+        self.assertIn("from her first line", self.a.out.getvalue())
+
+    def asked_to_send(self, words, over, after=AFTER):
+        """She reads back a message and asks "Send it?" (waiting for the yes); words are said over her."""
+        siri.PENDING.update(plan={"steps": [{"do": "message_send"}], "say": ""}, until=time.time() + 60,
+                            soon=time.time() + 60, origin="voice", id="x")
+        self.addCleanup(siri.PENDING.update, plan=None, until=0.0, origin="voice")
+        return self.turns(over, after, words)
+
+    def test_a_clear_yes_over_her_question_counts_a_nod_doesnt(self):
+        self.assertEqual(self.asked_to_send("yes send it", self.OVER_END), [("yes send it", True)])
+        self.assertEqual(self.asked_to_send("yes", self.OVER_END), [("yes", True)])
+        self.assertEqual(self.asked_to_send("okay", self.OVER_END), [])
+        self.assertIn("a nod", self.a.out.getvalue())
+
+    def test_a_yes_long_before_she_asked_isnt_one(self):
+        early = blocks(1.0, 0.0) + blocks(1.3, 0.8) + blocks(4.0, 0.0)  # well before the end of a long read-back
+        self.assertEqual(self.asked_to_send("yes send it", early, after=()), [])
+        self.assertIn("a yes before she'd asked", self.a.out.getvalue())
+
+    def test_a_turn_whose_lines_were_marked_is_ended_even_if_the_mic_stopped_keeping(self):
+        a = self.assistant()
+        a.rec.category = "speech"
+        a.rec.paused = True
+        a.rec.heard_herself = True  # her own words came back meanwhile
+        a.rec.paused = False
+        self.assertFalse(a.rec.keeps)
+        self.assertTrue(a.rec.marking)  # so tell/run_turn still mark where it ended, or she'd wait for it for ever
+        a.rec.ask(0.0, True)
+        self.assertFalse(a.rec.marking)
+
+    def test_her_own_words_in_the_gap_after_a_filler_are_caught_too(self):
+        siri.HER_SAID.append((time.time(), self.REPLY))
+        a = self.assistant(ears=FakeEars(write=lambda audio: "sunny and thirty one degrees in Chennai today"
+                                         if np.any(np.isclose(audio, 0.8)) else ""))
+        a.rec.category = "speech"
+        handled = []
+        Mark = siri.Mark
+        a.speak([Mark("on")] + blocks(0.5, 0.0) + [Mark("off")] + blocks(1.0, 0.0) + blocks(2.0, 0.8)
+                + blocks(0.2, 0.0) + [Mark("ask", siri.FOLLOW_UP, False)] + blocks(1.5, 0.0))
+        with mock.patch.object(siri, "handle", lambda text, *a, **k: handled.append(str(text))):
+            a.listen()
+        self.assertEqual(handled, [])
+        self.assertTrue(a.rec.heard_herself)
+
+    def test_her_lines_are_marked_not_breaks(self):
+        a = self.assistant()
+        a.rec.category = "speech"
+        gen = a.rec.gen
+        a.rec.paused = True
+        self.assertTrue(a.rec._soft)
+        a.rec._cb(np.ones((BLOCK, 1), np.float32))  # heard while she talks
+        a.rec.paused = False
+        items = [a.rec.blocks.get_nowait()[1] for _ in range(a.rec.blocks.qsize())]
+        self.assertEqual([getattr(b, "kind", "audio") for b in items], ["on", "audio", "off"])
+        self.assertEqual(a.rec.gen, gen)
 
 
 # --------------------------------------------------------------------------- A7: the rest of a held phrase

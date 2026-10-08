@@ -14,6 +14,7 @@ DEFAULTS = {
     # speech to text on this PC: parakeet, nemotron (writes as you talk, but lost "Hey Jev" in Hari's voice), or whisper
     "stt_engine": "parakeet",
     "echo_cancel": True,  # the mic in Windows' speech mode, so she hears you over videos and music
+    "talk_over": True,  # in speech mode the mic stays on while she talks, so what you say over her is heard
     "popup": True,  # the pill at the bottom of the screen while she listens, thinks and talks
     "name": "",  # what she calls you
     "welcome": True,  # hello when you sign in or come back to the laptop, and what she can do
