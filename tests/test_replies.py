@@ -181,6 +181,36 @@ class Telling(unittest.TestCase):
         siri.REPLYING["voice"]["until"] = time.time() - 1
         self.assertIsNone(self.stage("tell him ok"))
 
+    def test_him_and_her_are_who_replied_never_a_name_to_look_for(self):
+        """After "Buntyyy replied", a photo from the phone and "send this to him": "him" was typed into WhatsApp's
+        search, Himanshu's chat opened and marked read, and she offered him. "Message her on WhatsApp: ..." the same."""
+        opened, searched = [], []
+
+        def prepare(app, contact, *rest):
+            opened.append((app, contact))
+            if contact != "buntyyy":  # nobody she knows by that name
+                raise messaging.NeedContact("I don't know them on WhatsApp yet.")
+            raise RuntimeError("the test stops here")
+        with mock.patch.object(siri.messaging, "prepare", prepare), \
+                mock.patch.object(siri.messaging, "prepare_files", prepare), \
+                mock.patch.object(siri.messaging, "whatsapp_people", lambda name, **kw: searched.append(name) or []), \
+                mock.patch.object(siri.os.path, "isfile", lambda p: True):
+            to, chat = siri.REPLY_TO.set([]), siri.PHONE_CHAT.set(7)
+            siri.PHONE_FILES[7] = (["C:/x/photo.jpg"], time.time())
+            try:
+                said = siri.direct_share("send this to him")["say"]  # nobody's replied yet
+                siri.told_reply(reply("Buntyyy", "ok"), "phone")
+                siri.direct_share("send this to him")
+                siri.direct_message("message her on WhatsApp: ok see you")
+            finally:
+                siri.REPLY_TO.reset(to)
+                siri.PHONE_CHAT.reset(chat)
+                siri.PHONE_FILES.clear()
+                siri.ASKED.update(alias="", app="", text="", until=0.0, files=None, back=None)
+        self.assertIn("Who do you mean?", said)
+        self.assertEqual(opened, [("whatsapp", "buntyyy"), ("WhatsApp", "buntyyy")])
+        self.assertEqual(searched, [])
+
 
 class Strangers(unittest.TestCase):
     """On Telegram, and the apps she types her way into, a chat's own name can't be read, so she follows who you

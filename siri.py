@@ -873,10 +873,29 @@ def _digits_said(text):
     return "".join(out)
 
 
+PRONOUN = re.compile(r"\s*(?:him|her|them)\s*", re.I)
+
+
+def meant(app, contact):
+    """(app, contact) with "him", "her" or "them" as whoever she told you replied last, here or on the phone; None
+    if nobody has. Never the word itself: "send this to him" typed "him" into WhatsApp's search and offered Himanshu,
+    the chats it opened marked read."""
+    if not PRONOUN.fullmatch(str(contact or "")):
+        return app, contact
+    who = REPLYING[origin()]
+    if time.time() > who["until"] or not who["contact"]:
+        return None
+    return app or who["app"], who["contact"]
+
+
 def stage_message(app, contact, text, back=None):
     """Open the chat with the text typed in and ask before sending. Returns the plan she should run now.
 
     Apps with a link of their own take it; the rest get walked through their own search box."""
+    to = meant(app, contact)
+    if to is None:
+        return make_plan(say="Who do you mean? Ask me again with their name.")
+    app, contact = to
     key = messaging.app_key(app)
     if (STAGED["ready"] or {}).get("files"):
         drop_staged()  # files waiting before aren't left in WhatsApp's preview
@@ -957,6 +976,10 @@ def direct_install(words):
 
 def stage_files(app, contact, paths, caption="", back=None):
     """Put the files in the chat's preview and ask before sending, as stage_message does for words."""
+    to = meant(app, contact)
+    if to is None:
+        return make_plan(say="Who do you mean? Ask me again with their name.")
+    app, contact = to
     if (STAGED["ready"] or {}).get("files"):
         drop_staged()
     back = window_to_put_back(back)
