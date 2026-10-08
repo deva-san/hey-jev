@@ -73,28 +73,108 @@ class Levels(unittest.TestCase):
                 self.assertTrue(voiceid.judge(p, None, 0.5, False, "other")[0])
 
 
+def logged(p, yours, room, level="strict"):
+    """Scores in the log as after_turn writes them while learning: turns she acted on, and phrases she let go. Also
+    "checked", as the log had them before, so the old way of setting the levels reads them too."""
+    for who, scores in (("you", yours), ("room", room)):
+        for s in scores:
+            p.log({"score": float(s), "level": level, "secs": 2.0, "checked": True, "who": who})
+
+
 class Learning(unittest.TestCase):
-    def test_after_enough_named_turns_she_sets_the_levels_from_yours_and_switches_on(self):
+    def test_after_enough_of_your_turns_she_sets_the_levels_from_them_and_switches_on(self):
         p = profile()
         with mock.patch.dict(siri.settings._load(), {"voice_id": "learning"}):
+            for s in np.linspace(0.06, 0.39, voiceid.CALIBRATE_AFTER):  # let go: Windows' voices scored this on 7 Oct
+                self.assertIsNone(voiceid.after_turn(p, SOMEONE, float(s), 2.0, False, "other", True, False))
             scores = np.linspace(0.55, 0.9, voiceid.CALIBRATE_AFTER)
-            switched = [voiceid.after_turn(p, YOU, float(s), 2.0, True, "other", True) for s in scores]
-            self.assertEqual(switched, [False] * (len(scores) - 1) + [True])
+            switched = [voiceid.after_turn(p, YOU, float(s), 2.0, False, "other", True, True) for s in scores]
+            self.assertEqual(switched, [None] * (len(scores) - 1) + ["on"])
             self.assertEqual(siri.settings.get("voice_id"), "on")
         self.assertTrue(p.calibrated)
-        lo, hi = voiceid.LEVELS["named"]
-        self.assertTrue(lo <= p.named <= hi and p.named < 0.55)
+        lo, hi = voiceid.LEVELS["strict"]
+        self.assertTrue(lo <= p.strict <= hi and p.strict < 0.55)
         self.assertGreater(p.strict, p.named)
         again = voiceid.Profile(p.path)  # kept on disk
         self.assertEqual((again.named, again.strict, again.calibrated), (p.named, p.strict, True))
 
-    def test_room_talk_and_short_turns_dont_set_the_levels(self):
+    def test_room_talk_short_turns_and_chat_arent_taken_for_yours(self):
         p = profile()
         with mock.patch.dict(siri.settings._load(), {"voice_id": "learning"}):
             for _ in range(voiceid.CALIBRATE_AFTER):
-                voiceid.after_turn(p, SOMEONE, 0.1, 2.0, False, "other", True)
-                voiceid.after_turn(p, YOU, 0.9, 0.5, True, "other", True)
+                voiceid.after_turn(p, SOMEONE, 0.1, 2.0, False, "other", True, False)  # let go
+                voiceid.after_turn(p, YOU, 0.9, 0.5, True, "other", True, True)  # under a second: the words match
+                voiceid.after_turn(p, YOU, 0.9, 2.0, False, "other", True, "chat")  # just talked: maybe the TV
         self.assertFalse(p.calibrated)
+        self.assertEqual({e["who"] for e in p.scores()}, {"room"})
+
+    def test_the_level_without_her_name_is_set_from_your_turns_without_it(self):
+        """On 8 Oct your "A turn of nightlight" scored 0.41, under the starting 0.50 without her name, and the levels
+        were only ever set from turns with her name, which you hardly say."""
+        p = profile()
+        logged(p, np.linspace(0.42, 0.8, 40), np.linspace(0.06, 0.39, 40))  # yours, and Windows' voices on 7 Oct
+        self.assertEqual(p.calibrate(), "on")
+        with mock.patch.dict(siri.settings._load(), {"voice_id": "on"}):
+            self.assertTrue(voiceid.judge(p, 0.41, 2.0, False, "follow_up")[0])
+            self.assertFalse(voiceid.judge(p, 0.39, 2.0, False, "other")[0])
+
+    def test_a_few_turns_unlike_yours_dont_drag_the_levels_down(self):
+        """While learning everyone counts, so a guest's or the TV's turns can be acted on and taken for yours: three
+        low ones out of 30 put the level with her name at its 0.30 floor, where Windows' voices (up to 0.39) pass."""
+        p = profile()
+        logged(p, [0.1, 0.12, 0.15, *np.linspace(0.6, 0.85, 30)], np.linspace(0.06, 0.39, 30), level="named")
+        p.calibrate()
+        self.assertTrue(p.calibrated)
+        self.assertGreater(p.named, 0.39)
+        self.assertGreater(p.strict, 0.55)
+
+    def test_she_switches_on_only_if_she_can_tell_you_apart_and_says_so_once(self):
+        """On 8 Oct a video she let go scored 0.70 to 0.84 against your voice, and your own commands 0.33 to 0.54:
+        switched on then, she'd have turned you away and answered the video."""
+        p = profile()
+        said = []
+        with mock.patch.dict(siri.settings._load(), {"voice_id": "learning"}):
+            for i in range(voiceid.CALIBRATE_AFTER + 10):
+                said.append(voiceid.after_turn(p, SOMEONE, 0.7 + i / 300, 2.0, False, "other", True, False))
+                said.append(voiceid.after_turn(p, YOU, 0.4 + i / 300, 2.0, False, "other", True, True))
+            self.assertEqual(siri.settings.get("voice_id"), "learning")
+        self.assertEqual([s for s in said if s], ["unsure"])
+        self.assertTrue(p.calibrated)  # the levels are there for "only answer me"
+        self.assertTrue(voiceid.Profile(p.path).told)  # and she won't say it again after a restart
+
+    def test_four_in_a_hundred_of_yours_failing_is_too_many_to_switch_on(self):
+        p = profile()
+        logged(p, [0.1] * 4 + [0.7] * 96, [0.1] * 40)
+        self.assertEqual(p.calibrate(), "unsure")
+        logged(p, [0.7] * 100, [])  # 4 in 200
+        self.assertEqual(p.calibrate(), "on")
+
+    def test_the_score_log_is_read_from_the_file_once(self):
+        """Read again on every phrase, on the listening thread before the turn ran, it took 25 ms at 166 lines and
+        48 ms at 14,000, and nothing ever cut it back."""
+        p = profile()
+        reads = []
+
+        def spy(path, mode="r", *args, **kw):
+            if "r" in mode:
+                reads.append(path)
+            return open(path, mode, *args, **kw)
+
+        with mock.patch.object(voiceid, "open", spy, create=True):
+            for i in range(50):
+                p.log({"when": i, "score": 0.7, "level": "strict", "who": "you"})
+                p.scores()
+        self.assertEqual(reads, [])
+        self.assertEqual(len(voiceid.Profile(p.path).scores()), 50)  # and it's on the file for next time
+
+    def test_the_log_keeps_the_latest_of_each(self):
+        p = profile()
+        logged(p, [], [0.2] * 10)
+        logged(p, np.linspace(0, 1, 3 * voiceid.KEEP - 9), [])  # the line that makes it 3 * KEEP + 1: cut back
+        again = voiceid.Profile(p.path).scores()
+        self.assertEqual(len(again), voiceid.KEEP + 10)
+        self.assertEqual(again[-1]["score"], 1.0)
+        self.assertEqual(sum(e["who"] == "room" for e in again), 10)
 
     def test_plainly_you_adds_to_her_picture_of_your_voice_up_to_a_limit(self):
         p = profile()
@@ -182,6 +262,54 @@ class InHerEars(unittest.TestCase):
             self.assertEqual(siri.settings.get("voice_id"), "learning")
             self.assertEqual(told, ["voice learned"])
         self.assertEqual(len(a.var("profile").read), 10)
+
+    def learning(self, a, voices):
+        """act_on for each (words, voice), with voice ID learning and "Answer without her name" on: "open notepad
+        please" is done, "pass me the water please" let go as room talk."""
+        with mock.patch.object(siri, "handle", lambda *args, **kw: True), \
+                mock.patch.dict(siri.settings._load(), {"voice_id": "learning", "no_name": True}):
+            for words, voice in voices:
+                a.var("act_on")(turn(words, voice), "other", 100)
+            setting = siri.settings.get("voice_id")
+        siri.ROOM.clear()
+        said = []
+        while not siri.ANNOUNCE.empty():
+            said.append(siri.ANNOUNCE.get_nowait())
+        return setting, said
+
+    def test_learning_ends_from_your_turns_without_her_name(self):
+        """With "Answer without her name" on, her name was in 1 of 150 turns and none of the 166 scores logged since
+        19:25 was at the named level, so learning, which waited for 30 named turns, never ended."""
+        a = self.assistant()
+        siri.ANNOUNCE.queue.clear()
+        setting, said = self.learning(a, [pair for i in range(voiceid.CALIBRATE_AFTER) for pair in (
+            ("pass me the water please", unit(0.1 + i / 100, 1)), ("open notepad please", unit(1, 0.3 + i / 100)))])
+        self.assertEqual(setting, "on")
+        self.assertEqual(len(said), 1)
+        self.assertIn("only answer you", said[0])
+        self.assertEqual(len(a.var("profile").scores()), 2 * voiceid.CALIBRATE_AFTER)
+
+    def test_when_what_she_let_go_sounds_like_you_she_keeps_answering_everyone_and_says_so(self):
+        a = self.assistant()
+        siri.ANNOUNCE.queue.clear()
+        setting, said = self.learning(a, [("pass me the water please", YOU), ("open notepad please", YOU)] *
+                                      (voiceid.CALIBRATE_AFTER + 5))
+        self.assertEqual(setting, "learning")
+        self.assertEqual(len(said), 1)
+        self.assertIn("answering everyone", said[0])
+
+    def test_a_turn_is_logged_once_its_over_and_empty_words_never(self):
+        """Logged before the turn ran she couldn't know whose it was, and 71 of the 84 short ones let go on 8 Oct had
+        no words at all."""
+        a = self.assistant()
+        p, seen = a.var("profile"), []
+        with mock.patch.object(siri, "handle", lambda *args, **kw: seen.append(len(p.scores())) or True), \
+                mock.patch.dict(siri.settings._load(), {"voice_id": "learning", "no_name": True}):
+            a.var("act_on")(turn("", YOU), "other", 100)
+            a.var("act_on")(turn(" . ", YOU), "other", 100)
+            a.var("act_on")(turn("open notepad please", YOU), "other", 100)
+        self.assertEqual(seen, [0])
+        self.assertEqual([e["who"] for e in p.scores()], ["you"])
 
     def test_a_phrase_held_for_the_rest_keeps_its_voice(self):
         """"Hey Jev, open [pause] YouTube" in someone else's voice was joined as new words with no voice print, so it

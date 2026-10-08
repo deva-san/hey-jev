@@ -5383,6 +5383,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     speaker = [None]  # speech.Speaker, whose voice a turn is: loaded when voice ID is on, or to learn your voice
     profile = voiceid.Profile()  # your voice, see voiceid.py
     enrolling = [None]  # {"i": sentence, "prints": [...]} while you read her the sentences for your voice
+    scored = [None]  # the voice of the turn going on, for voice_kept once it's over
 
     def load_speaker():
         if speaker[0] is None:
@@ -5539,19 +5540,31 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         return p, verdict
 
     def owner_ok(text, kind):
-        """False if voice ID is on and this isn't your voice (voiceid.judge). Logs the score while learning."""
+        """False if voice ID is on and this isn't your voice (voiceid.judge). Its score waits for voice_kept."""
         voice, spoke = getattr(text, "voice", None), getattr(text, "spoke", 0.0)
         score = profile.score(voice) if voice is not None and profile.ready else None
         named = bool(find_name(text))
         counted, why = voiceid.judge(profile, score, spoke, named, kind)
-        if voiceid.after_turn(profile, voice, score, spoke, named, kind, counted):
-            ANNOUNCE.put("I know your voice well now, so from here on I'll only answer you. "
-                         "Say answer everyone to change that.")
+        scored[0] = (voice, score, spoke, named, kind, counted) if text.strip(" .,!?") else None
         if not counted:
             print(f"\n  (not your voice, {why}: {str(text)[:80]!r})")
         elif score is not None:
             print(f"\n  (voice {why})")
         return counted
+
+    def voice_kept(result):
+        """Once the turn is over, what she did with it (run_turn's result, False if let go, None if not your voice)
+        goes with its score to voiceid.after_turn: while learning, a turn she acted on is yours and one she let go is
+        room talk. Kept before the turn ran, she couldn't tell; and empty words never are."""
+        kept, scored[0] = scored[0], None
+        said = voiceid.after_turn(profile, *kept, result) if kept else None
+        if said == "on":
+            ANNOUNCE.put("I know your voice well now, so from here on I'll only answer you. "
+                         "Say answer everyone to change that.")
+        elif said == "unsure":
+            ANNOUNCE.put("I've learned your voice from what you ask me, but some of the talk I let go sounded too "
+                         "much like you, so for now I'll keep answering everyone. Say only answer me to switch it on "
+                         "anyway.")
 
     def on_phrase(audio, kind, text, ms):
         """A turn from the listener, already in words: kind is dictation, armed, follow_up or other (see
@@ -5676,10 +5689,12 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 ROOM.append((time.time(), str(text)))
             if was_named:  # the popup came up as you talked, but it wasn't for her after all
                 emit(notify, "Ready", None)
+            voice_kept(False)
             return
         if not mine:  # not your voice: let go, as quietly as room talk
             if was_named:
                 emit(notify, "Ready", "That didn’t sound like you")
+            voice_kept(None)
             return
         chance, quiet = listener.ended  # why the turn ended there: Smart Turn's chance, and how much quiet
         if zone in ("over", "gap"):
@@ -5715,11 +5730,13 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                              "for_me": round(judged[0], 3), "verdict": "no", "mode": "on", "result": "let go"})
                 if was_named:
                     emit(notify, "Ready", None)
+                voice_kept(False)
                 return
             before = rec.blocks.qsize()
             if rec.keeps:  # a turn of yours: what's said from here till her first word is said while she thinks
                 her.update(asked=getattr(listener, "pos", 0), start=None, spoke=None, done=None)
             result = run_turn(what[0], what[1], ms, gate=what[2], carried=strict and what[2] is True)
+            voice_kept(result)
             if judged:  # what it said and what happened, to train it again later
                 decider.log({"when": round(time.time()), "said": str(what[1]), "kind": asked_as,
                              "for_me": round(judged[0], 3), "verdict": judged[1], "mode": decider.mode(),
