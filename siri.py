@@ -5704,9 +5704,12 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             waiting = (PENDING["plan"] is not None and time.time() < PENDING["until"]) or asked_last()
             # said without her name: the decider's view, but never on what may be the answer to her own question
             judged = for_me(what[1], what[2]) if what[2] and not waiting else None
+            # written down as the decider was asked: str(gate) wrote "True" for a follow-up, which training read as
+            # no kind at all
+            asked_as = "follow_up" if what[2] is True else "cold"
             if judged and judged[1] == "no" and decider.mode() == "on":
                 print(f"  (the decider is sure that wasn't for her, {judged[0]:.2f}: staying quiet)")
-                decider.log({"when": round(time.time()), "said": str(what[1]), "kind": str(what[2]),
+                decider.log({"when": round(time.time()), "said": str(what[1]), "kind": asked_as,
                              "for_me": round(judged[0], 3), "verdict": "no", "mode": "on", "result": "let go"})
                 if was_named:
                     emit(notify, "Ready", None)
@@ -5716,7 +5719,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 her.update(asked=getattr(listener, "pos", 0), start=None, spoke=None, done=None)
             result = run_turn(what[0], what[1], ms, gate=what[2], carried=strict and what[2] is True)
             if judged:  # what it said and what happened, to train it again later
-                decider.log({"when": round(time.time()), "said": str(what[1]), "kind": str(what[2]),
+                decider.log({"when": round(time.time()), "said": str(what[1]), "kind": asked_as,
                              "for_me": round(judged[0], 3), "verdict": judged[1], "mode": decider.mode(),
                              "result": str(result)})
             # what was said while she thought and acted comes next, caught up on rather than skipped (see LAG). Only

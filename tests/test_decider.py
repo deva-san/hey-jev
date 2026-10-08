@@ -67,6 +67,19 @@ class Heads(unittest.TestCase):
         self.assertTrue(np.allclose(again.heads["for_me"]["w"], h["w"]))
         self.assertEqual(again.heads["for_me"]["lo"], 0.2)
 
+    def test_follow_ups_written_down_as_true_train_as_follow_ups(self):
+        """The shadow log wrote a follow-up's kind as "True" (16 of the 88 rows on this PC), which features() saw as
+        no kind at all, while she asks it with "follow_up" for the same turns."""
+        where = tempfile.mkdtemp()
+        with open(os.path.join(where, "shadow.jsonl"), "w", encoding="utf-8") as f:
+            f.write('{"said": "and tomorrow", "kind": "True", "label": "U"}\n'
+                    '{"said": "pass the salt", "kind": "cold", "label": "N"}\n'
+                    '{"said": "not labelled", "kind": "True"}\n')
+        with mock.patch.object(decider, "folder", lambda: where):
+            turns = train_decider.labelled_turns()
+        self.assertEqual([(w, kind) for w, kind, *_ in turns],
+                         [("and tomorrow", "follow_up"), ("pass the salt", "cold")])
+
 
 class InHerEars(unittest.TestCase):
     def assistant(self):
@@ -74,7 +87,7 @@ class InHerEars(unittest.TestCase):
         self.addCleanup(a.close)
         return a
 
-    def run_cold(self, a, words, setting):
+    def run_cold(self, a, words, setting, kind="other"):
         handled, logged = [], []
         text = speech.heard(words)
         with mock.patch.object(siri, "handle", lambda text, *args, **kw: handled.append(str(text)) or False), \
@@ -82,7 +95,7 @@ class InHerEars(unittest.TestCase):
                 mock.patch.object(decider, "get", lambda: trained()), \
                 mock.patch.object(decider, "available", lambda: True), \
                 mock.patch.object(decider, "log", logged.append):
-            a.var("act_on")(text, "other", 100)
+            a.var("act_on")(text, kind, 100)
         return handled, logged
 
     def test_on_it_lets_plain_room_talk_go_without_asking_the_model(self):
@@ -100,6 +113,15 @@ class InHerEars(unittest.TestCase):
         self.assertEqual(handled, ["please pass the salt, I said"])
         self.assertEqual([e["verdict"] for e in logged], ["no"])
         self.assertEqual(logged[0]["result"], "False")
+
+    def test_a_follow_up_is_written_down_the_way_it_was_asked(self):
+        """Written down as str(gate), a follow-up's kind was "True", and a head trained on it lost what it was."""
+        a = self.assistant()
+        with mock.patch.object(siri, "asked_last", lambda *a: False):
+            handled, logged = self.run_cold(a, "and what about tomorrow", "shadow", kind="follow_up")
+            _, cold = self.run_cold(a, "what time does the match start", "shadow")
+        self.assertEqual(handled, ["and what about tomorrow"])
+        self.assertEqual([e["kind"] for e in logged + cold], ["follow_up", "cold"])
 
 
 if __name__ == "__main__":
