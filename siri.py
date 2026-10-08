@@ -2741,6 +2741,11 @@ TOOL_ARG = re.compile(r"<arg_key>([^<]*)</arg_key>\s*<arg_value>(.*?)</arg_value
 # Ling also writes them a line each: task="click the second video"</arg_value>, at times without the closing quote, or
 # task={"kind": "reminder", "text": "call Mum"}
 TOOL_ATTR = re.compile(r"^[ \t]*(\w+)[ \t]*=[ \t]*(.*?)[ \t]*(?:</arg_value>)?[ \t]*$", re.M)
+# or several on one line, ending " /": seconds=300 label="5 min" alert="..." / made seconds '300 label="5 min" ...'
+# and a YouTube query 'lofi music" play=true /' (8 October). The next one starts at a name like the steps' own, "="
+# straight after it, so "what is e = mc2" stays one value
+NEXT_ATTR = re.compile(r"[ \t]+([a-z_]{2,})=[ \t]*")
+QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
 # Every step she can take: the ones PROMPT, RESEARCH and agent.AGENT_PROMPT list, and the rest do_step knows. Any other
 # name is a misreading, left out so she doesn't say "I can't Here yet": prose in a tool call once came out as {"do":
 # "Here"}, and a broken one as {"do": "do"}. procedure: one of hers, which the skills list teaches. Never agent_resume,
@@ -2775,6 +2780,32 @@ def _attr(value):
         return value[1:-1]
 
 
+def _attrs(args):
+    """The key=value arguments of a tool call, a line each or several to a line (see NEXT_ATTR), each as _attr."""
+    out = {}
+    for key, rest in TOOL_ATTR.findall(args):
+        while True:
+            value, after = rest, ""
+            quoted = QUOTED.match(rest)
+            if quoted and (re.fullmatch(r"\s*/?>?\s*", rest[quoted.end():]) or NEXT_ATTR.match(rest, quoted.end())):
+                value, after = quoted[0], rest[quoted.end():]  # else a quote inside the value keeps it whole, as before
+            elif rest.startswith(("{", "[")):
+                try:
+                    end = json.JSONDecoder().raw_decode(rest)[1]
+                    value, after = rest[:end], rest[end:]
+                except ValueError:
+                    pass
+            elif not rest.startswith('"'):
+                nxt = NEXT_ATTR.search(rest)
+                value, after = (rest[:nxt.start()], rest[nxt.start():]) if nxt else (rest, "")
+            out[key] = _attr(re.sub(r"[ \t]+/>?$", "", value))
+            nxt = NEXT_ATTR.match(after)
+            if not nxt:
+                break
+            key, rest = nxt[1], after[nxt.end():]
+    return out
+
+
 def _known(steps):
     """The well-formed steps, mended (see _mend), without names there are no steps for. A screen or procedure step
     without "read", "exact" or "learned", which only she sets (think, _quick, run_plan)."""
@@ -2797,8 +2828,7 @@ def parse_plan(raw):
         said = re.sub(r"</?\w+>", "", TOOL_CALL.sub("", raw)).strip()  # and a </tool_call> left after </invoke>
         for do, args in calls:
             pairs = TOOL_ARG.findall(args)  # a value can be JSON too: <arg_key>task</arg_key><arg_value>{"kind": ...
-            step = {"do": do, **({k.strip(): _arg(v) for k, v in pairs} if pairs else
-                                 {k: _attr(v) for k, v in TOOL_ATTR.findall(args)})}
+            step = {"do": do, **({k.strip(): _arg(v) for k, v in pairs} if pairs else _attrs(args))}
             text, known = re.sub(r"</?\w+>", "", args).strip(), _mend({"do": do})["do"] in KNOWN_STEPS
             # <arg_key>steps</arg_key><arg_value>[...]: the plan itself. But a skill's steps are its own: "when I say
             # work mode, ..." opened Gmail and set the volume on 7 October instead of saving the routine
