@@ -461,9 +461,12 @@ def _digits(text):
 
 
 def parse_duration(text):
-    """Total seconds mentioned in the sentence, or None."""
+    """Total seconds mentioned in the sentence, or None. With an "in" or "after", only that: "remind me to stretch for
+    10 minutes in 1 hour" is due in 3600 s, where both added up made it 4200."""
+    t = _digits(text)
+    when = IN_DURATION.search(t)
     total = 0
-    for num, unit, extra in DURATION.findall(_digits(text)):
+    for num, unit, extra in DURATION.findall(when[0] if when else t):
         secs = UNITS[unit]
         total += float(num) * secs + (secs / 4 if "quarter" in extra else secs / 2 if extra else 0)
     return int(total) or None

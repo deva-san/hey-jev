@@ -40,6 +40,16 @@ class Durations(unittest.TestCase):
         self.assertEqual(step["when"], "in 3600 seconds")
         self.assertEqual(step["task"]["text"], "stretch for 10 minutes")
 
+    def test_two_durations_count_from_in(self):
+        """R3: parse_duration still added up every duration in the sentence, so "stretch for 10 minutes in 20 minutes"
+        came out as 30 minutes. With an "in" or "after", that is when; without one, all of it, as before."""
+        for said, secs in (("remind me to stretch for 10 minutes in 1 hour", 3600),
+                           ("remind me to stretch for 10 minutes in 20 minutes", 1200),
+                           ("remind me after an hour and a half to eat", 5400), ("set a timer for 1 hour 30", 5400)):
+            self.assertEqual(siri.parse_duration(said), secs, said)
+        self.assertEqual(siri.parse_reminder("remind me to stretch for 10 minutes in 20 minutes"),
+                         "stretch for 10 minutes")
+
     def test_reminder_in_still_works(self):
         for said in ("remind me in 5 min to call mum", "remind me to call mum in 5 minutes"):
             step = siri.quick(said)["steps"][0]
