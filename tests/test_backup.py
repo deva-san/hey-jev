@@ -3,12 +3,15 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 import zipfile
 from unittest import mock
 
 from tests.support import siri  # noqa: F401  (points %APPDATA% at a temp folder before backup is imported)
 import backup
+import clean_test_data
+import history
 import settings
 
 
@@ -116,6 +119,95 @@ class FirstHello(unittest.TestCase):
     def test_she_introduces_herself_until_she_has_met_you(self):
         self.assertEqual(siri.REPLIES["first_run"], ["Hey, I'm Jev, what can I do for you?"])
         self.assertIs(settings.DEFAULTS["met"], False)
+
+
+class CleanTestData(unittest.TestCase):
+    """clean_test_data.py, for the 8 Oct leak: a test run wrote its turns into her real history and logs. Only the
+    tests' rows go, as many of a phrase as you said yourself stay, and nothing changes without --apply."""
+    T0 = 1_791_500_000.0  # inside the window passed below
+
+    def setUp(self):
+        root = tempfile.mkdtemp(prefix="heyjev-clean-")
+        env = mock.patch.dict(os.environ, {"APPDATA": os.path.join(root, "roaming"),
+                                           "LOCALAPPDATA": os.path.join(root, "local")})
+        env.start()
+        self.addCleanup(env.stop)
+        patch = mock.patch.object(backup, "running", lambda: False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.data, self.local = backup.appdata(), backup.localdata()
+        self.tests = os.path.join(root, "tests")
+        write(os.path.join(self.tests, "test_x.py"), 'siri.handle("Open Notepad.")\nsiri.handle("set a timer")\n')
+        for path in (mock.patch.object(history, "DB", os.path.join(self.data, "history.db")),
+                     mock.patch.object(history, "DAYS_DIR", os.path.join(self.data, "memories", "days"))):
+            path.start()
+            self.addCleanup(path.stop)
+        os.makedirs(self.data, exist_ok=True)
+        turns = [(self.T0 - 86400, "what's the weather")]  # yours, the day before
+        turns += [(self.T0 + 100, "open notepad")]  # yours, on its own, in her log
+        turns += [(self.T0 + 600 + i / 50, "Open Notepad.") for i in range(30)]  # a test's burst
+        turns += [(self.T0 + 900 + i / 50, "set a timer") for i in range(5)]  # never said by you
+        turns += [(self.T0 + 1200 + i / 50, f"made up in a loop {i}") for i in range(4)]  # a test's, but no phrase
+        turns += [(self.T0 + 1500, "remind me to call mum")]  # yours, not a test phrase
+        for ts, said in turns:
+            with mock.patch("time.time", return_value=ts):
+                history.add(said, reply="ok")
+        write(os.path.join(self.local, "Logs", "Hey Jev.log"),
+              "\n> heard: 'open notepad'  (stt 300ms, 95% sure)\n  quick: open\n> heard: \"what's the weather\"\n")
+        agent = [{"at": int(self.T0 + 700 + i), "goal": "set a timer", "ms": 3} for i in range(3)]
+        agent += [{"at": int(self.T0 + 2000), "goal": "turn on night light", "ms": 41000}]
+        write(os.path.join(self.local, "Logs", "agent.jsonl"), "".join(json.dumps(a) + "\n" for a in agent))
+        self.window = (self.T0, self.T0 + 3600)
+
+    def said(self):
+        con = sqlite3.connect(os.path.join(self.data, "history.db"))
+        try:
+            return [r[0] for r in con.execute("SELECT said FROM turns ORDER BY ts")]
+        finally:
+            con.close()
+
+    def test_only_the_tests_rows_go(self):
+        found = clean_test_data.plans(self.window, tests=self.tests)
+        made = clean_test_data.apply(found)
+        said = self.said()
+        self.assertEqual(said.count("what's the weather"), 1)
+        self.assertEqual(sum(clean_test_data.plain(s) == "open notepad" for s in said), 1)  # the one you said
+        self.assertNotIn("set a timer", said)
+        self.assertEqual(sum(s.startswith("made up in a loop") for s in said), 4)  # no phrase: listed, kept
+        self.assertIn("remind me to call mum", said)
+        con = sqlite3.connect(os.path.join(self.data, "history.db"))
+        try:  # the search index too, or "what did I ask about timers" still finds them
+            self.assertEqual(con.execute("SELECT count(*) FROM turns_tri").fetchone()[0], len(said))
+        finally:
+            con.close()
+        day = time.strftime("%Y-%m-%d", time.localtime(self.T0 + 600))
+        text = read(os.path.join(self.data, "memories", "days", f"{day}.md"))
+        self.assertEqual(text.count("You: "), len([s for s in said if s != "what's the weather"]))
+        self.assertIn("remind me to call mum", text)
+        agent = read(os.path.join(self.local, "Logs", "agent.jsonl"))
+        self.assertNotIn("set a timer", agent)
+        self.assertIn("turn on night light", agent)
+        self.assertTrue(all(os.path.isfile(p) for p in made))
+        with zipfile.ZipFile(made[0]) as z:  # her data as it was, before any of this
+            self.assertIn("appdata/history.db", z.namelist())
+        with zipfile.ZipFile(made[1]) as z:
+            self.assertIn("set a timer", z.read(os.path.join("Logs", "agent.jsonl").replace(os.sep, "/")).decode())
+
+    def test_a_dry_run_changes_nothing(self):
+        before = self.said()
+        phrases = clean_test_data.test_phrases(self.tests)
+        with mock.patch.object(clean_test_data, "test_phrases", lambda _=None: phrases), \
+                mock.patch("builtins.print") as printed:
+            clean_test_data.main(["--from", time.strftime("%Y-%m-%d %H:%M", time.localtime(self.window[0])),
+                                  "--to", time.strftime("%Y-%m-%d %H:%M", time.localtime(self.window[1]))])
+        self.assertIn("Dry run: nothing changed. 38 rows would go.", printed.call_args_list[-1].args[0])
+        self.assertEqual(self.said(), before)
+        self.assertFalse(os.path.exists(os.path.join(self.local, "Backups")))
+
+    def test_never_while_she_runs(self):
+        with mock.patch.object(backup, "running", lambda: True), self.assertRaises(SystemExit):
+            clean_test_data.main(["--apply"])
+        self.assertEqual(len(self.said()), 42)
 
 
 if __name__ == "__main__":
