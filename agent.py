@@ -99,7 +99,12 @@ WEB_EXES = win.BROWSER_EXES | {"firefox.exe", "opera.exe", "vivaldi.exe", "arc.e
 LAUNCHERS = {"searchhost.exe", "searchapp.exe", "searchui.exe", "startmenuexperiencehost.exe"}
 NO_OPEN = re.compile(r"\b(?:cmd|command prompt|powershell|pwsh|terminal|wsl|bash|run|regedit|registry editor|"
                      r"task scheduler|group policy|computer management|services)\b", re.I)
-FOLDER = re.compile(r"\s*(?:[a-z]:\\|\\\\|%\w+%|shell:)", re.I)
+FOLDER = re.compile(r"shell:[a-z][\w ]*", re.I)  # a shell folder by name: shell:Downloads, not shell:AppsFolder\x!App
+# A program, by its file's name, or by its type where Windows hides the name's ending ("setup", an Application):
+# opened from File Explorer, it runs, as an install would
+RUNS = re.compile(r"\.(?:exe|msi|msix|appx|bat|cmd|ps1|vbs|js|wsf|com|scr|lnk|reg|hta|cpl|url)\s*$", re.I)
+PROGRAM_TYPES = re.compile(r"\b(?:application|installer|package|batch|script|shortcut|registration|control panel|"
+                           r"screen saver)\b", re.I)
 # A live run (run): steps the model may plan, rounds of look-think-act, seconds, screenshots and rounds the screen may
 # stay the same before she gives up, steps a round, and how sure speech-to-text must be of a task's words for her to
 # start it without asking "Should I ...?" first
@@ -947,6 +952,48 @@ def allowed_site(r, site, text=""):
     return bool(text) and " ".join(str(text).lower().split()) in " ".join(str(r.words or "").lower().split())
 
 
+def is_folder(text):
+    """True if text is a folder that's there, by its full path (%vars% too), or a shell folder by name: all File
+    Explorer's address bar is ever given. It starts a program as the Run box does, and a live run could type
+    C:\\Windows\\System32\\cmd.exe there and press Enter, as the old rule only looked at how the text started. Never
+    a share on another PC (\\\\server\\x): only looking at it would hand that PC your Windows sign-in."""
+    text = str(text or "").strip()
+    full = os.path.expandvars(text)
+    if FOLDER.fullmatch(text):
+        return True
+    return os.path.isabs(full) and not full.startswith(("\\\\", "//")) and os.path.isdir(full)
+
+
+def opens_program(el):
+    """True if opening el in File Explorer could start a program: a file named like one (setup.exe), or a list item
+    whose type is one (an Application, a Windows Installer Package, a Shortcut) or can't be read, as Windows hides
+    a name's ending: "setup" there is setup.exe, and "report.pdf" can be report.pdf.exe."""
+    if not el:
+        return False
+    if RUNS.search(str(el.get("name") or "")):
+        return True
+    if el.get("role") != "listitem":
+        return False
+    try:
+        kind = str(el["el"].CurrentItemType or "")
+    except Exception:
+        kind = ""
+    return not kind or bool(PROGRAM_TYPES.search(kind))
+
+
+def explorer_enter_runs(focus):
+    """True if Enter in File Explorer could start a program: on a file that is one (opens_program), in the address
+    bar on what isn't a folder, or on what it can't tell (no focus, or a list or button, where Enter opens what's
+    selected). Not in a box: its search, or a name being changed."""
+    if not focus:
+        return True
+    if str(focus.get("name") or "").lower().startswith("address"):
+        return not is_folder(win.ui_value(focus["el"]) or "")
+    if focus.get("role") in EDITABLE:
+        return False
+    return focus.get("role") != "listitem" or opens_program(focus)
+
+
 def chat_in_front(exe, title, site, address=""):
     """True if the window in front is a chat: a chat app's program (siri.CHATS), a chat site (by its site, or by the
     whole address in the address bar where she has it), or a browser window with no site to read that's titled like
@@ -983,7 +1030,7 @@ def gate(r, i, s, el=None, checked=False, trusted=()):
     if (do in ("type", "keys") or text is not None) and (
             host.in_terminal(exe, focus) or exe in LAUNCHERS or (exe == "explorer.exe" and title == "Run") or
             (exe == "explorer.exe" and text is not None and str((focus or {}).get("name") or "").lower()
-             .startswith("address") and not FOLDER.match(str(text)))):
+             .startswith("address") and not is_folder(text))):
         return "stop", f"Typing there could start a program, so {LEAVE_IT}."
     if text is not None and do in ("ui", "type", "click"):
         why = check_typed(text, r, focus, checked)
@@ -998,6 +1045,12 @@ def gate(r, i, s, el=None, checked=False, trusted=()):
         r.tainted = True  # words on the screen giving her orders: the gate holds anyway, but she never learns from it
     if i == r.approved:  # your yes was to this very step
         return None, ""
+    # setup.exe in File Explorer, opened by a click on it (by id it's opened, as a double-click does) or by Enter, or
+    # Enter in its address bar on what isn't a folder: it runs as from the Run box, an install with nobody asked
+    if exe == "explorer.exe" and title != "Run" and text is None and (
+            (do in ("ui", "click") and opens_program(el)) or
+            (do == "keys" and host.combo(s.get("keys")).split("+")[-1] == "enter" and explorer_enter_runs(focus))):
+        return "ask", "that could start a program"
     if do in ("ui", "click") and text is None:  # a switch too: a model could set "state" on Send to slip past
         if RISKY.search(name) or RISKY.search(win.clean_name(s.get("what"))):
             return "ask", f"{name or s.get('what')} can't be undone"
