@@ -72,8 +72,9 @@ class Engine:
             self.refs[voice] = a[:int(REF_SECS * RATE)]
         return self.refs[voice]
 
-    def make(self, text, voice=DEFAULT, on_audio=None):
-        """Say text in voice: on_audio(samples, float32 at RATE) gets it a sentence at a time. Returns all of it."""
+    def make(self, text, voice=DEFAULT, on_audio=None, stop=None):
+        """Say text in voice: on_audio(samples, float32 at RATE) gets it a sentence at a time. Returns all of it.
+        stop(): True to stop making it, as when she's been stopped mid-line."""
         import sherpa_onnx
         with self.lock:
             if self.tts is None:
@@ -90,7 +91,7 @@ class Engine:
                 if on_audio is not None and left > 0:
                     on_audio(samples[:left])
                 made[0] += len(samples)
-                return 1 if made[0] < most else 0  # 0 stops it: it's running away
+                return 1 if made[0] < most and not (stop and stop()) else 0  # 0 stops it: running away, or stopped
             audio = self.tts.generate(text, config, callback=got)
             self.used = time.time()
             return np.asarray(audio.samples, np.float32)[:most]
@@ -114,14 +115,14 @@ def engine():
         return _engine[0]
 
 
-def stream(text, voice=DEFAULT):
+def stream(text, voice=DEFAULT, stop=None):
     """A queue that gets her voice for text a sentence at a time (float32 at RATE), then None; an exception instead
     if it failed. Made on its own thread, so it can be under way while another line plays."""
     out = queue.Queue()
 
     def run():
         try:
-            engine().make(text, voice, out.put)
+            engine().make(text, voice, out.put, stop)
             out.put(None)
         except Exception as exc:
             out.put(exc)

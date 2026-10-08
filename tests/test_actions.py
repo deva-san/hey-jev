@@ -450,7 +450,7 @@ class Voice(unittest.TestCase):
         def post(url, **kw):
             raise requests.ReadTimeout("read timed out")
 
-        def stream(text, voice):
+        def stream(text, voice, **kw):
             made.append((text, voice))
             q = __import__("queue").Queue()
             q.put(None)  # nothing to play, so no sound in a test

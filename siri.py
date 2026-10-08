@@ -1784,6 +1784,8 @@ class LiveSay:
                 if item is None:
                     break
                 line, voice = item
+                if HER.stop.is_set():  # you talked over her: the rest isn't said
+                    continue
                 print(f"  say: {line}  (as it's written)")
                 HER_SAID.append((time.time(), line))
                 emit(self.notify, "Speaking", " ".join(self.said + [line]))
@@ -2667,6 +2669,8 @@ def think(text, gate, notify=None, sure=1.0):
               f"what they meant, ask in a few words what they'd like, don't guess.)") if sure < CHECK_BELOW else ""
     # said as an overheard line, not to her: asked straight, a model answered "Why are you so late today?" anyway
     said = (OVERHEARD if gate == "cold" else "") + text + unsure
+    if origin() == "voice" and voice_bits.take_speech_interrupted():  # Hermes' note, for this one request
+        said = voice_bits.SPEECH_INTERRUPTED_NOTE + "\n" + said
     pictures = phone_picture()  # sent from your phone a moment ago: what "this" and "these" mean
     messages.append({"role": "user", "content": [{"type": "text", "text": said + PICTURE_NOTE}]
                      + [{"type": "image_url", "image_url": {"url": p}} for p in pictures] if pictures else said})
@@ -3772,13 +3776,23 @@ def run_plan(plan, notify):
     line = tidy(plan.get("say"), not plan.get("confirm")) or \
         (say_line("looking") if looks is not None else "" if last >= 0 else default_line(steps))
     failed, voice_error, spoken, seen = [], None, [], []
+    if REPLY_TO.get() is None:
+        HER.asking = bool(plan.get("confirm"))  # a yes or no over her question is for after it, it doesn't stop her
     reported = threading.Event()  # the steps her line reports on are done
     if plan.get("said") is not None and not steps:  # said as the model wrote it (LiveSay)
         spoken, voice_error, line = list(plan["said"]), plan.get("voice_error"), ""
 
     def talk(text):
+        if HER.stop.is_set() and REPLY_TO.get() is None:
+            return None  # stopped: not said, nor kept as said
         spoken.append(text)
         return say(text, notify)
+
+    def wait(done, secs):  # for the steps, but not once she's been stopped: the request you made over her is next
+        end = time.time() + secs
+        while not done() and time.time() < end and not (HER.stop.is_set() and REPLY_TO.get() is None):
+            time.sleep(0.05)
+        return done()
 
     def work():
         for i, step in enumerate(steps):
@@ -3807,12 +3821,12 @@ def run_plan(plan, notify):
     worker = threading.Thread(target=contextvars.copy_context().run, args=(work,), daemon=True)  # a phone turn's too
     worker.start()
     if last >= 0:  # "Sent to Ravi." is what the send managed, worked out once it has: a failure gets only its own line
-        line = (line or default_line(steps)) if reported.wait(60) and not failed else ""
+        line = (line or default_line(steps)) if wait(reported.is_set, 60) and not failed else ""
     if line:  # while the (other) steps run, so she answers as soon as she can
         voice_error = talk(line)
     if looks is not None and worker.is_alive():
         emit(notify, "Looking", looks)  # her line's said, the popup goes back to what she's doing
-    worker.join(180 if looks is not None else 60)
+    wait(lambda: not worker.is_alive(), 180 if looks is not None else 60)
     for said in seen:  # what she saw, or did, on the screen
         voice_error = talk(said) or voice_error
     if failed:
@@ -3890,7 +3904,7 @@ class Line:
         if str(self.v).startswith(("onecore:", "sapi:")) or os.path.exists(self.path):
             return
         if str(self.v).startswith("pocket:"):
-            self.audio = pocket.stream(text, self.v.split(":", 1)[1])
+            self.audio = pocket.stream(text, self.v.split(":", 1)[1], stop=HER.stop.is_set)
         else:
             self.audio = queue.Queue()
             threading.Thread(target=self._fish, daemon=True).start()
@@ -3905,7 +3919,16 @@ class Line:
             self.audio.put(exc)
 
     def _next(self, wait):
-        piece = self.audio.get(timeout=wait)
+        end = time.time() + wait
+        while True:  # a little at a time, so stopping her while Fish is still connecting stops it too
+            if HER.stop.is_set():
+                raise Stopped()
+            try:
+                piece = self.audio.get(timeout=min(0.1, max(0.01, end - time.time())))
+                break
+            except queue.Empty:
+                if time.time() >= end:
+                    raise
         if isinstance(piece, Exception):
             raise piece
         return piece
@@ -3919,13 +3942,13 @@ class Line:
     def _play(self):
         if str(self.v).startswith(("onecore:", "sapi:")):  # Windows' own voice: no download, offline, instant
             t = time.time()
-            win.speak_native(self.text, voice=self.v, wait=True)
+            win.speak_native(self.text, voice=self.v, wait=True, stop=HER.stop.is_set)
             return int((time.time() - t) * 1000)
         if self.audio is None:  # made before and kept
             done = threading.Event()
             threading.Thread(target=_follow_voice, args=(self.path, done), daemon=True).start()
             try:
-                win.play(self.path)
+                win.play(self.path, write=_write)
             finally:
                 done.set()
                 SPEAK_LEVELS.clear()
@@ -3935,6 +3958,8 @@ class Line:
             self._play_local(started) if local else self._play_fish(started)
             return started[0] or 0
         except Exception as exc:
+            if HER.stop.is_set():  # stopped: not said again in another voice
+                return started[0] or 0
             if started[0] is not None:  # it broke off partway: what's said is said
                 print(f"  her voice broke off ({exc!r})")
                 return started[0]
@@ -3962,13 +3987,18 @@ class Line:
                     started[0] = int((time.time() - self.t) * 1000)
                 whole = len(pending) - len(pending) % 2
                 SPEAK_LEVELS.append(_pcm_level(pending[:whole]))
-                out.write(pending[:whole])
+                if not _write(out, np.frombuffer(pending[:whole], "<i2"), PCM_RATE):
+                    out.abort()  # stopped: what's buffered goes too
+                    return
                 pending = pending[whole:]
             if out is None:  # a short line, all of it came before the buffer was full
                 out = sd.RawOutputStream(samplerate=PCM_RATE, channels=1, dtype="int16")
                 out.start()
                 started[0] = int((time.time() - self.t) * 1000)
-                out.write(pending[:len(pending) - len(pending) % 2])
+                whole = len(pending) - len(pending) % 2
+                if not _write(out, np.frombuffer(pending[:whole], "<i2"), PCM_RATE):
+                    out.abort()
+                    return
             out.stop()  # waits for the last of it to play
         finally:
             if out is not None:
@@ -3987,7 +4017,9 @@ class Line:
                     out.start()
                     started[0] = int((time.time() - self.t) * 1000)
                 SPEAK_LEVELS.append(float(np.sqrt(np.mean(piece * piece))) if len(piece) else 0.0)
-                out.write(piece.reshape(-1, 1))
+                if not _write(out, piece.reshape(-1, 1), pocket.RATE):
+                    out.abort()
+                    return
             if out is not None:
                 out.stop()
         finally:
@@ -4179,6 +4211,95 @@ STOPS = ("stop", "stop it", "stop talking", "ok stop", "okay stop", "wait", "hol
 # how a request said over her, or just after, starts when it's to her: not "and", "so", "then", a TV's lines start so
 CARRY_ON = re.compile(r"(?:ok|okay|yeah|yes|no|now|also|actually|instead|what about|how about|hey|jev) \w")
 NODS = {"ok", "okay", "mm", "mhm", "hmm", "right", "uh huh", "alright", "all right"}  # said along as she talks
+# Talking over her: a request, her name or "stop" stops her there and then, and the rest of her turn isn't said; it's
+# then done as soon as her turn is over (act_on). Other words over her turn her down while they last (LiveKit pauses
+# for its 2 s false-interruption timeout; turned down she still finishes if it was the TV)
+DUCK, DUCK_FOR = 0.3, 2.0  # her volume while you talk over her, and for how long after your last words
+CUT_SURE = 0.7  # speech-to-text at least this sure of a request over her, to stop her for it
+BARGE_WORDS = 2  # words a request over her needs (Pipecat's MinWords while the bot speaks)
+SLICE = 0.05  # seconds of her voice written at a time, so she stops within about that and the output's latency
+LEAD = re.compile(r"^(?:(?:ok|okay|yeah|yes|now|also|actually|instead|hey|so|and|then|please|wait)\s+)+")
+
+
+def barge(words, final, sure=1.0, asking=False):
+    """What words heard over her do: "cut" stops her, "duck" turns her down a moment, None nothing. final: the
+    phrase is over (else they're the words so far). asking: she's asking you something, a yes or no to it is for
+    after she's done, only "stop" or her name stop her."""
+    t = words_of(words)
+    if not t or echo_of(t, within=30):
+        return None
+    found = find_name(str(words))
+    if found and found[0]:  # her name, and sure of it
+        return "cut"
+    if stop_said(t):  # the whole of it, so only once it's over: "stop the music" isn't one
+        return "cut" if final else "duck"
+    if side_talk(t) or t in NODS:  # "mm", "okay": said along, as people do
+        return None
+    if not final:
+        return "duck"
+    rest = LEAD.sub("", t)
+    if not asking and sure >= CUT_SURE and len(t.split()) >= BARGE_WORDS and COMMAND.match(plain(rest)):
+        return "cut"  # "okay, now open Notepad"; not a question, which waits for her to finish
+    return None
+
+
+class Her:
+    """Her voice as it plays (Line): stopped when you talk over her with a request, her name or "stop", turned down
+    while you talk over her otherwise. One turn of hers at a time (busy), numbered so a late verdict never stops the
+    next."""
+
+    def __init__(self):
+        self.stop = threading.Event()  # she stops: every player looks between SLICE pieces
+        self.turn, self.until, self.level, self.asking = 0, 0.0, 1.0, False
+
+    def begin(self):
+        """A turn of hers starts: she may talk again, at full volume."""
+        self.turn += 1
+        self.stop.clear()
+        self.until, self.asking = 0.0, False
+
+    end = begin  # and once it's over: a verdict that comes late stops nothing, a voice preview included
+
+    def gain(self):
+        return DUCK if time.time() < self.until else 1.0
+
+    def duck(self):
+        self.until = time.time() + DUCK_FOR
+
+    def unduck(self):
+        self.until = 0.0
+
+    def cut(self, why, turn=None):
+        """Stops her, if this is still the turn it was meant for. True if she was stopped."""
+        if (turn is not None and turn != self.turn) or self.stop.is_set():
+            return False
+        self.stop.set()
+        voice_bits.mark_speech_interrupted()  # the model is told, next turn (think)
+        print(f"\n  (stopped her: {why})")
+        return True
+
+
+HER = Her()
+
+
+def _write(out, data, rate):
+    """Plays data through out a SLICE at a time, at her volume now, eased from piece to piece so a change doesn't
+    click. False if she was stopped part way."""
+    n = max(1, int(rate * SLICE))
+    for i in range(0, len(data), n):
+        if HER.stop.is_set():
+            return False
+        piece, g = data[i:i + n], HER.gain()
+        if g != 1.0 or HER.level != 1.0:
+            ramp = np.linspace(HER.level, g, len(piece), dtype=np.float32)
+            piece = (piece.astype(np.float32) * (ramp if piece.ndim == 1 else ramp[:, None])).astype(data.dtype)
+        HER.level = g
+        out.write(np.ascontiguousarray(piece))
+    return True
+
+
+class Stopped(Exception):
+    """She was stopped while a line was still on its way."""
 HER_SAID = collections.deque(maxlen=12)  # (when, line) she said out loud lately, for her own words heard back
 
 
@@ -4469,6 +4590,10 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     if PENDING["origin"] == origin():
         PENDING["plan"] = None  # answered, or something else asked for instead
     failed, dictate, voice_error, spoken = run_plan(plan, notify)
+    if plan.get("confirm") and origin() == "voice" and HER.stop.is_set():
+        print("  (not asked: she was stopped)")  # never a yes to a question you didn't hear out
+        drop_staged()
+        plan = {**plan, "confirm": None}
     if plan.get("confirm"):
         # the yes or no window opens once she's finished asking: it was 16 s from before she started, so a long
         # message read back used it up and the yes came too late. A message or install waits for its yes as long as
@@ -4511,6 +4636,9 @@ def say(line, notify):
     if lines is not None:  # a turn from your phone: what she'd say goes back to the chat
         print(f"  say (to the phone): {line}")
         lines.append(line)
+        return None
+    if HER.stop.is_set():  # you talked over her: the rest of her turn isn't said
+        print(f"  (not said, she was stopped: {line})")
         return None
     print(f"  say: {line}")
     emit(notify, "Speaking", line)
@@ -4615,6 +4743,7 @@ class Recorder:
         self.heard_herself = False  # her own words came back through the mic: it goes deaf while she talks again
         self._soft = False  # paused, but her lines are only marked in the audio, which keeps coming (keeps)
         self.marked = False  # her lines were marked since her last turn ended: its end is marked too (ask)
+        self.side = None  # a queue for overhear: what the mic hears while she talks (None: start over), once it runs
         self.stream = self._open(mic)
         self.mic_lock = threading.Lock()
 
@@ -4628,6 +4757,8 @@ class Recorder:
             if value:  # _soft first going on and last going off, so _cb never drops a block between
                 self._soft = self.marked = True
                 self._paused = True
+                if self.side is not None:
+                    self.side.put(None)  # a new line of hers: overhear starts over
             else:
                 self._paused = False
                 self._soft = False
@@ -4734,6 +4865,8 @@ class Recorder:
             self.frames.append(indata.copy())
         elif (self.wake or self.dictating) and (not self._paused or self._soft):
             self.blocks.put((self.gen, block))
+            if self._soft and self.side is not None and self.wake:
+                self.side.put(block)
 
     def start(self):
         self.frames, self.on = [], True
@@ -4812,6 +4945,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         result = False
         maybe[0] = False
         with busy:
+            HER.begin()
             shown[0] = None  # the turn sets the window's text from here
             next_window[0] = FOLLOW_UP if rec.wake else 0.0  # for a reset after she's spoken, till it's decided below
             try:
@@ -4852,6 +4986,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                     next_window[0] = window_ask[0] = FOLLOW_UP if follow else 0.0
                 if gate and result is False:  # someone else's conversation: the model sees it with what comes next
                     ROOM.append((time.time(), str(words)))
+                HER.end()
                 show_sentence()  # "learn my voice": the first sentence to read, once she's said how it goes
         return result
 
@@ -5194,6 +5329,39 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             emit(notify, "Ready", None if shown[0] == "window" else ready_text(rec.wake))
         shown[0] = now
 
+    def overhear():
+        """While she talks, a second listener on what the mic hears over her (Recorder.side): a request, her name
+        or "stop" stops her (HER.cut), other words turn her down a moment. It never acts on them: her turn ends,
+        and the listening loop hears them whole, as said over her (act_on). Speech-to-text runs only while someone
+        talks over her."""
+        turn = [None]  # her turn when the phrase over her began
+
+        def judge(words, final, sure=1.0):
+            if enrolling[0] is not None or rec.dictating:
+                return
+            verdict = barge(words, final, sure, HER.asking)
+            if verdict == "cut":
+                HER.cut(repr(str(words)), turn[0])
+            elif verdict == "duck" and turn[0] == HER.turn:
+                HER.duck()
+            elif final:
+                HER.unduck()
+
+        side = speech.Listener(speech.end_of_speech(starting), ears,
+                               lambda audio, kind, text, ms: judge(text, True, getattr(text, "sure", 1.0)),
+                               on_speech=lambda: turn.__setitem__(0, HER.turn),
+                               on_words=lambda words, kind: judge(words, False))
+        rec.side = queue.Queue()
+        while True:
+            block = rec.side.get()
+            try:
+                if block is None:
+                    side.reset()
+                    continue
+                side.feed(block)
+            except Exception as exc:
+                print(f"\n  overhearing failed: {exc!r}")
+
     def forget_her():
         her.update(asked=None, start=None, spoke=None, done=None, strict=False)
         later.clear()
@@ -5202,7 +5370,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     def listen_loop():
         gen, dictating = None, [False]
         while True:
+            caught_up = bool(again)
             g, block = again.popleft() if again else rec.blocks.get()
+            if caught_up and not again:  # what was kept is gone through: what came in meanwhile is next, not late
+                allow[0] = rec.blocks.qsize()
             # what was said before she talked is heard too: dropping it lost what you said while she thought, nearly
             # every turn, as her reply paused the mic. The listener starts over at the break, see below
             if not (rec.wake or rec.dictating):
@@ -5243,7 +5414,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 waiting = rec.blocks.qsize() * Recorder.BLOCK / SAMPLE_RATE
                 late = max(0, rec.blocks.qsize() - allow[0]) * Recorder.BLOCK / SAMPLE_RATE
                 # a dictation keeps every word, however late
-                if (late > LAG or waiting > CATCH_UP) and not rec.dictating:
+                if (late > LAG or waiting > CATCH_UP) and not rec.dictating and not again:
                     backlog = list(again)
                     again.clear()
                     try:
@@ -5374,7 +5545,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     pressed = [None]  # the right Alt press going on now, while its words are written as it goes
 
     def start_recording():  # right Alt works in both modes, so there's always a sure way to talk to her
-        if not rec.on and not rec.dictating and not busy.locked():
+        if busy.locked() and not rec.on and not rec.dictating:
+            HER.cut("right Alt")  # she stops, the rest of her turn isn't said, and your turn is next
+        if not rec.on and not rec.dictating and (not busy.locked() or HER.stop.is_set()):
             rec.start()
             threading.Thread(target=warm, daemon=True).start()  # the model's connection, ready by the time you stop
             if ears.live:
@@ -5411,6 +5584,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             win.chime("timer")
             return
         with busy:
+            HER.begin()
             rec.paused = True
             try:
                 emit(notify, "Time's up", t["label"] or "Timer finished")
@@ -5421,6 +5595,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 rec.paused = False
                 if rec.marking and rec.wake:
                     rec.ask(CARRY, True)  # "okay, set another one" straight after
+                HER.end()
         if rec.dictating:
             emit(notify, "Dictating", "Say \u201cstop transcribing\u201d when you\u2019re done")
         else:
@@ -5435,6 +5610,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             return False
         print(f"\n> {said_for}: {line}")
         with busy:
+            HER.begin()
             rec.paused = True
             shown[0] = None
             try:
@@ -5453,6 +5629,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 rec.paused = False
                 if marking:
                     rec.ask(FOLLOW_UP if asks else CARRY, not asks)
+                HER.end()
         # the popup goes once she's said it. In Always listening nothing else put it away: a message's heads-up stayed
         # up until the next turn. With a follow-up window open, show_listening shows that, then puts it away
         if not rec.wake:
@@ -5642,6 +5819,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     threading.Thread(target=keep_warm, daemon=True).start()
     watch_return(lambda since: welcome(True, since))
     threading.Thread(target=listen_loop, daemon=True).start()
+    if rec.keeps and ears.live:  # words as you talk, to judge them while she's still talking
+        threading.Thread(target=overhear, daemon=True).start()
     set_mode(mode)
     if not settings.get("met"):  # new, or her memory was just started fresh: she introduces herself instead
         threading.Thread(target=first_hello, daemon=True).start()

@@ -144,8 +144,9 @@ SOUNDS = {"wake": "Speech On.wav", "dictate_start": "Speech On.wav", "dictate_st
           "timer": "Windows Notify Calendar.wav"}  # stand-ins for the Mac's Tink, Pop and Glass
 
 
-def play(path):
-    """Play a sound file and wait until it's done, like afplay."""
+def play(path, write=None):
+    """Play a sound file and wait until it's done, like afplay. write(out, data, rate): plays it instead of
+    out.write, False if it stopped part way."""
     import sounddevice as sd
     import soundfile as sf
     try:
@@ -155,7 +156,10 @@ def play(path):
         winsound.PlaySound(path, winsound.SND_FILENAME)
         return
     with sd.OutputStream(samplerate=rate, channels=data.shape[1], dtype="float32") as out:
-        out.write(data)
+        if write is None:
+            out.write(data)
+        elif not write(out, data, rate):
+            out.abort()  # what's buffered goes too
 
 
 def chime(name):
@@ -1203,11 +1207,18 @@ def get_native_spvoice(voice_id=None):
     return v
 
 
-def speak_native(text, voice=None, voice_id=None, wait=True):
-    """Speak text using Windows native OneCore / SAPI5 voice. 0 MB added RAM, < 15ms latency."""
+def speak_native(text, voice=None, voice_id=None, wait=True, stop=None):
+    """Speak text using Windows native OneCore / SAPI5 voice. 0 MB added RAM, < 15ms latency. stop(): True to stop
+    part way, checked every 50 ms (the voice is this thread's, so only this thread can stop it)."""
     v = get_native_spvoice(voice or voice_id)
-    flags = 0 if wait else 1
-    v.Speak(str(text or ""), flags)
+    if stop is None or not wait:
+        v.Speak(str(text or ""), 0 if wait else 1)
+        return
+    v.Speak(str(text or ""), 1)  # SVSFlagsAsync
+    while not v.WaitUntilDone(50):
+        if stop():
+            v.Speak("", 3)  # SVSFPurgeBeforeSpeak | async: what it was saying stops
+            return
 
 
 def native_to_wav(text, wav_path, voice=None, voice_id=None):
