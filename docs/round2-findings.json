@@ -1,0 +1,486 @@
+{
+ "leak": {
+  "scope": "The test-data leak and data integrity: the root-level scripts test_listen.py, test_open_mic.py and test_voice_id.py (they import settings/siri/voiceid against the REAL app data when loaded by unittest discovery from the repo root), tests/support.py, backup.py, history.py, settings.py and voiceid.py's settings writes, plus a one-shot cleanup script.",
+  "findings": [],
+  "extra": [
+   {
+    "id": "L1",
+    "title": "Make the leak impossible by construction",
+    "detail": "On 8 Oct between 15:59 and 19:04 the suite was run as `python -m unittest` (or discovery) from the repo root; the root scripts imported siri/settings/voiceid before tests/support.py redirected APPDATA, and real data was written: history.db got 982 test rows (191 real), agent.jsonl 1,488 test runs, the dictation log 88 test entries, contacts.json was emptied to {} at 19:03:51, and tests/test_voiceid.py (lines 77-83) most likely wrote voice_id 'on' into the real settings.json. Fix by construction: (1) move the three root scripts into a `checks/` folder (update README and docstrings; keep them runnable with the same arguments); (2) give every module that writes app data a guard: when a `HEYJEV_TESTING`-style marker is set by tests/support.py, OR when unittest/pytest is loaded (`'unittest' in sys.modules` and the harness has not redirected APPDATA), refuse to write to a real %APPDATA%/Hey Jev path and raise; (3) tests/support.py must set the marker first, before any project import; (4) add a test that asserts no project module resolves a data path under the real APPDATA while the harness is active, and a test that the three check scripts refuse to run against real data unless explicitly allowed by a flag; (5) make voice ID tests never write settings except through the redirected path."
+   },
+   {
+    "id": "L2",
+    "title": "One-shot cleanup of the polluted real data",
+    "detail": "Write `clean_test_data.py`: refuses to run while Jev is running (reuse backup.running()); first makes a backup with backup.py's zip; then removes ONLY test rows: history.db rows whose text matches the test suite's phrases (derive the set of phrases from tests/*.py and the known labels; keep all rows that match the real log turns from Logs/Hey Jev.log; print counts before/after and a sample of what is removed, paraphrased), agent.jsonl entries from tests (match on the test task names/ids), dictation log test entries, and the shadow/decider logs if polluted. It must never touch USER.md/MEMORY.md/skills. Dry-run by default; `--apply` writes. Verify it on a COPY of the real data in your scratch folder (copy with the sqlite backup API; the real DB is open by the running Jev) and report before/after counts. Do not run --apply on the real data."
+   },
+   {
+    "id": "L3",
+    "title": "Lost contacts",
+    "detail": "The 3 contacts learned on 8 Oct are gone and the 21:16 backup has 0 contacts. Nothing can restore them. Make contacts.json writes atomic and refuse to overwrite a non-empty contacts file with an empty dict unless explicitly asked (a 'forget all' intent); add a test."
+   }
+  ],
+  "key": "leak"
+ },
+ "safety": {
+  "scope": "Safety holes in the new code: siri.py not_into_shell/press_keys/do_step/run_plan/parse_plan filters for shortcuts and the Windows key, messaging.py (WhatsApp 2025 app, msedgewebview2 front window) and CHAT_WINDOWS, agent.py's gate (IDE terminals, File Explorer address bar), winplatform.py screenshot/capture for the agent (crop to the task window), coder.py (npm test after an auto-allowed package.json edit; snapshot of untracked files; snapshot lost on failure), telegram_bot.py forwarded messages/voice notes/captions, tasks.command_policy for node -e.",
+  "findings": [
+   {
+    "id": "B16",
+    "title": "Enter is not blocked in WhatsApp's 2025 app, so \"type X and press enter\" sends a message with no read-back and no yes",
+    "where": "siri.py:3747",
+    "severity": "high",
+    "scenario": "WhatsApp 2025 is in front with its message box focused. That happens right after Jev stages a message, or while you are chatting, and then the foreground window is msedgewebview2.exe (messaging.in_front and CHAT_WINDOWS both rely on this). You say \"Hey Jev, type see you soon and press enter\". The quick path builds [type, keys enter] with no model. not_into_shell sees msedgewebview2.exe, which is not in CHATS, so it presses Enter. The text goes to whichever chat is open, with no read-back, no yes and no follow-up. A bare \"press enter\" also sends a staged message outside the yes flow.",
+    "suggested_fix": "In not_into_shell, treat the foreground as a chat app when messaging._hosted_by(front, messaging.window_of('whatsapp')) is true, or when the front exe is msedgewebview2.exe and its parent chain reaches a CHATS exe. Refuse Enter there too, and also Ctrl+Enter and Shift+Enter.",
+    "verifier_notes": "Confirmed. Commit 6159f7a's message and the in_front docstring (messaging.py:507-515) both say that once the message box in WhatsApp's 2025 app has the keyboard, the window in front is its msedgewebview2.exe web view. That was observed on this PC. CHATS (siri.py:3747) does not include msedgewebview2.exe, so not_into_shell lets Enter through. I checked this under tests/support.py (verify-messaging/v1_enter.py). quick('type see you soon and press enter') gives [type, keys enter] with no confirm. With foreground_exe set to WhatsApp.Root.exe the Enter is refused, but with msedgewebview2.exe it runs and win.press('enter') is called. The same gap is in agent.chat_in_front, which uses host.CHATS: chat_in_front('msedgewebview2.exe', 'WhatsApp', None) returns False (v1b_agent.py). So a model plan or an app task can also press Enter in WhatsApp when its box has focus. This breaks the README safety promise that Enter is never pressed in a chat app, and the message goes to whichever chat is open, including straight after a staged message. Severity stays high."
+   },
+   {
+    "id": "B8",
+    "title": "VS Code, Kiro and Cursor terminals aren't treated as command windows: a live run can type a command and press Enter there with no yes",
+    "where": "agent.py:980",
+    "severity": "high",
+    "scenario": "A developer has VS Code (code.exe) or Kiro (kiro.exe, which this user runs) in front with its built-in terminal focused, and asks \"build my project in VS Code\". The model plans {type \"npm run build\"} then {keys enter}. The gate lets both through and the command runs. It never goes through tasks.command_policy and nobody is asked.",
+    "suggested_fix": "Treat an IDE's terminal as a shell: block when the focused control's name or AutomationId says it's a terminal (xterm's 'Terminal N' textarea), or when the exe is a known IDE (code.exe, cursor.exe, kiro.exe, windsurf.exe) and the focus isn't the editor. Add alacritty, wezterm-gui, tabby, putty and powershell_ise to SHELLS.",
+    "verifier_notes": "Confirmed by reading the code and by a harness probe (verify-agent/probe_gate.py). gate() at agent.py:980-984 blocks typing only for host.SHELLS, LAUNCHERS, the Run box and the Explorer address bar. Enter after typing is asked about only for WEB_EXES (agent.py:1029). perform() calls host.not_into_shell() and press_keys calls not_into_shell(names), and both check only SHELLS (siri.py:3444, 3752-3757). The probe returned gate(type 'npm run build', code.exe/kiro.exe/cursor.exe, focus 'Terminal 1, powershell') -> (None,''), keys enter after typing -> (None,''), and not_into_shell passes for Code.exe. windowsterminal.exe is stopped. It is reachable: sees_window gives full controls when the task names 'code' or the plan opened the IDE, AGENT_STEPS include type and keys, and the model can open the terminal itself (ctrl+`). An ordinary ask like 'install the dependencies in VS Code' would run npm install with no yes and outside tasks.command_policy. That breaks the yes-before-install rule and README's 'terminal work goes through the guarded runner'. The user runs Kiro daily, so high stands."
+   },
+   {
+    "id": "B9",
+    "title": "The model's plan can press the Windows key through a shortcut id, then type into Start search and press Enter",
+    "where": "siri.py:2749",
+    "severity": "medium",
+    "scenario": "The planner's history (siri.py:3063) shows the model earlier plans such as {\"do\":\"shortcut\",\"id\":\"windows:win+d\"}. A model that copies the format, or plans what a page told it, emits [{shortcut windows:win+s}, {type \"cmd /c ...\"}, {keys enter}]. parse_plan keeps all three, run_plan doesn't filter them, and do_step presses Win+S as vetted, pastes into SearchHost and presses Enter. That launches whatever was typed.",
+    "suggested_fix": "Only code may make a shortcut step. Strip 'shortcut' in _known as already done for 'read'/'exact', or tag it with a private marker that shortcut_plan sets and _known removes. Also refuse typing and Enter in siri.do_step when the foreground is one of agent.LAUNCHERS.",
+    "verifier_notes": "Confirmed in the harness (verify-agent/probe_shortcut.py). parse_plan keeps {'do':'shortcut','id':'windows:win+s'} because 'shortcut' is in KNOWN_STEPS (siri.py:2749). run_plan only filters RISKY_KEYS keys steps. do_step presses any BY_ID shortcut with vetted=True (siri.py:3910-3914), and BY_ID has 'windows:win' and 'windows:win+s'. The type step's not_into_shell does not know SearchHost (agent.LAUNCHERS is used only in agent.gate). The recorded sequence was [('cmd','s'), ('paste','cmd /c calc'), ('enter',)] with no tripwire. History replays earlier shortcut plans to the model (siri.py:3063, 5073-5081), so the format is in its context. This breaks README:35's invariant. Lowered to medium: the main PROMPT never offers the step, the agent's live loop can't emit it (AGENT_STEPS), and after reading web pages or messages needs_asking makes the type step ask for a yes. What's left is model error on a named turn."
+   },
+   {
+    "id": "B13",
+    "title": "File Explorer address-bar rule treats any absolute path as a folder, so a program path can be typed and run with Enter",
+    "where": "agent.py:102",
+    "severity": "medium",
+    "scenario": "A live run in File Explorer has the address bar focused. The model types \"C:\\\\Users\\\\me\\\\Downloads\\\\setup.exe\" (or %windir%\\\\System32\\\\cmd.exe) and then presses Enter. The gate allows both, and Explorer launches the program. That is an install or run without a yes, which the gate's own comment says the address bar must never allow (\"File Explorer's address bar for anything but a folder\").",
+    "suggested_fix": "Allow the address bar only when the text is an existing directory (os.path.isdir after expandvars) or a shell: folder from SHELL_FOLDERS. Ask (RISKY) for Enter in Explorer after typing, and for double-click or Enter on a file whose name ends in .exe, .msi, .bat, .cmd, .ps1 or .lnk.",
+    "verifier_notes": "Confirmed by code and harness probe. FOLDER only checks how the text starts (agent.py:102). gate allows any typed text in Explorer's Address box that starts with a drive, UNC, %var% or shell: (agent.py:982-983). Enter is only asked about for WEB_EXES (agent.py:1029). The probe gave (None,'') for 'C:\\Windows\\System32\\cmd.exe', for '%windir%\\...\\powershell.exe -c calc', and for keys enter afterwards, while plain 'cmd' was stopped. Explorer's address bar launches executables (and command lines) the way the Run box does, which is exactly what the gate's comment says must not be allowed. A double-click on an .exe list item also isn't treated as risky. Medium: it needs the model to plan an exe path, which ordinary tasks rarely do, and most installers would still hit UAC, which she can't click."
+   },
+   {
+    "id": "B11",
+    "title": "Agent screenshots capture the whole monitor, so chats and bank windows beside the task window go to the cloud model",
+    "where": "winplatform.py:1225",
+    "severity": "medium",
+    "scenario": "WhatsApp Desktop (or a banking tab in a second browser window) is open beside Settings, and the owner asks \"turn on night light\". The task window has few controls, a step changes nothing, or the model sets look:true (it did in 2 of 3 rounds in the real 21:00 run). capture() then sends a 1280-px image of the whole monitor, including the visible chat messages, to space-bunny. off_limits() judged only the foreground window.",
+    "suggested_fix": "Crop the agent's screenshot to the foreground window's rect (DwmGetWindowAttribute EXTENDED_FRAME_BOUNDS) plus its owned popups, or black out every other top-level window that intersects the monitor (at least those in CHATS or matching SENSITIVE). Map points back with the crop offset.",
+    "verifier_notes": "Confirmed. winplatform.screenshot() blits rcMonitor of the monitor holding the foreground window (winplatform.py:1225-1240). vision.capture/Shot sends all of it at 1280 px, with no crop to the window. off_limits() and gate judge only the foreground window (agent.py:1611-1622), and do_one's own comment admits other windows are in the picture (agent.py:1792-1794). The real agent.jsonl shows screenshot rounds in both real night-light runs (shots 1 and 2), so screenshots are routine. A chat or bank window visible beside a non-maximised Settings goes to space-bunny, against the intent of README:60. Lowered to medium: no screenshot goes on the first title-only look (wants_shot needs obs['full']), screenshots are disclosed for screen tasks the owner asked for, and only what is visibly uncovered on the same monitor leaks. README:261's 'never screenshots one' is about the messaging feature, not the agent."
+   },
+   {
+    "id": "B10",
+    "title": "Coding job: an auto-allowed edit to package.json, then 'npm test', runs any command with no approval",
+    "where": "coder.py:115",
+    "severity": "medium",
+    "scenario": "During a coding job OpenCode edits package.json so that scripts.test is any PowerShell or node command. Edits in the folder are approved automatically. It then runs `npm test`. command_policy calls that 'project verification' and allows it because the script name is declared, so the arbitrary command runs without the phone Yes/No or the refusal README promises.",
+    "suggested_fix": "In coding jobs, don't apply the 'project verification' allowance once the job has edited the file that defines the command (package.json, pyproject or setup.cfg, conftest.py, Cargo.toml and so on). Simpler: pass a flag so command_policy returns 'confirm' for every non-read-only command while a coding job is running.",
+    "verifier_notes": "Confirmed by code. Job.permission approves every 'edit' (coder.py:115-117). declared() allows 'npm test' or 'npm run build|lint|...' whenever package.json names that script, whatever it contains, and the same for pytest via conftest/pyproject (tasks.py:482-497, 535-536). command_policy is re-read after the edit, so a rewritten scripts.test runs anything, including blocked-list actions and installs, with no phone yes. The deeper point is that auto-approved edits plus auto-run declared tests already let agent-written code run, for example a test file that spawns a process. So the command confinement in README:298-304 can't hold against a misbehaving or prompt-injected coding model (OpenCode reads AGENTS.md and repo files). Lowered to medium: it needs the free coding model to go out of its way or be injected, the owner approved the job, and auto-running declared tests is documented behaviour."
+   },
+   {
+    "id": "B1",
+    "title": "Forwarded messages, forwarded voice notes and audio files are run as the owner's own commands, and an audio file's caption is thrown away",
+    "where": "telegram_bot.py:419",
+    "severity": "medium",
+    "scenario": "1) The owner forwards a friend's voice note (or a text from a group) to the bot, just to read it. The friend's words are transcribed, echoed back and run as a phone turn: gate=False, no read or picture rule. Anything that doesn't ask first on the phone runs straight away: close, type into the app in front, keys, lock, dark mode, memory and skill writes. 2) The owner shares an MP3 with the caption \"send this to Amma\". The caption is replaced by the song's transcription and that is run as a command. The file is never kept, so it can't be sent on. A 20 MB MP3 (about 21 min) is also decoded and resampled whole: an estimated 0.5-1 GB of float arrays on a PC with about 2.6 GB free. Nemotron then holds the speech-to-text lock for the whole clip, which stalls voice turns at the PC.",
+    "suggested_fix": "Transcribe only msg.voice. Treat msg.audio like a document (keep it to send on, and keep the caption as the words). For forwarded content (msg.forward_origin set), give the transcript or text back as information: run it through think with used={'picture'}-style 'read' marking so every change asks, or just echo it. Cap a voice note's length before decoding.",
+    "verifier_notes": "Confirmed in the code and with the harness (verify-phone/t_audio.py, nothing tripped). telegram_bot._message never reads msg.forward_origin, and PTB 22.8's Message does have it. A forwarded text or voice note from the owner's account goes to on_message exactly like typed text, and phone_job runs it as handle(job, job, None, notify) with gate=False. needs_asking therefore only applies if the model did a lookup that turn. Another person's recorded voice runs as an owner command and never meets the owner-voice rule. That goes against the codebase's own rule that third-party content is information, not instructions (PICTURE_NOTE). For msg.audio, line 420 overwrites the caption read at line 362 with the transcription. Line 399 only keeps photo/document/video, so the audio file is never kept. The harness gave on_message('close all the windows', 7) for both cases, with files kept: []. soundfile 0.14 / libsndfile 1.2.2 here decodes MP3. _hear only rejects files over 20 MB, so a roughly 19 MB song is decoded whole, peaking at about 1 GB (float32 mono, int64 arange, float64 linspace/interp), and then transcribed under the speech-to-text lock. The worst steps (send, delete, pay, install, shutdown) still ask with buttons, which limits the damage. It also needs the owner to forward or share something. But forwarding a friend's voice note to a bot to transcribe it is a common thing to do, and the caption loss is a plain bug. Medium stands."
+   },
+   {
+    "id": "B17",
+    "title": "If the whatsapp://send link doesn't switch chats, she types into the chat that was already open; a yes sends it to that person and she says \"Sent to Mum\"",
+    "where": "messaging.py:1049",
+    "severity": "medium",
+    "scenario": "WhatsApp is open on Ravi's chat, or on the last chat a lookup opened. You say \"message Mum on WhatsApp: I love you\". Mum's saved number is not on WhatsApp, for example because a digit was misheard when it was saved, so WhatsApp shows its invalid-number dialog and stays on Ravi's chat. box_shown finds Ravi's box (\"Type a message to Ravi\"), type_into types the text there, and she asks: '\"I love you\" to Mum on WhatsApp. Send it? The chat open is Ravi.' Users are used to that trailing sentence, because it is said whenever the chat's name differs from what you call them (\"Amma\" vs \"Mum\"). A yes sends it to Ravi, she says \"Sent to Mum.\", and sent_to then follows Ravi's chat as Mum, so Ravi's later messages are announced as Mum's replies. If the link is merely slow (over about 1.6 s), the text is left as a draft in Ravi's chat and the send is refused.",
+    "suggested_fix": "Read compose_box's `to` before starting the link, and wait until it changes or until it equals the chat name previously followed for this handle. If it never changes, refuse (\"WhatsApp didn't open Mum's chat\"). Better still, confirm the number from the contact panel the way _read_person does before typing. Do not follow() a chat whose name was not verified.",
+    "verifier_notes": "The code gap is real. prepare (messaging.py:1046-1060) only checks that some compose box exists after open_chat. It never compares the chat before and after the link, or checks that the opened chat belongs to the handle. send() only checks to==ready['to'] and the box text, and both pass for a chat that was already open. prepare_files has the same pattern. Two things lower the severity. First, the read-back does warn: stage_message adds 'The chat open is Ravi.' whenever the chat's name differs from the alias, so the user is told before the yes. The habituation argument is plausible but is not a silent send. Second, the trigger is unverified. It needs WhatsApp's invalid-number dialog to leave the previous chat's box exposed to UI Automation, focusable and typeable behind the modal. If the dialog is aria-modal or traps focus, box_shown returns None or type_into raises. In the slow-link case the send is refused and only a stray draft is left. The 'Sent to Mum' line and the wrong follow entry would follow a yes. This is a real missing check on a path the README calls unmistakable, but it is conditional and mitigated, so medium rather than high."
+   },
+   {
+    "id": "B15",
+    "title": "The coding-job snapshot ignores untracked files, so the job's changes to them can't be undone",
+    "where": "coder.py:74",
+    "severity": "medium",
+    "scenario": "The owner's project has new, not-yet-added files (notes.md, a new module). The job edits or overwrites them, and edits are approved automatically. `git stash create` captures only tracked changes: with only untracked work it returns nothing, and the snapshot is 'head:'. The undo line \"git checkout . ... and delete any files it added\" can't restore the owner's untracked files and invites deleting them.",
+    "suggested_fix": "Snapshot untracked files too: build a temporary index (GIT_INDEX_FILE) with `git add -A`, `git write-tree` and `git commit-tree`, then keep it under a ref. Or refuse to start, or ask, when `git status --porcelain` shows untracked files the job might touch.",
+    "verifier_notes": "Confirmed in a scratch repo (verify-agent/repo8). With only an untracked notes.md, `git stash create` printed nothing, so snapshot() falls back to 'head:<HEAD>' (coder.py:74-75). With a tracked change plus the untracked file, the stash commit lists only app.js and has no ^3 untracked parent. Edits are auto-approved (coder.py:115-117), so a job that rewrites the owner's not-yet-added files leaves no copy of their earlier content. The 'head' undo line ('git checkout . ... and delete any files it added') can't tell the owner's untracked files from the job's, and invites deleting them. That is real data-loss potential against the docstring's 'whatever it does can be undone'. Medium."
+   },
+   {
+    "id": "B14",
+    "title": "A coding job that times out, crashes or is cancelled loses its snapshot and says nothing about undoing it",
+    "where": "siri.py:3385",
+    "severity": "low",
+    "scenario": "A coding job edits several files and then hits the 30-minute TIMEOUT, OpenCode exits, or the owner cancels it. job.run() raises, and the except branch records only `error`. The `snap` id (a dangling `git stash create` commit holding the owner's uncommitted work) is never stored or spoken. The owner hears \"Open Tasks for the details\" with no undo line, and the pre-job work can only be found with git fsck until gc prunes it.",
+    "suggested_fix": "Store snap in the task as soon as it's taken (for example TASK_STORE.update or a field in the payload), and on any exception or cancel append coder.undo_line(snap) plus the list of edited files to the result line. Keep the snapshot reachable, for example with `git update-ref refs/heyjev/<task> <commit>`, so gc can't prune it.",
+    "verifier_notes": "Confirmed. snap is a local at siri.py:3385. Only the success path stores it in TASK_STORE.finish and speaks coder.undo_line(snap) (siri.py:3394-3398). TimeoutError('OpenCode took too long'), RuntimeError('OpenCode stopped') and RuntimeError('cancelled') from Job.run (coder.py:151-176) go to the except at siri.py:3399-3407, which stores only the error, or returns silently on a cancel. The job's edits stay, with no undo line, against README:302. Lowered to low: the folder is a git repo, so the job's changes show in git diff, and the pre-job stash commit still exists as a dangling object (recoverable with git fsck until gc). The loss is the separation and the guidance, not the data."
+   },
+   {
+    "id": "B19",
+    "title": "Files staged in WhatsApp's preview are never taken out when the question expires, so they wait there one Enter from going",
+    "where": "siri.py:1074",
+    "severity": "low",
+    "scenario": "\"Send this to Amma\" with report.pdf selected leads to \"Send report.pdf to Amma on WhatsApp?\". You are called away and say nothing for 90 s, or ignore the phone's buttons for 5 minutes. STAGED expires, but nothing calls drop_staged. The files stay in Amma's chat preview with the keyboard in its caption box. Next time you, or anyone at the PC, type in WhatsApp and press Enter, the PDF goes with that text as its caption. A phone No tapped after 300 s gets \"Expired, not run.\" and returns without discarding. A later turn from the same place only clears it if that turn has no question of its own. If WhatsApp renames its \"Open photo, x, item 1 of 2\" or \"Send N selected\" labels, discard_preview reports success while the files are still there.",
+    "suggested_fix": "When STAGED[\"until\"] passes with files staged (checked in heads_ups or a timer), call drop_staged(). Discard on an expired phone tap too. Make discard_preview fail closed: if the caption box (\"Type a message\", to nobody) is still present, report that it isn't clear.",
+    "verifier_notes": "The code facts hold. There is no expiry sweep for STAGED. drop_staged runs only on a no (4932), when a same-origin turn with no confirm passes over it (5036-5038), on stop (5049), or before a new stage (882/961). A phone tap after expiry returns at 'if not live: return' before handle(). So expired files stay in WhatsApp's preview until the next same-origin turn without a question. The impact is limited, though. The files are exactly the ones the user asked to send to that person, so a stray Enter sends the intended files to the intended chat. WhatsApp's media preview fills the chat pane and is plainly visible. Someone would have to press Enter in its caption box. The claim that a relabelled 'Open photo ... item' or 'Send N selected' would make discard report a false success is weak: prepare_files also relies on waiting(), so staging would fail first. Real but low."
+   },
+   {
+    "id": "B24",
+    "title": "A no clears whatever has the keyboard in WhatsApp, not the staged text in the staged chat",
+    "where": "messaging.py:1186",
+    "severity": "low",
+    "scenario": "\"Message Mum: hi\" is staged. Before answering, you open Ravi's chat in WhatsApp and type a long draft, then say \"Jev, cancel that\", or tap No on the phone within 5 minutes while WhatsApp is still in front. discard() checks only that WhatsApp is in front, then presses Ctrl+A and Backspace. Your draft in Ravi's chat (or the search box) is wiped, and Mum's \"hi\" stays in her box.",
+    "suggested_fix": "Before pressing anything, get compose_box and require `to == ready['to']`, box.CurrentHasKeyboardFocus (SetFocus first), and box_value(box) == ready['text']. Otherwise leave it and say so.",
+    "verifier_notes": "Confirmed by reading discard() (messaging.py:1178-1196). For a text message it checks only in_front(app, hwnd), then presses Ctrl+A and Backspace. Unlike send(), there is no compose_box to==ready['to'] check, no check that the box has the keyboard, and no check that the box still holds ready['text']. If the user opens another chat and types there before answering, a no wipes that draft and leaves the staged text in the original chat. Reaching it needs the user to work in WhatsApp while a question is pending (90 s for voice, 5 min for the phone) and then say or tap no. The harm is losing a draft. Real, low."
+   }
+  ],
+  "extra": [
+   {
+    "id": "S1",
+    "title": "node -e with a recursive forced delete only asks",
+    "detail": "tasks.command_policy: `node -e \"require('fs').rmSync('C:/x',{recursive:true,force:true})\"` returns confirm, README says broad forced deletion is blocked. Block recursive/forced deletes inside node -e / python -c payloads (match rmSync/rimraf/shutil.rmtree/os.remove with recursive or force) without blocking harmless -e usage."
+   }
+  ],
+  "key": "safety"
+ },
+ "voiceid": {
+  "scope": "Owner voice ID: voiceid.py (thresholds, enrolment, learning mode, calibration, drift guard, score log), its call sites in siri.py (act_on/run_turn, held phrases, follow-ups) and speech.py, test_voice_id.py / tests/test_voiceid.py, and the decider's interaction (decider.py) as a second signal.",
+  "findings": [
+   {
+    "id": "B26",
+    "title": "Voice ID turns away your own requests: your real turns score under the fixed levels, and enrolment keeps weak sentences",
+    "where": "voiceid.py:30",
+    "severity": "medium",
+    "scenario": "Voice ID is on, and you speak to her without her name (no_name is on here) for a second or more. Measured with the profile you enrolled today at 19:25: during the night-light task (20:57-21:00), 'Turn on night light' scored 0.33, 'A turn of nightlight' 0.41 and 'Yeah, okay, do it' 0.37. That last one was your yes to her own question. Each would be let go silently, because the level without her name is 0.50 (0.40 with it). Several bits of room talk she judged not for her scored 0.77-0.84 and would pass. Earlier today (18:44-19:25), when voice_id was 'on', 120 turns were let go and only 4 acted on. The ones let go included 'Open YouTube' twice and 'Open Chrome', marked 'short, without her name'.",
+    "suggested_fix": "Score each enrolment sentence against the others and ask for a re-read when it is an outlier. Set the starting levels from those leave-one-out scores, not constants. Calibrate the unnamed level from the strict-level turns she acted on (yes answers, turns that ran steps), not only from named turns.",
+    "verifier_notes": "Confirmed. The live profile.npz (10 read prints, nothing grown, named 0.40 and strict 0.50, not calibrated) scored leave-one-out gives 0.74 0.37 0.80 0.79 0.78 0.77 0.54 0.43 0.54 0.69, so enrol_turn kept two weak sentences. It only checks voice_like and MIN_SPEECH, never how the print compares with the others. The live log puts 'Turn on night light' at 0.33, 'A turn of nightlight' at 0.41 and 'Yeah, okay, do it' (a follow_up, so held to the strict level) at 0.37, all under 0.50. calibrate() only uses named scores. The strict level is max(named+0.08, p10-0.05), clamped to at least 0.38, so it is never learned from unnamed turns and these would stay rejected. I lowered it from high because voice_id on this PC is 'learning', where judge() turns nobody away. 'on' can only be reached by calibrate() (needs named turns, see #2), by the Settings/voice command when the profile is calibrated, or by editing settings by hand. The log has no 'I know your voice' line, so the 18:44-19:25 'on' period was set by hand. Also, the 'Open YouTube' / 'Open Chrome' drops in that period were 'short, without her name', which is documented behaviour (README table: a short command without her name is let go once on), not a threshold fault. 71 of the 84 short rejections had empty text. Still, once on (for example no_name off with named turns used to calibrate), the owner's unnamed follow-ups such as her own yes would be dropped far above PLAN's 2-5%."
+   },
+   {
+    "id": "B27",
+    "title": "Learning mode never ends when you rarely say her name, and its score log is re-read on every phrase",
+    "where": "voiceid.py:131",
+    "severity": "medium",
+    "scenario": "This PC has no_name on, so almost nothing you say starts with 'Hey Jev'. The live scores.jsonl has 166 entries since 19:25, and none is at the 'named' level. Across the 120 turns acted on since the 7 Oct enrolment, 0 had her name and 0 were armed. calibrate() needs 30 named turns of a second or more, so voice_id stays 'learning' (everyone counts) indefinitely. That contradicts the README ('For the first days she only learns ... switches on by herself') and leaves the owner-voice-only rule unmet. Meanwhile every phrase is logged, including room talk and empty transcripts (about 85% of entries are not turns she acted on), and the whole file is parsed again on each one, on the listen-loop thread before the turn runs.",
+    "suggested_fix": "Count turns she acted on, or yes answers, toward calibration, not only named ones, or tell the user that learning needs named turns. Keep running counts in memory or a small summary file instead of re-reading the JSONL, and stop logging empty and room-talk phrases.",
+    "verifier_notes": "Confirmed. The live scores.jsonl has 166 entries from 19:25 to 21:19: 99 strict and checked, 67 strict and unchecked, 0 named. The level is 'named' only when find_name matches or kind is 'armed', and with no_name on the owner never says it. calibrate() needs 30 named, checked turns, so voice_id stays 'learning' (everyone counts) with no end. That contradicts the README/voice line saying it switches on by itself. after_turn logs every scored phrase, room talk included, because owner_ok runs in act_on before the what-is-None return. While learning it calls calibrate(), which json-parses the whole file on the listen-loop thread before the turn runs. My timing of calibrate(): about 25 ms at 166 lines, 40 ms at 2,000 and 48 ms at 14,000, a slow creep on the hot path. Only a re-enrolment deletes the file. Medium rather than high: the effect is that voice ID never turns on (she keeps answering everyone, as before), not data loss or a safety hole, and the latency grows over days to weeks."
+   },
+   {
+    "id": "B28",
+    "title": "A phrase held for the rest of what you were saying loses its voice print, so voice ID bypasses or rejects it",
+    "where": "siri.py:5571",
+    "severity": "low",
+    "scenario": "Voice ID is on. Someone else says 'Hey Jev, open [pause] YouTube'. The first part is unfinished, so it is held, and the rest is joined to it. The joined text is a new Heard with voice=None and spoke=0.0, so judge() treats it as 'short' and lets it through because her name is in it. The same request said without the pause would be scored and turned away. The other direction: you say 'open [pause] recycle bin' without her name (no_name on). It is rejected as 'short, without her name' however long it is.",
+    "suggested_fix": "Carry the voice over when joining: keep the print of the longer part (or work one out from first audio + rest audio) and sum spoke. Alternatively judge the first part's voice when it is held.",
+    "verifier_notes": "Confirmed in code. on_phrase (siri.py:5567-5572) rebuilds the held phrase with speech.heard(...), a new Heard with the class defaults voice=None and spoke=0.0. owner_ok then gets score None, and judge() returns 'short': it lets the turn through if named, armed or follow_up, and rejects it as 'short, without her name' otherwise. unfinished() holds after DANGLING words like open/search/set/remind, so 'Hey Jev, open [pause] YouTube' does go this way. Low because it only matters while voice_id is 'on', which this PC can't currently reach (#2). Short named turns already pass unchecked by design, so the bypass is a small widening of an existing gap. The owner-rejection direction needs no_name on and voice ID on together. In learning mode the joined turn is only left out of the score log."
+   },
+   {
+    "id": "B32",
+    "title": "Calibration and voice growth trust every named turn as yours, and there is no drift guard",
+    "where": "voiceid.py:178",
+    "severity": "low",
+    "scenario": "While learning, a family member or guest says 'Hey Jev, ...' a few times, or the TV speaks just after a bare 'Hey Jev', which makes its turn 'armed'. Those scores enter the 30 'named' samples. Three low ones out of 30 push the named level to its 0.30 floor, at which other voices like Windows' (up to 0.39) pass with her name. Later, in 'on' mode, any named turn at 0.45 or more (0.30 + 0.15) is added to her picture of your voice. Up to 30 grown prints sit beside your 10 read ones (75% of the centre), each accepted against the centre it is shifting. PLAN promised 'a guard against drift'.",
+    "suggested_fix": "Score growth candidates against the read-only centre and cap grown weight (for example, centre = 0.5*read_mean + 0.5*grown_mean). Use only high-confidence turns for calibration, such as above the starting level against the read prints, and drop outliers below the starting level.",
+    "verifier_notes": "The code facts hold. While learning, after_turn logs every speaker's named or armed turns. calibrate() takes np.percentile(mine, 5) - 0.05, about the 2nd-3rd lowest of 30, so a few guest or TV scores pull the named level down to its 0.30 floor. grow() keeps up to 30 grown prints, averaged equally with the 10 read ones, with no drift guard, although PLAN.md:169 promises one. Low because there are 0 named turns here, so neither calibration nor growth has happened. Growth needs a named turn of 1 s or more scoring at least the named level + 0.15 (0.45 or more), while other voices were measured at 0.06-0.39. The LEVELS clamp is a partial guard. And any voice saying her name in under 1 s already passes unchecked by design, so a lower named level adds little new exposure. A missing safeguard, not an observed failure."
+   },
+   {
+    "id": "B34",
+    "title": "The decider's shadow log writes kind as 'True', so a retrained head loses the follow-up context",
+    "where": "train_decider.py:59",
+    "severity": "low",
+    "scenario": "You label rows in shadow.jsonl and run train_decider.py, as its docstring says. Follow-up turns were logged with kind str(gate), which is 'True'. features() one-hot encodes only 'follow_up', 'other' and 'cold', so 'True' becomes all zeros. Those rows are trained with no kind, while inference passes 'follow_up' for the same turns. The `judged` mask then drops them unless could_be_request() matches, which skews the 95% levels the head acts on in 'on' mode. On this PC, 16 of the 88 shadow rows have kind 'True'.",
+    "suggested_fix": "Log the same kind the decider was asked with ('follow_up'/'cold'), and map 'True' to 'follow_up' when reading old rows in labelled_turns().",
+    "verifier_notes": "Confirmed. siri.py logs \"kind\": str(what[2]), and gate True becomes 'True'. The live shadow.jsonl has 16 'True' and 72 'cold' out of 88. train_decider reads e.get('kind'). decider.features one-hot encodes only follow_up/other/cold, so 'True' becomes all zeros, and the judged mask drops those rows unless could_be_request matches. Inference passes 'follow_up' for the same turns. Low because none of the 88 shadow rows has a 'label' yet (only labelled rows are used), the decider is in shadow mode, and retraining is a manual step. It only matters once someone labels rows and retrains."
+   }
+  ],
+  "extra": [
+   {
+    "id": "V1",
+    "title": "Real-use evidence",
+    "detail": "Voice ID was 'on' 18:44-19:25 on 8 Oct and blocked the owner's own 'Open Chrome', 'Open YouTube' (twice), 'On YouTube', 'Open cloud'; he had to re-enrol. Against hand labels, OTHER voices scored higher than the owner (median 0.65 vs 0.54). test_voice_id.py: the owner's 10 clips scored 0.39-0.80 (one below the 0.40 named level); 2 of 10 Windows voices scored 0.74 and 0.77, above both levels; each check 41 ms. Learning mode needs 30 named turns of >= 1 s, but with Answer-without-her-name on, the owner said her name in 1 of 150 turns, so it can never calibrate. Scores.jsonl (166 entries) is re-read on every phrase."
+   },
+   {
+    "id": "V2",
+    "title": "Design the fix for how the owner actually talks",
+    "detail": "Goal (user's hard requirement): she responds ONLY to the owner, never to other people, TV or videos, and never turns the owner away. Design: (a) calibrate from the owner's unnamed turns too: a turn the owner clearly made (acted on, fast path, a yes/no to her question, a Telegram-confirmed action) is an owner sample; (b) a longer, more varied enrolment (e.g. 20 sentences, commands + questions + casual), stored embeddings per clip, and score = max/mean cosine against all enrolment clips plus a running owner centroid; (c) per-turn adaptive threshold from the owner's own score distribution (e.g. 5th percentile of verified-owner scores) with a floor, and a margin vs the best-known other-voice score; (d) a drift guard: only grow the profile from high-confidence owner turns, never from named-only turns; (e) stay in learning mode (block nothing) until the owner's verified turns pass >= 97% and known other voices (Windows voices, TV clips in Logs/missed) pass <= 5%, then switch on automatically and SAY so; (f) when on, a rejected turn is silent but logged, and a quick 'Jev, it's me' / re-enrol path exists; (g) cache the score log in memory (append-only) instead of re-reading it; (h) held/joined phrases keep their voice print. Keep per-turn cost <= 60 ms. Use the real enrolment clips (copy them from %LOCALAPPDATA%/Hey Jev/voice/clips into scratch) and Logs/missed clips plus Windows voices to measure, as test_voice_id.py does; report owner pass rate and other-voice reject rate before/after."
+   }
+  ],
+  "key": "voiceid"
+ },
+ "speed": {
+  "scope": "Speed and weight on the model path and hot path: siri.py think/ask_model/LiveSay/STREAM_SAY/the filler, streaming condition (today only when her name was said), lookups the model doesn't need, PROMPT/context()/skills_block/memory_block size, skill_usage bookkeeping inside quick() (skills.used -> skill_usage.bump_use file lock/read/write), agent.match reading a stats file on every quick(), echo_of/barge() cost (difflib over 90 s of speech on every partial), decider.py threads and 14.5 ms encode, pocket.py queued lines after a stop, tests/test_learning.py PromptSize threshold, the out-of-date .pyc problem (Jev started with bytecode writing off?), Telegram traceback floods in the log.",
+  "findings": [
+   {
+    "id": "B35",
+    "title": "The prompt-size test allows 6,000 tokens; with full memory and 40 skills it measures about 5,059 against the 4,000 budget",
+    "where": "tests/test_learning.py:234",
+    "severity": "low",
+    "scenario": "Memory fills to Hermes' limits and she has 40 skills. The system prompt then estimates at 20,236 chars (about 5,059 tokens) before the 3 history turns, the room-talk note and the request. PLAN's budget is ≤4,000 total, and it says 'A test fails if it grows'. The only total-size test asserts < 6,000, so roughly 1,000 more tokens of growth would still pass silently.",
+    "suggested_fix": "Assert against the budget (4,000), or at most today's measured value plus a small margin so growth fails the test, and trim the step list as PLAN plans.",
+    "verifier_notes": "Confirmed. I ran tests.test_learning.PromptSize: 20,236 chars, about 5,059 tokens, and it passes against assertLess(tokens, 6000). PLAN's budget is 4,000 or less in total, with 'a test fails if it grows'. The overrun itself is known and documented: README's phase table says about 4,900 tokens, not 4,000 or less, with trimming next. The new point is that the 6,000 bound already let it grow from about 4,900 to 5,059 unnoticed and leaves about 940 tokens of slack. The test is a weak guard, not a new regression."
+   },
+   {
+    "id": "B36",
+    "title": "The self-echo check runs a sliding difflib over everything she said in the last 90 s, on each partial word update and in act_on",
+    "where": "siri.py:4692",
+    "severity": "low",
+    "scenario": "She has just read back a long message or answer (about 2,400 chars across her last lines), and someone says six or more words over her or just after. Measured: echo_of takes 119 ms a call and barge() 127 ms. barge runs on every partial-word update from Nemotron while she talks, and act_on can run echo_of twice (5657, then over_her 5624) before the turn starts. With about 300 chars of recent lines it is 19-32 ms. This is pure Python, so it competes for the GIL with playback and the mic callback.",
+    "suggested_fix": "Compare against only the line she is saying now (and the previous one), step the window by a word rather than a character, or pre-filter with a cheap token-overlap test before difflib.",
+    "verifier_notes": "Mechanism confirmed. is_tts_echo builds a new SequenceMatcher for every window across her recent text, and it runs only for transcripts of 6 words or more. My timing with realistic lines: about 17 ms at 350 chars, 40 ms at 760 and 54 ms at about 1,250 chars, the most HER_SAID's 12 lines usually hold. barge uses within=30, so usually the smaller figures, on the overhear thread, not the listen loop. difflib is pure Python and yields the GIL every 5 ms, so playback and the mic aren't starved. The GIL point is overstated. The 119 ms needs about 2,400 chars of long lines. The real cost is act_on calling echo_of twice (the zone check, then over_her) on over/gap phrases of 6 or more words, which adds roughly 40-110 ms before such a turn starts. Small but real against the speed rule, and easy to fix by caching or computing it once."
+   },
+   {
+    "id": "B29",
+    "title": "With her voice on this PC, a stopped answer keeps generating its queued sentences, and the next answer starts about 10 s late",
+    "where": "pocket.py:94",
+    "severity": "low",
+    "scenario": "Her voice is 'Jev on this PC' (Pocket). That is the fallback today and becomes the default from 1 December. A streamed answer has queued three sentences, and you talk over her with a new request. The cut skips playing them, but each queued Line already started its own pocket thread. HER.end() then clears the stop flag, so they all generate in full under the engine's single lock. The first line of the next turn waits behind them. Measured: first audio 10.07 s after a stop with three sentences queued, against a ≤3 s first-word budget. A line stopped before it begins still takes 3.08 s, because stop is only checked after the first chunk.",
+    "suggested_fix": "Give each line a stop token tied to its HER.turn, not the shared Event, and check it before acquiring the lock and before generate(). Or make Lines lazily, at most one ahead of the one playing.",
+    "verifier_notes": "Mechanism confirmed. Line.__init__ starts pocket.stream for every sentence LiveSay queues. Engine.make holds one lock for the whole generate. With max_num_sentences=1 a one-sentence line produces one chunk, so the stop callback never cuts it short. _play just skips stopped lines and HER.end() clears stop. So queued lines keep the engine busy after a barge-in. But the 10.07 s was measured with three ~200-character sentences. I re-measured with three normal 60-character sentences: the next line's first audio came after 3.39 s, against 0.42 s with nothing queued, so about 3 s extra. run_plan does the steps while she talks, so the action isn't delayed, only her spoken reply. For model answers the delay also overlaps the model's own thinking time. This PC uses a Fish voice. Fish failing falls back to Pocket one line at a time, which is unaffected, so this only bites with a Pocket voice. That becomes the default from 1 Dec (FISH_ENDS), so it is real but minor today."
+   }
+  ],
+  "extra": [
+   {
+    "id": "P1",
+    "title": "Streaming and the filler never run in real use",
+    "detail": "0 streamed turns in 113 since the decider went in: think() streams only when her name was said (stream = STREAM_SAY and not gate ...), and with Answer-without-her-name on, 149 of 150 voice turns are unnamed. Also LiveSay.START needs the reply to begin with {\"steps\": [], \"say\": \", but Ling answers questions in plain words (18 of 89 replies), so only 12 of 30 spoken answers streamed in the live test. Make streaming and the filler work for every turn that is for her (gate True/cold once the model has decided it is for her, or once voice ID/decider says owner), and make LiveSay start on plain-text replies too (speak the first sentence once it is clear the reply is an answer, not a plan). Keep the 'never talk over room talk' rule: do not start speaking a cold turn until the model's first tokens show it is answering the owner (e.g. the JSON begins with steps/say, or the plain text is not {\"to\":\"others\"}). Measure first-word time on the 34 live requests (run them for real, like the live test did, with everything else tripwired)."
+   },
+   {
+    "id": "P2",
+    "title": "Lookups the model doesn't need",
+    "detail": "21 of 30 spoken answers needed a lookup; capital of Japan and moon distance were web-searched 2 of 3 times (week 1). Add a prompt rule and a local check: answer from knowledge for stable facts; look up only time-sensitive things (news, weather, prices, scores, 'latest'). Measure the lookup rate on the 34 requests before/after."
+   },
+   {
+    "id": "P3",
+    "title": "Prompt over budget",
+    "detail": "Full memory + 40 skills = 4,687-5,478 tokens (chars/4) and 4,137 API tokens with memory full and no skills; budget <= 4,000 total, fixed part 2,925 (<= 3,000). The step list is ~60% of the fixed part. Trim: shorter step descriptions, drop rarely used steps into skill_view-style progressive disclosure, cap the skills block (names + triggers only, top-N by relevance), and make tests/test_learning.py PromptSize fail above 4,000 total and 3,000 fixed."
+   },
+   {
+    "id": "P4",
+    "title": "Hot-path file I/O",
+    "detail": "quick() median doubled (0.035 -> 0.075 ms) because every call reads agent's procedure stats file (agent.match); routine phrases take 18-26 ms in Hermes' skill-usage bookkeeping (lock, read, write) inside quick(). Cache the stats in memory with mtime checks; move usage bumps to a background thread or batch them."
+   },
+   {
+    "id": "P5",
+    "title": "Decider cost and threads",
+    "detail": "Encoder 14.5 ms median (plan 3-10 ms) and ~13 idle threads from onnxruntime/tokenizers pools. Set intra/inter op threads to 1-2, warm once, and consider int8 or a shorter max length; measure."
+   },
+   {
+    "id": "P6",
+    "title": "RAM",
+    "detail": "Working set 1,090 MB at start (peak 1,180) vs the 917-1,002 MB target; private bytes ~1.49 GB; voice ID alone 81 MB (estimate 40-70). Measure per component (voice ID, decider, telegram, pocket when loaded) and cut what you can: lazy-load the decider/voice-ID encoders, release Pocket when idle, drop duplicate model copies. Report before/after."
+   },
+   {
+    "id": "P7",
+    "title": "Log floods and bytecode",
+    "detail": "Six Telegram network errors each logged a ~140-line traceback ('No error handlers are registered'); register a one-line error handler. The repo's .pyc files were stale for siri/agent/messaging/watch/winplatform (Jev apparently runs with bytecode writing off): find why (app.py / PYTHONDONTWRITEBYTECODE / -B) and make startup not recompile 24k lines every time (import siri 0.84 s cold vs 0.6 s)."
+   }
+  ],
+  "key": "speed"
+ },
+ "features": {
+  "scope": "Phone and messaging features that don't work in daily use: reply notifications (siri.py replied()/deliver_replies, watch.py take_replies), the Telegram 'stop' freeze and network-hiccup handling (telegram_bot.py, phone paths in siri.py), typed 'no'/typed confirmations on the phone, phone turns shown on the PC popup, the heads-up thread blocking on the turn lock, WhatsApp lookups ('him/her', 'my mum'), WhatsApp from closed, unverified sends ('Sent, as far as I can tell'), display-name spoofing of replies, and the model's name drift / long markdown answers / mail-calendar-file routing (PROMPT and tidy).",
+  "findings": [
+   {
+    "id": "B18",
+    "title": "replied() runs twice on the way to the PC and the phone, so every reply is told without its words and under your alias",
+    "where": "siri.py:1274",
+    "severity": "high",
+    "scenario": "Buntyyy 🐼 replies \"ok see you at 5\" to a message Jev sent. heads_ups does `replies = replied(watcher.take_replies())` and then `deliver_replies(replies)`, which calls replied() again on the already-formatted entries. Those entries have no \"text\" or \"from\" keys, so your phone gets \"buntyyy replied on WhatsApp.\\nWhat should I reply?\" and the PC says the same. Their words and the chat's own name never arrive, contrary to README line 255. The unit test passes only because it calls deliver_replies with raw notifications.",
+    "suggested_fix": "Have heads_ups pass watcher.take_replies() straight to deliver_replies, or make deliver_replies take already-formatted entries. Add a test that goes through the same composition heads_ups uses.",
+    "verifier_notes": "Confirmed by code and under the harness (verify-messaging/v3_double.py). heads_ups calls replies = replied(watcher.take_replies()) at siri.py:6191 and then deliver_replies(replies), which calls replied() a second time at siri.py:1274. The already-formatted entries have no 'text' or 'from' keys, so the PC says 'buntyyy replied on WhatsApp. What should I reply?' and the phone gets the same. The raw path gives the chat name and their words. take_replies returns raw {app, from, text, when, contact} entries, and the unit test only passes because it feeds deliver_replies raw entries. Every reply in real use loses its words and the chat's own name, which defeats the main promise of the reply feature (README 255). It is not a safety issue (fewer words leave the PC, if anything), but it breaks a headline feature 100% of the time."
+   },
+   {
+    "id": "B2",
+    "title": "\"stop\" sent from the phone freezes the Telegram bot's event loop for 30 s, and \"Stopping.\" arrives 30 s late",
+    "where": "siri.py:6319",
+    "severity": "medium",
+    "scenario": "The owner starts a task in an app from the phone (or by voice), then sends \"stop\". _message calls on_message synchronously on the bot's own asyncio loop. phone_message sets agent.STOP and then calls phone.send(), which waits up to 30 s for a coroutine on that same loop. The loop is blocked for the full 30 s: no messages, no button taps, no other sends. phone_turn's reply, deliver_replies and coding-job questions all wait behind it; deliver_replies can then report a failed send, have the PC say the reply out loud, and still send it later. A tap processed meanwhile calls phone.settle() inside `with busy`, so voice turns at the PC stall too. After 30 s _call logs 'telegram send failed: TimeoutError' and the 'Stopping.' message goes out late.",
+    "suggested_fix": "In _call, if threading.current_thread() is the loop's thread (or asyncio.get_running_loop() is self.loop), schedule with loop.create_task(coro_fn()) and return without waiting. Or have phone_message send 'Stopping.' from a short-lived thread or the phone_jobs queue.",
+    "verifier_notes": "Confirmed. Bot._message is an async handler on the bot's own loop and calls on_message synchronously. siri.phone_message (6312-6320) sets agent.STOP and then calls phone.send(), which goes through _call. _call does asyncio.run_coroutine_threadsafe(coro, self.loop).result(30) on the loop's own thread, and nothing checks whether it's already running there, so it deadlocks for the full 30 s. Rerunning the harness script: the handler returned after 30.0 s, 'Stopping.' was sent at 30.1 s, and a 1 s ticker on the loop ran at 0.0 and then not again until 30.1 s. The 'stop' itself still works at once because STOP is set first. But the documented 'stop from your phone' feature (README line 60) freezes the whole remote for 30 s every time it's used. Updates and taps aren't processed during that time. Every phone.send from other threads (phone_turn's result, deliver_replies, a coding job's phone_ask) blocks, and can time out and report failure, while the coroutine still runs later. Whenever agent.RUNNING is set, this happens in normal use. Medium is right."
+   },
+   {
+    "id": "B3",
+    "title": "A typed \"no\" or \"cancel\" to a phone question drops the question but leaves the drafted message typed in the WhatsApp chat, with the reply \"Sure.\"",
+    "where": "siri.py:4905",
+    "severity": "low",
+    "scenario": "From the phone: \"message Mum on WhatsApp: hi\". She types it into Mum's chat on the PC and sends \"Send hi to Mum?\" with buttons. The owner types \"no\" (or \"cancel\", \"don't send it\") instead of tapping No. The typed no isn't taken as a no: no TAPPED, so pending is None. quick() answers \"Sure.\" / \"No problem.\" (the 'okay' replies), which reads like agreement to send. Line 5034 then clears PENDING, but drop_staged() only runs for staged files, so messaging.discard is never called. 'hi' stays typed in Mum's WhatsApp box on the PC, one Enter from going, and STAGED stays ready for 5 min. A spoken no, or the No button, clears it. A typed yes gets an explicit 'Tap Yes on my question', but a typed no gets no such redirect.",
+    "suggested_fix": "On a phone turn with a live phone PENDING, treat NO.fullmatch(plain(words)) like the No button: drop_staged()/agent.drop() and say that it's left unsent. Or answer 'Tap No on my question' the way a typed yes is redirected.",
+    "verifier_notes": "The mechanism is confirmed (verify-phone/t_typedno.py, nothing tripped). For a phone question, pending is only set when TAPPED (line 4902-4903), so the NO branch that calls drop_staged/messaging.discard (4924-4933) is never reached by a typed 'no'. QUICK maps no/cancel to the 'okay' replies ('Okay.', 'No problem.'). Line 5034 then clears PENDING, but 5036-5038 only call drop_staged() for staged files. So the typed text stays in the WhatsApp box and STAGED stays set. For 'No, cancel it' and \"don't send it\" the model is called, and again nothing is discarded. Not run (patched out): a later Yes tap. In the code, the tap path (6268-6272) needs PENDING['plan'], which line 5035 has cleared, so it would get 'Expired, not run.'. message_send also needs SEND_OK, which only comes from a yes on a live PENDING. So nothing can be sent without a tap, and no safety gate is crossed. The real harm is a draft left in the contact's chat on the PC, which is the same state the voice path already allows when a question is passed over or runs out. That, plus a mildly misleading 'Sure.', puts it at low rather than medium."
+   },
+   {
+    "id": "B5",
+    "title": "A typed confirmation other than a bare yes goes to the model, which replans the question's step and runs it with no tap and without the after-reading check",
+    "where": "siri.py:4905",
+    "severity": "low",
+    "scenario": "From the phone: \"read my latest messages and do what Ravi asks\". Reading makes the planned type/keys/contact/close step ask first (needs_asking read=True), with buttons. The owner types \"Yes, type it\" or \"yes please do that\" instead of tapping. plain() turns these into 'type it' / 'please do that', which aren't YES.fullmatch, so there is no 'Tap Yes' redirect. pending is None (not TAPPED), so the text goes to think(). The model sees the question in its history and replans the step. This turn has no lookups, so read=False, and with gate=False nothing asks: the step that a message steered runs with no tap. The README says only a tap answers a phone question. Only ASKS_YES steps (message_send, install_run, agent_resume) are stripped from model plans; power steps ask again.",
+    "suggested_fix": "While a phone question is live, answer any phone turn that said_yes() matches (not just bare YES) with 'Tap Yes on my question'. Or carry the pending plan's 'read' taint into the next turn, so a replanned step from that question still asks.",
+    "verifier_notes": "Confirmed with the harness (verify-phone/v_typedyes.py, think mocked to replan the step, nothing tripped). The 'Tap Yes' redirect (4905-4908) only fires for YES.fullmatch(plain(words)). 'Yes, type it' becomes 'type it', which quick's _literal rule takes as a type step that types the literal word 'it', unasked. 'yes please do that' and 'sure, go for it' go to think(), and the replanned step ran with no confirm and no tap. That happens because handle runs with gate=False, and needs_asking only applies when this turn did a lookup (read is per turn, line 3154). think() only strips INFO and ASKS_YES steps (3139), so type/keys/close/screen replans get through. The comment at 1949-1950 shows the model really has replanned after typed yeses. This contradicts README line 313 ('A typed yes ... doesn't'). Low: the owner did type an approval, and send, install, agent_resume and power steps are still protected."
+   },
+   {
+    "id": "B20",
+    "title": "\"Send this to him\" or \"message her on WhatsApp\" after a reply searches WhatsApp for the literal word \"him\"/\"her\", opening unrelated chats",
+    "where": "siri.py:1016",
+    "severity": "medium",
+    "scenario": "After \"Buntyyy replied on WhatsApp ... What should I reply?\", you send a photo from the phone and type \"send this to him\", or say \"message her on WhatsApp: ok see you\". direct_share and direct_message take who='him'/'her'. find_contact fails, so look_up('him') types \"him\" into WhatsApp's search and opens up to three matching chats (Himanshu and so on), marking them read. She then offers a stranger: \"I found Himanshu in your WhatsApp, number ... Is that them?\". The reply-pronoun logic (REPLYING) is only used by direct_reply, which runs after these two.",
+    "suggested_fix": "Before direct_share and direct_message (and in stage_message/stage_files), map him/her/them to REPLYING[origin()]['contact'] when it is live, otherwise refuse (\"Who should I send it to?\"). Never send a pronoun to whatsapp_people.",
+    "verifier_notes": "Confirmed under the harness (verify-messaging/v5_pronoun.py). _quick runs direct_share and direct_message before direct_reply. SHARE's WHO and MESSAGE_PATTERNS accept 'him' and 'her'; only TO_ME is excluded. Both 'send this to him' and 'message her on WhatsApp: ok see you' therefore go stage_files/stage_message -> NeedContact -> look_up('him'/'her') -> whatsapp_people searching the literal pronoun, and offer whoever WhatsApp finds. 'Send this to him' after a reply prompt, with a photo from the phone, is a natural phrasing, and there is no pronoun handling for files at all. Nothing is sent without two yeses that name the stranger and the number. But opening up to 3 unrelated chats marks them read, which sends read receipts to third parties, and the stranger offered is confusing. Medium is fair."
+   },
+   {
+    "id": "B22",
+    "title": "A message to WhatsApp started from closed fails after about 13 s with a misleading \"didn't open the chat\"",
+    "where": "messaging.py:437",
+    "severity": "low",
+    "scenario": "WhatsApp was quit (\"Close WhatsApp\" quits the 2025 app). You say \"message Mum on WhatsApp: running late\". bring_up returns as soon as the window shows, open_chat sleeps 1.2 s, and box_shown polls for only 4 s. The code itself says the page takes up to 25 s to draw from closed (LOADING). box_shown returns None, then offline_reason does its roughly 7 s Reconnect search. She says \"WhatsApp didn't open the chat with Mum, so I've not typed anything\" although the number is fine, and you have to ask again. prepare_files has the same problem.",
+    "suggested_fix": "When window_of() was None before the link (a cold start), wait for the page the way whatsapp_people does (search box or compose box present, up to LOADING) before the 4 s chat check, and say \"WhatsApp is still starting\" rather than blaming the chat.",
+    "verifier_notes": "Real in the code. prepare and prepare_files use box_shown(app, hwnd, wait=4.0) after open_chat's bring_up, which returns once the window is visible, plus a 1.2 s sleep. The same module says the 2025 app's page takes up to 25 s to draw from closed (LOADING, which whatsapp_people waits for). From closed, a message likely fails after about 4 s plus offline_reason's roughly 7 s look, with 'didn't open the chat', which is misleading. It fails safe, though: nothing is typed or sent, and asking again works once WhatsApp has loaded. It only happens after WhatsApp was fully quit. It is a reliability and latency annoyance, not a medium-impact defect."
+   },
+   {
+    "id": "B6",
+    "title": "What the owner types on the phone, and her answers, appear on the PC's popup and window",
+    "where": "siri.py:4979",
+    "severity": "low",
+    "scenario": "The owner is away and asks from the phone something private (\"what does this blood report say\", \"draft a reply to Ravi about the loan\"). Every phone turn that reaches the model emits Thinking with the typed words. The popup is on by default, so the 'thinking' pill shows those words at the bottom of the PC screen, and the window's detail line then shows her answer (Ready). Anyone in the room sees the phone conversation. The code already keeps the 'Heard' caption for voice only (line 4952), but the Thinking and Ready emits aren't limited the same way.",
+    "suggested_fix": "For origin()=='phone', emit generic states ('Phone: thinking', 'Phone: done') without the words or answer, or show them only when the PC owner opts in.",
+    "verifier_notes": "The behaviour is confirmed. handle emits Thinking with the phone words (4979) whatever the origin, and also Ready with her answer (5086). assistant_ui maps Thinking to the 'thinking' pill, and _set_state shows it with that text when popup is on (the default in settings.py). say() keeps phone lines out of 'Speaking', but these two emits are not limited the same way. The 'Heard' origin check (4952) came with the read-back feature (ac3f2b5), so it isn't clearly a privacy decision. No README promise says phone turns stay off the PC screen. Showing what is controlling the PC can be useful. And Telegram Desktop on this PC (which telegram_bot.SENDS/watch.own_reply plan for) would show the bot's replies as notifications anyway. So it's real but a small, low privacy gap."
+   },
+   {
+    "id": "B21",
+    "title": "The heads-up thread blocks on the turn lock while telling something, so reply polling and phone delivery stop during long turns",
+    "where": "siri.py:6210",
+    "severity": "low",
+    "scenario": "A reply was just delivered to your phone and also queued for the PC (daytime, Heads-ups on). You then answer it from the phone, or a task in an app is running, and that turn holds `busy` for 10 s to 2 min. tell() waits up to 10 s, then blocks on `with busy:`. Until the turn ends there are no 4-second looks at notifications and no deliveries to the phone. WhatsApp Desktop takes its own toasts away within moments (watch.py:24-26), so a second person's reply in that window becomes a nameless \"new message on WhatsApp\" and is never told or sent to the phone. This contradicts \"straight away and at any hour\" (README 255).",
+    "suggested_fix": "Run the polling and phone delivery on their own short thread, or make tell() non-blocking: try busy.acquire(timeout=0) and, if that fails, leave the line in `later` and carry on the loop.",
+    "verifier_notes": "The design flaw is real. Polling, phone delivery and telling all happen in the single heads_ups thread. tell() does wait_her_turn (up to 10 s) and then blocks on 'with busy:'. run_turn and phone_job hold busy for the whole handle(), including app tasks and WhatsApp lookups. So while something is queued for the PC and a long turn runs, there are no 4-second looks at notifications. WhatsApp Desktop removes its own toasts (watch.py:24-26), so a reply arriving in that window can be lost or reduced to a nameless heads-up. The stall needs a coincidence, though: a turn longer than about 10 s, an item already queued for the PC (heads-ups on, daytime), and a followed person's further reply inside that window. The first reply is still caught and sent to the phone, because polling and delivery happen before tell blocks. Phone Link's copy, if used, persists longer. It is a silent loss but an infrequent one, so low rather than medium."
+   },
+   {
+    "id": "B23",
+    "title": "On Telegram and the apps she types her way into, anyone whose display name equals your contact's is announced as that contact's reply",
+    "where": "messaging.py:268",
+    "severity": "low",
+    "scenario": "You messaged \"bittu\" on Telegram through Jev, so it is followed by alias. A stranger who sets their Telegram display name to \"Bittu\" messages you something like \"it's me, new phone, send me the code you just got\". Telegram Desktop titles that notification \"Bittu\", followed() matches it, and Jev tells you out loud and on your phone \"Bittu replied on Telegram: ... What should I reply?\", vouching for an identity anyone can claim. Display names on Telegram, Signal and similar apps are self-chosen and not unique.",
+    "suggested_fix": "Don't follow by alias at all, so no reply heads-up comes from apps whose chat can't be identified. Failing that, say it as \"a message from someone called Bittu on Telegram\" without asserting it's your Bittu, and don't let it set REPLYING.",
+    "verifier_notes": "The matching works as described. follow() sets by_alias for Telegram and the apps she types her way into, because their chat name can't be read. followed() then compares _letters(name) with the toast's first line, so any sender whose display name equals your alias counts. This is a documented, intentional trade-off: README says it is by the name you call them on those apps. Jev adds little spoofing beyond Telegram's own toast, which shows the same 'Bittu' title. An attacker must also guess the exact alias, and a drafted 'tell him ...' goes to the real contact's saved username or number, not to the impostor. Low."
+   },
+   {
+    "id": "B4",
+    "title": "A network hiccup while fetching a voice note or acknowledging a tap drops it with no reply; no error handler is registered",
+    "where": "telegram_bot.py:524",
+    "severity": "low",
+    "scenario": "Commit a728303 says the phone 'always answers'. But: (a) the voice note download happens outside _hear's try, so a TimedOut/NetworkError while fetching it ends the handler with no reply and the command is lost; (b) _tap awaits q.answer() before anything else, so if that call fails (network, or a late tap after the loop was blocked as in the stop freeze above), the owner's Yes/No tap is silently dropped and the question waits out its 5 minutes; (c) the voice echo _reply at line 424 failing also aborts before on_message. With no error handler, python-telegram-bot only writes 'No error handlers are registered' to the log.",
+    "suggested_fix": "Wrap the download in _hear's try. Call on_tap before q.answer() and put q.answer() in try/except. Register app.add_error_handler to reply 'Something went wrong, send that again' to the owner's chat.",
+    "verifier_notes": "Confirmed. In _hear, note.get_file()/download_as_bytearray() (line 524) come before the try at 533. In _tap, `await q.answer()` (543) comes before the owner check and on_tap. The voice echo _reply (424) also comes before on_message. telegram_bot.py registers no error handler, and PTB 22.8's _application.py:1939 then only logs 'No error handlers are registered'. The harness (t_neterr.py) showed a TimedOut ending the voice-note handler with no reply and no on_message, and a failing q.answer() dropping the tap. That contradicts a728303's 'always answer' for those paths. q.answer can also fail with 'query is too old' after delays like the 30 s freeze in #2. Low is right: it needs a network failure at that exact moment, and nothing unsafe happens. Also, `answered` is only set after answer() succeeds, so tapping again still works within the 5 minutes."
+   },
+   {
+    "id": "B25",
+    "title": "The WhatsApp lookup searches the raw words, so \"message my mum\" finds nobody and asks for the number",
+    "where": "messaging.py:557",
+    "severity": "low",
+    "scenario": "\"Message my mum on WhatsApp: running late\". The contacts book strips \"my\" (alias_key gives \"mum\"), but look_up passes the alias as said, \"my mum\", to whatsapp_people, which types \"my mum\" into WhatsApp's search. A contact saved as \"Mum\" isn't found, and the first-word retry is skipped because \"my\" has fewer than 3 letters. She says \"I couldn't find my mum in your WhatsApp. What's their phone number?\" instead of offering Mum, unlike \"message mum\", which finds her.",
+    "suggested_fix": "Search with the alias stripped the same way alias_key strips it (drop my/the and possessives), keeping the user's casing, and retry with the last word as well as the first.",
+    "verifier_notes": "Confirmed under the harness (verify-messaging/v10_mymum.py). quick('message my mum on WhatsApp: running late') leads to whatsapp_people(['my mum']) and 'I couldn't find my mum in your WhatsApp. What's their phone number...'. alias_key('my mum') is 'mum', but look_up passes the raw alias, and the first-word retry is skipped because 'my' has fewer than 3 letters. It is harmless: she asks for the number instead of finding the contact, and nothing goes to the wrong person. Low."
+   }
+  ],
+  "extra": [
+   {
+    "id": "F2",
+    "title": "'Sent, as far as I can tell'",
+    "detail": "'Hi' went to the same contact 4 times after she said 'Sent, as far as I can tell' and the owner said it hadn't arrived; once the word 'yes' was staged as a message. Read the 2025 WhatsApp app's post-send state properly (the message appears in the chat list / the box empties / the last bubble text equals the draft) and never report a send as done unless verified; never stage a bare yes/no as message text."
+   },
+   {
+    "id": "F4",
+    "title": "Model misc",
+    "detail": "The model called the owner 'Harish' (settings say Hari); spoken answers up to 374 chars with ** and numbered lists; time-zone answers wrong on space-bunny; the planner refuses mail/calendar ('I can't send emails directly') although the task agent can do Gmail; file/system tasks go to blocked terminal commands (mkdir on Desktop, Clear-RecycleBin) instead of the agent. Fix in PROMPT/context without growing it: use the settings name; shorten spoken answers (tidy() to ~2 sentences for voice, full text on Telegram); route mail/calendar/file tasks to the task agent; keep time-zone math from the 'Now' line."
+   }
+  ],
+  "key": "features"
+ },
+ "parse": {
+  "scope": "Parsing and routing leftovers: siri.py parse_plan/TOOL_ATTR (attributes on one line), the local fast path misreads ('play avengers doomshare tyler' plays the misheard words, 'search career eye dee on you tube' opens a Google search with a stray play:false), parse_duration ('stretch for 10 minutes in 1 hour' -> 4200 not 3600), test_open_mic.py reporting (only 3/20 reach the model; its average understates model time), PLAN.md/README claims that are no longer true (Telegram polls before pairing; PENDING per place), the offline harness's out-of-date expectation for 'every weekday at 9'.",
+  "findings": [
+   {
+    "id": "B7",
+    "title": "PLAN.md still says the bot won't poll before pairing and that PENDING is one per place; the code does neither",
+    "where": "PLAN.md:430",
+    "severity": "low",
+    "scenario": "Someone checking the plan's safety claims reads that Telegram 'stays off until you pair your phone', 'refuses to poll at all until that ID is set', is 'off until you pair it', and has the test 'the bot won't poll before pairing'. They also read that PENDING 'becomes one per place it was asked from'. In fact the bot polls whenever a token is saved and answers /start before pairing. There is still one global PENDING tagged with an origin, so a phone question silently overwrites a voice question that is waiting, and the reverse (its staged WhatsApp text too).",
+    "suggested_fix": "Update PLAN.md lines 64, 430, 436, 455 and 470 to describe listening whenever a token is saved, and the single origin-tagged PENDING. Or keep a PENDING per origin as planned.",
+    "verifier_notes": "Confirmed. This is docs only. PLAN.md:64, 430, 436 and 470 still say the bot is off, or won't poll, until paired. But siri.py:6338 calls phone.start() whenever a token is saved, and Bot.start/_message (215-218, 363-380) poll and answer /start while unpaired. PLAN.md's own status row (line 24) and README line 309 describe the new behaviour, so the plan contradicts itself. PLAN.md:455 says PENDING 'becomes one per place it was asked from'. In fact there is one global PENDING tagged with an origin (4768), and PENDING.update at 5065 replaces whatever is waiting from the other place. The origin check does stop a yes from the wrong place (fails closed), but a waiting question from the other place is silently dropped. Nothing changes at runtime, so low."
+   }
+  ],
+  "extra": [
+   {
+    "id": "R1",
+    "title": "TOOL_ATTR one-line attributes",
+    "detail": "siri.py ~2740: `<tool_call>timer\\n seconds=300 label=\"5 min\" alert=\"...\" /` became {seconds: '300 label=\"5 min\" alert=... /'} and a YouTube call got the query 'lofi music\" play=true /'. Parse several key=value attributes on one line, quoted or bare, and a trailing '/'."
+   },
+   {
+    "id": "R2",
+    "title": "Fast path on misheard queries",
+    "detail": "'play avengers doomshare tyler' and 'search career eye dee on you tube' run locally before the model with the misheard words. When a query has low STT confidence or looks garbled (no dictionary words, odd tokens), send it to the model, which is told to correct mishearings."
+   },
+   {
+    "id": "R3",
+    "title": "parse_duration with two durations",
+    "detail": "'remind me to stretch for 10 minutes in 1 hour' gives 4200 s and label 'stretch for'; want 3600 s, label 'stretch for 10 minutes'."
+   },
+   {
+    "id": "R4",
+    "title": "Docs",
+    "detail": "PLAN.md and README: fix the claims the audit found false (Telegram polls whenever a token is saved; PENDING is not per place; mic pauses while she talks is no longer true; 'stop' with Parakeet). Keep the README's voice."
+   }
+  ],
+  "key": "parse"
+ },
+ "behaviour": {
+  "key": "behaviour",
+  "scope": "How she behaves in the room and learns: barge-in (speech.py + siri.py barge()/listen loop/overhear thread: a command said over her is dropped; 'stop' with Parakeet), the learning review triggered by a plain 'No' (learn_later/review), the task agent never learning because her name wasn't said and replaying 'turn on X' when X is already on (agent.py learn/replay gates), unneeded 'Should I...?' asks and room talk getting answers or actions (needs_asking, could_be_request/ASKING, decider use, let_go).",
+  "findings": [
+   {
+    "id": "B30",
+    "title": "Talking over her with a plain command stops her, then the command is dropped",
+    "where": "siri.py:4617",
+    "severity": "medium",
+    "scenario": "Nemotron is on and Answer without her name is off (the default). While she answers, you say 'open Chrome', 'stop the music' or 'pause the video'. barge() returns 'cut', so she stops mid-sentence. When her turn ends, the same words are placed 'over' her, which makes them a strict follow-up. route() demotes them to 'other' and returns None, so nothing happens. The comment in the code says they are 'then done as soon as her turn is over', and the test says of 'stop the music': 'stop, then it's done'. With no_name on (as on this PC) they are sent as 'cold' instead, where the model may still decide they weren't for her.",
+    "suggested_fix": "Treat a phrase that cut her as said to her: remember the cut's turn, and in act_on route that phrase with strict=False (or kind 'armed'). Alternatively, only cut for what route would accept.",
+    "verifier_notes": "Confirmed with a snippet under tests/support. barge('open Chrome' / 'stop the music' / 'pause the video' / 'turn the volume down', final) returns 'cut'. route(..., 'follow_up', strict=True) returns None with no_name off and 'cold' with no_name on. 'okay now open notepad' works because CARRY_ON matches. In act_on a phrase said over her becomes zone 'over', so kind is follow_up with strict=True, and route demotes it to 'other' without a CARRY_ON lead. So with Nemotron and the default no_name False, she stops mid-sentence and then drops the command silently. That contradicts the comment at 4590 and the test_overhear note 'stop, then it's done'. Only Nemotron runs overhear, and this PC has no_name on, so here the command reaches the model as 'cold'. That limits it on this PC, but it is a real defect in the barge-in feature's main case."
+   },
+   {
+    "id": "B31",
+    "title": "A plain 'No' to her question starts an immediate learning review told to 'fix the fact or the skill'",
+    "where": "siri.py:2449",
+    "severity": "medium",
+    "scenario": "She asks 'Send it?' or 'Should I open Settings...?' and you say 'No', 'Nope' or 'No thanks'. learn_later sees a 'correction' and starts review(wait=0, focus='No') right away, skipping the 90 s throttle. The model is told 'They just corrected her: \"No\". Fix the fact or the skill it's about first'. Declining her offer becomes pressure to write memory or change a skill. That review can also rewrite or archive a routine you taught: learn_skill(agent=True) only protects her procedures. Each 'no' also costs an extra free-model call.",
+    "suggested_fix": "Don't count a bare no/nope/no thanks (NO.fullmatch) as a correction, especially when a question was pending. Require a correction plus content ('no, I said X'). Refuse review deletes and rewrites of skills whose usage record isn't created_by 'agent'.",
+    "verifier_notes": "Confirmed with a snippet. learn_later('No', [], [], True), 'No.' (gate False), 'Nope' and 'No thanks' each start review(wait=0, focus=...) even with the 90 s throttle just used. 'No' with gate 'cold' does not, and neither does 'Not now'. A 'no' to a pending question builds a say-only plan in handle and still reaches learn_later at 5084. CORRECTION.match(plain('no')) is True, and the review prompt then says 'They just corrected her: \"No\". Fix the fact or the skill it's about first'. learn_skill(agent=True) only blocks procedure skills, so a routine you taught can be patched or archived by that review. Settings 'learning' defaults to True. The model may still return nothing, so the junk is probabilistic. But every decline costs a background free-model call and pushes it to write memory or skills, which is one of the listed threats."
+   },
+   {
+    "id": "B12",
+    "title": "A learned 'turn on X' replayed while X is already on counts as a failure, calls the model with a screenshot, and is archived after 3 tries",
+    "where": "agent.py:1311",
+    "severity": "low",
+    "scenario": "The night-light run on 8 Oct finished with 'click Turn on now' (Settings' button that becomes 'Turn off now'). Learned that way, the procedure is [open Settings, ui Display, ui 'Turn on now', expect has 'Turn off now']. When night light is already on and the owner says \"turn on night light\", _find_step can't find 'Turn on now'. That's a non-env failure, so it's counted and a repair runs with a screenshot and a model call. The third time, the procedure is deleted and she says \"That's not worked a few times now\".",
+    "suggested_fix": "Before counting a failure, check the procedure's final expect step: if the screen already shows it (run expect(last_expect, r, wait=0)), finish 'done' with \"It's already on\". Also record the expect's value before acting, so a button whose label is the opposite state is learned as a pair.",
+    "verifier_notes": "Confirmed by code. For a state-labelled button, record() keeps no state, because state is kept only when ui_toggle() returns one (agent.py:1921-1927). In replay, _find_step waits STEP_WAIT (8 s), then returns 'it isn't on screen' with two=False (agent.py:1241-1250, 1310-1313). failed() counts it through finish/_note_run, which raises fails_in_row (agent.py:602-606), then repair() runs with a screenshot and a model call. When the model sees 'Turn off now' and plans nothing, done() finishes 'looked'. The repair run has no name, so it doesn't reset the count, and three such asks in a row archive the procedure. The real log shows a run that ended with click 'Turn on now', so the path is plausible. Lowered to low: there is no safety impact, it only happens on repeated asks while the thing is already on, any normal successful replay resets fails_in_row, and an archived task is just re-learned live."
+   },
+   {
+    "id": "B33",
+    "title": "With Parakeet (the default speech-to-text), 'stop' can't stop her or a task part way, and the README still says the mic pauses while she talks",
+    "where": "siri.py:6348",
+    "severity": "low",
+    "scenario": "Default settings (stt_engine parakeet). She is doing a task in an app, or reading a long answer, and you say 'stop' or 'Jev, stop'. The overhear thread only starts for Nemotron, so nothing hears it until the turn is over: the listen loop itself is blocked inside run_turn. The task runs to the end. README line 60 says '\"Stop\", her name or right Alt stops a task part way'. README line 150 says the mic 'only pauses while she talks', but in speech mode it now keeps listening (talk_over defaults to True). Barge-in and ducking are not documented at all, and PLAN's status still lists 'interrupting her (\"stop\")' as to do.",
+    "suggested_fix": "Start overhear for Parakeet too, using its whole-phrase transcribe on short phrases, or limit the README claim to Nemotron and right Alt. Update README line 150 and add a barge-in section. Update PLAN's status.",
+    "verifier_notes": "Confirmed. overhear only starts if ears.live (nemotron), and settings.py defaults stt_engine to 'parakeet'. Recorder._cb feeds rec.side only when it isn't None, and act_on runs run_turn synchronously on the listen loop. So with Parakeet a spoken 'stop' isn't heard until the turn or task ends. Right Alt (HER.cut) and 'stop' from the phone (phone_message sets agent.STOP) still work. README:60 says '\"Stop\", her name or right Alt stops a task part way' without saying which engine. README:150 still says the mic 'only pauses while she talks', although keeps() leaves it on in speech mode with talk_over True. Barge-in and ducking aren't described, and PLAN still lists interrupting her as to do. Documentation drift plus an engine-dependent gap. This PC uses Nemotron, so it isn't affected."
+   }
+  ],
+  "extra": [
+   {
+    "id": "F1",
+    "title": "The task agent never learns",
+    "detail": "Two real runs (night light on/off) worked but 'her name wasn't said' so nothing was learned or replayed. The user's rule: she must learn tasks herself and replay them without the model. Learning must happen for any task the owner clearly asked for (acted on after a yes, or a verified-owner turn), not only named turns."
+   },
+   {
+    "id": "F3",
+    "title": "Unneeded 'Should I...?' and room talk",
+    "detail": "17 'Should I look at your screen / do that?' asks on voice turns, 3 yeses; 7 went to real requests that didn't need it. She spoke or acted on 22 of 88 room-talk turns (typed 44 characters once, played a YouTube video once, saved a junk memory). 5 clear commands were dropped by the room filter ('Select smile', 'Opennoted', 'Nightlight'). Tighten: a screen-task ask is only needed when the words are ambiguous; use the decider's 'sure not for her' (89% right) to drop room talk before the model; add 'nightlight/night light', 'select', single-word app/setting names to the request vocabulary."
+   }
+  ]
+ }
+}
