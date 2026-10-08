@@ -103,6 +103,89 @@ class Rules(unittest.TestCase):
         self.assertEqual(len(job.refused), 2)
 
 
+    def test_its_own_tests_ask_once_it_changed_what_they_run(self):
+        """Edits go ahead, and "npm test" ran by itself as the project's own test: but it runs whatever package.json
+        says, so a job that rewrote scripts.test could run any command with nobody asked."""
+        here = git_folder()
+        with open(os.path.join(here, "package.json"), "w", encoding="utf-8") as f:
+            json.dump({"scripts": {"test": "jest", "build": "tsc"}}, f)
+        test = {"toolCall": {"kind": "execute", "title": "npm test", "rawInput": {"command": "npm test"}}}
+        job = coder.Job(here, "fix the failing test")
+        self.assertTrue(job.permission({"toolCall": {"kind": "edit", "title": "src/app.js"}}))
+        self.assertTrue(job.permission(test))  # the code changed, not what the test runs: it goes ahead
+        for edit in ({"title": "package.json"}, {"title": "Edit", "rawInput": {"filePath": "C:\\p\\package.json"}},
+                     {"title": "Edit", "locations": [{"path": "C:\\p\\tests\\conftest.py"}]}, {"title": "web/.npmrc"}):
+            job = coder.Job(here, "fix the failing test")
+            self.assertTrue(job.permission({"toolCall": {"kind": "edit", **edit}}))  # the edit itself still goes
+            self.assertFalse(job.permission(test), edit)
+            build = {"toolCall": {"kind": "execute", "rawInput": {"command": "npm run build"}}}
+            self.assertFalse(job.permission(build))
+            self.assertEqual([r.split(" (")[0] for r in job.refused], ["npm test", "npm run build"])
+        asked = []
+        job = coder.Job(here, "x", ask=lambda q: asked.append(q) or True)
+        job.permission({"toolCall": {"kind": "edit", "title": "package.json"}})
+        self.assertTrue(job.permission(test))
+        self.assertEqual(asked, ["OpenCode wants to run npm test. Let it?"])
+
+
+def git(folder, *args):
+    return subprocess.run(["git", "-C", folder, "-c", "user.name=t", "-c", "user.email=t@x", *args], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+class Snapshots(unittest.TestCase):
+    """The folder as it was before a job, to put back."""
+
+    def setUp(self):
+        p = mock.patch.object(coder, "CREATE_NO_WINDOW", 0)  # Windows only
+        p.start()
+        self.addCleanup(p.stop)
+        self.folder = git_folder()
+        self.write("app.py", "print(1)\n")
+        git(self.folder, "add", "app.py")
+        git(self.folder, "commit", "-q", "-m", "first")
+
+    def write(self, name, text):
+        with open(os.path.join(self.folder, name), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def read(self, name):
+        with open(os.path.join(self.folder, name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_new_files_git_doesnt_track_yet_are_kept_too(self):
+        """git stash create leaves out files not added yet: with only those, there was nothing to keep, and a job that
+        overwrote your notes.md left no copy of what you'd written, and an undo line that said to delete it."""
+        self.write("notes.md", "my notes\n")
+        self.write("app.py", "print(2)\n")
+        snap = coder.snapshot(self.folder)
+        self.assertTrue(snap.startswith("files:"), snap)
+        self.assertEqual(git(self.folder, "status", "--porcelain"), "M app.py\n?? notes.md")  # nothing changed
+        self.write("notes.md", "the job's\n")
+        self.write("app.py", "print(3)\n")
+        line = coder.undo_line(snap)
+        self.assertIn("git restore --source", line)
+        git(self.folder, "restore", "--source", snap.split(":")[1][:10], "--worktree", ".")  # as the line says
+        self.assertEqual((self.read("notes.md"), self.read("app.py")), ("my notes\n", "print(2)\n"))
+        self.assertIn(snap.split(":")[1], git(self.folder, "for-each-ref", "refs/heyjev"))  # kept from git's clean-up
+
+    def test_tracked_changes_alone_are_a_stash_as_before(self):
+        self.write("app.py", "print(2)\n")
+        snap = coder.snapshot(self.folder)
+        self.assertTrue(snap.startswith("stash:"), snap)
+        self.assertIn("stash apply", coder.undo_line(snap))
+        git(self.folder, "checkout", "app.py")
+        self.assertTrue(coder.snapshot(self.folder).startswith("head:"))  # nothing to keep
+
+    def test_new_files_it_cant_keep_mean_it_doesnt_start(self):
+        self.write("notes.md", "my notes\n")
+        real = subprocess.run
+        with mock.patch.object(coder.subprocess, "run", lambda args, **kw: real(
+                args + ["--no-such-option"] if "add" in args else args, **kw)):
+            with self.assertRaises(RuntimeError):
+                coder.snapshot(self.folder)
+
+
 class OverTheProtocol(unittest.TestCase):
     @needs_windows  # runs a real process with CREATE_NO_WINDOW
     def test_a_job_runs_with_a_free_model_and_her_answers(self):
@@ -193,6 +276,39 @@ class Late(unittest.TestCase):
         self.assertTrue(any(l.startswith(f"Task {cmd} was due") for l in lines), lines)
         self.assertTrue(any(l.startswith("Reminder from ") and l.endswith("call Mum.") for l in lines), lines)
         self.assertEqual(store.get(cmd)["status"], "waiting_approval")
+
+    def stopped_job(self, why, cancel=False):
+        """A coding job that changed two files, then stopped with why (and was cancelled first, with cancel): what's
+        said, and what's kept in Tasks."""
+        store = StopsWorker(os.path.join(tempfile.mkdtemp(prefix="heyjev-worker-"), "tasks.db"))
+        said = queue.Queue()
+
+        class Stopped:
+            def __init__(self, folder, task, ask=None, cancelled=None):
+                self.edited, self.ran, self.refused = ["app.py", "util.py"], [], []
+
+            def run(self):
+                if cancel:
+                    store.cancel(task)
+                raise why
+        with mock.patch.object(siri, "TASK_STORE", store), mock.patch.object(siri, "ANNOUNCE", said), \
+                mock.patch.object(coder, "check_folder", lambda folder: folder), \
+                mock.patch.object(coder, "snapshot", lambda folder: "stash:abcdef1234567890"), \
+                mock.patch.object(coder, "Job", Stopped):
+            task = store.create("Add a toggle", "code", {"task": "add a toggle", "cwd": "C:\\p", "approved": True})
+            return task, self.run_worker(store, said, lambda: said.get(timeout=5)), store.get(task)
+
+    def test_a_job_that_stops_part_way_says_how_to_undo_it(self):
+        """A job that ran out of its 30 minutes, or that OpenCode stopped, said only "Open Tasks for the details": what
+        it had changed stayed, and the snapshot of your work before it was a loose commit only git fsck could find."""
+        undo = "To undo it: git checkout . then git stash apply abcdef1234, in that folder."
+        for why in (TimeoutError("OpenCode took too long"), RuntimeError("OpenCode stopped")):
+            task, line, row = self.stopped_job(why)
+            self.assertEqual(line, f"Task {task} failed: Add a toggle. It changed 2 files first. {undo}")
+            self.assertEqual(json.loads(row["result"])["snapshot"], "stash:abcdef1234567890")
+            self.assertEqual(row["error"], str(why))
+        task, line, _ = self.stopped_job(RuntimeError("cancelled"), cancel=True)  # cancelled: said, not silent
+        self.assertEqual(line, f"Task {task} was cancelled: Add a toggle. It changed 2 files first. {undo}")
 
     def test_a_task_asked_on_the_phone_reports_back_there(self):
         store = StopsWorker(os.path.join(tempfile.mkdtemp(prefix="heyjev-worker-"), "tasks.db"))

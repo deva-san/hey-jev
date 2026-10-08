@@ -3389,7 +3389,21 @@ def task_worker():
                 chat = (payload.get("origin") or {}).get("phone")
                 ask = (lambda q: PHONE["ask"](chat, q)) if chat is not None and PHONE["ask"] else None
                 job = coder.Job(folder, payload["task"], ask=ask, cancelled=lambda: TASK_STORE.is_cancelled(task["id"]))
-                ok, said = job.run()
+                try:
+                    ok, said = job.run()
+                except Exception as exc:  # out of time, OpenCode stopped, or you cancelled it: what it changed stays,
+                    # so the way back is kept and said as well. Only a job that finished said it: one that hit the
+                    # 30 minutes said "Open Tasks for the details", its snapshot a loose commit only git fsck found
+                    kept = {"edited": job.edited, "ran": job.ran, "refused": job.refused, "snapshot": snap}
+                    TASK_STORE.finish(task["id"], json.dumps(kept), tasking.redact(str(exc)) or "it stopped")
+                    changed = f"It changed {len(job.edited)} file{'' if len(job.edited) == 1 else 's'} first. " \
+                              f"{coder.undo_line(snap)}" if job.edited else ""
+                    if TASK_STORE.is_cancelled(task["id"]):
+                        if changed:
+                            tell_task(task, f"Task {task['id']} was cancelled: {task['description']}. {changed}")
+                    else:
+                        tell_task(task, _task_result_line(task, changed or "Open Tasks for the details.", False))
+                    return
                 done = said or (f"It changed {len(job.edited)} file{'' if len(job.edited) == 1 else 's'}."
                                 if job.edited else "It didn't change anything.")
                 if job.refused:

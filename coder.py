@@ -7,18 +7,21 @@ hermes_memory/acp_bits.py): `opencode acp` on stdin and stdout, the Agent Client
 Kept on a short leash, because OpenCode itself lets an agent edit files and run commands without asking:
 - OPENCODE_CONFIG_CONTENT, which outranks the project's own opencode.json, makes every edit and command a
   permission request, and turns off web fetching and anything outside the folder.
-- Only a git project folder, never a system or app-data folder, and a snapshot of it first (git stash create, which
-  changes nothing), so whatever it does can be undone.
+- Only a git project folder, never a system or app-data folder, and a snapshot of it first (snapshot, new files
+  included, which changes nothing), so whatever it does can be undone.
 - Edits inside the folder go ahead: you said yes to the job. Each command goes through tasks.command_policy, the
   same rules as her own: blocked ones are refused, read-only ones go ahead, anything else is asked (ask), or refused
-  and listed in her report when there's no way to ask.
+  and listed in her report when there's no way to ask. The project's own test or build is asked about too once the
+  job has edited what says what it runs (package.json and the like).
 - Only a free model, picked from the ones the session offers, or the job doesn't start.
 """
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -67,12 +70,37 @@ def check_folder(folder):
 
 
 def snapshot(folder):
-    """The folder as it is now, changing nothing: "stash:<commit>" of its uncommitted work (git stash create), or
-    "head:<commit>" if there's none."""
-    run = lambda *args: subprocess.run(["git", "-C", folder, *args], capture_output=True, text=True, timeout=30,
-                                       creationflags=CREATE_NO_WINDOW).stdout.strip()
-    stash = run("stash", "create")
-    return f"stash:{stash}" if stash else f"head:{run('rev-parse', 'HEAD')}"
+    """The folder as it is now, changing none of its files: "stash:<commit>" of its uncommitted work (git stash
+    create); "files:<commit>" of everything when it has new files git doesn't track yet, made with a spare index, as
+    stash create leaves those out and a job that overwrote your notes.md left no copy of them; or "head:<commit>" if
+    there's nothing uncommitted. Kept under refs/heyjev, so git's clean-up never throws it away. Raises if the new
+    files can't be kept, rather than start a job that could overwrite them."""
+    def run(*args, env=None):  # what git printed, or None if it failed
+        done = subprocess.run(["git", "-C", folder, *args], capture_output=True, text=True, timeout=30, env=env,
+                              creationflags=CREATE_NO_WINDOW)
+        return done.stdout.strip() if done.returncode == 0 else None
+    head, kind, commit = run("rev-parse", "--verify", "-q", "HEAD") or "", "stash", ""
+    if run("ls-files", "--others", "--exclude-standard"):
+        spare = tempfile.mkdtemp(prefix="heyjev-snap-")
+        env = dict(os.environ, GIT_INDEX_FILE=os.path.join(spare, "index"), GIT_AUTHOR_NAME="Hey Jev",
+                   GIT_AUTHOR_EMAIL="hey-jev@localhost", GIT_COMMITTER_NAME="Hey Jev",
+                   GIT_COMMITTER_EMAIL="hey-jev@localhost")
+        try:  # every step, or half the folder kept would be "undone" to, your own changes lost
+            if (not head or run("read-tree", head, env=env) is not None) and run("add", "-A", env=env) is not None:
+                tree = run("write-tree", env=env)
+                commit = tree and run("commit-tree", tree, *(["-p", head] if head else []), "-m",
+                                      "Hey Jev: the folder before a coding job", env=env)
+        finally:
+            shutil.rmtree(spare, ignore_errors=True)
+        if not commit:
+            raise RuntimeError("I couldn't keep a copy of the folder's new files first, so I've not started it")
+        kind = "files"
+    if not commit:
+        kind, commit = "stash", run("stash", "create")
+    if not commit:
+        return f"head:{head}"
+    run("update-ref", f"refs/heyjev/{time.strftime('%Y%m%d-%H%M%S')}-{commit[:7]}", commit)
+    return f"{kind}:{commit}"
 
 
 def undo_line(snap):
@@ -80,9 +108,25 @@ def undo_line(snap):
     kind, _, commit = str(snap or "").partition(":")
     if kind == "stash" and commit:
         return f"To undo it: git checkout . then git stash apply {commit[:10]}, in that folder."
+    if kind == "files" and commit:  # new files of yours too, as they were
+        return f"To undo it: git restore --source {commit[:10]} --worktree . in that folder, and delete any files " \
+               f"it added."
     if kind == "head" and commit:
         return "To undo it: git checkout . in that folder, and delete any files it added."
     return ""
+
+
+# The files that say what a project's test, build or lint command runs (tasks.declared): package.json's scripts and
+# the shell npm runs them with (.npmrc), pytest's conftest and settings, Cargo's build script, a .NET project's targets
+DEFINES = {"package.json", ".npmrc", ".yarnrc", ".yarnrc.yml", "pyproject.toml", "setup.cfg", "setup.py",
+           "conftest.py", "pytest.ini", "tox.ini", "cargo.toml", "build.rs", "go.mod", "directory.build.props",
+           "directory.build.targets"}
+
+
+def defines(path):
+    """True if the file at path (as OpenCode names an edit) says what the project's test or build command runs."""
+    name = re.split(r"[\\/\s]", str(path).strip().strip('"'))[-1].lower()  # "src/package.json", "Edit package.json"
+    return name in DEFINES or name.endswith((".csproj", ".sln", ".props", ".targets"))
 
 
 def free_model(session):
@@ -106,6 +150,7 @@ class Job:
         """ask(question) -> True/False, or None when there's nobody to ask: then it's refused and reported."""
         self.folder, self.task, self.ask, self.cancelled, self.timeout = folder, task, ask, cancelled, timeout
         self.text, self.refused, self.ran, self.edited = [], [], [], []
+        self.defined = False  # it edited a file that says what the project's test or build command runs
 
     def permission(self, params):
         """True to let a request through. Edits in the folder, yes; commands by her own rules."""
@@ -114,10 +159,17 @@ class Job:
         raw = call.get("rawInput") or {}
         if kind == "edit":
             self.edited.append(title)
+            where = [title, raw.get("filePath"), raw.get("path")]
+            where += [p.get("path") for p in call.get("locations") or [] if isinstance(p, dict)]
+            self.defined = self.defined or any(defines(w) for w in where if w)
             return True
         if kind == "execute":
             command = str(raw.get("command") or title)
             level, reason = tasking.command_policy(command, self.folder)
+            # "npm test" goes ahead as the project's own test, but it runs whatever package.json says, and an edit
+            # here goes ahead too: rewritten by the job, it'd run any command with nobody asked
+            if level == "allow" and reason == "project verification" and self.defined:
+                level, reason = "confirm", "it runs what this job changed"
             if level == "allow":
                 self.ran.append(command)
                 return True
