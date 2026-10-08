@@ -57,6 +57,7 @@ class Encoder:
         so = ort.SessionOptions()
         so.inter_op_num_threads, so.intra_op_num_threads = 1, 2  # leaves the rest to speech-to-text
         so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+        so.enable_cpu_mem_arena = False  # what a sentence needs is given back after it: 3 MB less off Windows
         self.session = ort.InferenceSession(os.path.join(d, "model_quint8_avx2.onnx"), sess_options=so,
                                             providers=["CPUExecutionProvider"])
         self.tokenizer = Tokenizer.from_file(os.path.join(d, "tokenizer.json"))

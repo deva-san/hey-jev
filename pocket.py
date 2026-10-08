@@ -16,6 +16,7 @@ import threading
 import time
 
 import numpy as np
+import psutil
 
 import speech
 
@@ -60,6 +61,7 @@ class Engine:
             model=sherpa_onnx.OfflineTtsModelConfig(pocket=model, num_threads=THREADS, provider="cpu"),
             max_num_sentences=1)  # the callback gets each sentence as soon as it's made
         self.tts = sherpa_onnx.OfflineTts(config)
+        print(f"  her voice on this PC loaded, {psutil.Process().memory_info().rss / 2 ** 20:,.0f} MB in use")
 
     def _ref(self, voice):
         if voice not in self.refs:

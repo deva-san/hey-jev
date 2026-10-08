@@ -288,6 +288,25 @@ class Harness(Case):
         self.assertIn("listen_loop", a.threads)
         self.assertTrue(a.streams[-1].active)
 
+    def test_the_log_says_how_much_memory_each_part_takes(self):
+        """P6: 1,090 MB at start against a 917-1,002 MB target, with nothing in the log to say which part took it."""
+        a = self.assistant()
+        self.assertRegex(a.out.getvalue(), r"\[ears: .*, smart turn off, [\d,]+ MB in use\]")
+        with mock.patch.object(speech, "Speaker", lambda notify=None: object()), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            a.var("load_speaker")()
+        self.assertRegex(out.getvalue(), r"\[voice ID loaded, [\d,]+ MB in use\]")
+
+
+class SmartTurn(unittest.TestCase):
+    def test_it_keeps_no_pool_of_memory_between_runs(self):
+        """P6: her working set was 1,090 MB at start against a 917-1,002 MB target. onnxruntime's own memory pool
+        kept what Smart Turn's 8 s of audio needed at every pause: 68 MB with it, 51 without (off Windows), as quick."""
+        with mock.patch("onnxruntime.InferenceSession") as session, \
+                mock.patch.object(speech, "model_path", lambda name, notify=None: name):
+            speech.Turn()
+        self.assertFalse(session.call_args.kwargs["sess_options"].enable_cpu_mem_arena)
+
 
 # --------------------------------------------------------------------------- A1: a turn cut at MAX_TURN
 class MaxTurn(Case):

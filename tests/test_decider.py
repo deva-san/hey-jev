@@ -95,10 +95,11 @@ class Cost(unittest.TestCase):
         tokenizers = SimpleNamespace(Tokenizer=SimpleNamespace(
             from_file=lambda path: seen.append(os.environ.get("TOKENIZERS_PARALLELISM")) or mock.Mock()))
         with mock.patch.dict(sys.modules, {"tokenizers": tokenizers}), mock.patch.dict(os.environ), \
-                mock.patch("onnxruntime.InferenceSession"):
+                mock.patch("onnxruntime.InferenceSession") as session:
             os.environ.pop("TOKENIZERS_PARALLELISM", None)
             decider.Encoder()
         self.assertEqual(seen, ["false"])
+        self.assertFalse(session.call_args.kwargs["sess_options"].enable_cpu_mem_arena)  # P6: 3 MB less
 
 
 class InHerEars(unittest.TestCase):

@@ -332,6 +332,8 @@ class Turn:
         so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         # its helper threads sleep between runs: by default onnxruntime keeps them spinning, burning CPU for nothing
         so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+        # and what a run needs is given back after it, not kept in onnxruntime's own pool: 17 MB less off Windows
+        so.enable_cpu_mem_arena = False
         self.session = ort.InferenceSession(model_path("turn", notify), sess_options=so,
                                             providers=["CPUExecutionProvider"])
         self.finished(np.zeros(RATE, np.float32))  # the first run is the slow one

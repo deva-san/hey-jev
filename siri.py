@@ -6,7 +6,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.parse import quote_plus
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows without Developer Mode: copies instead, works fine
 import subprocess
-import numpy as np, requests, sounddevice as sd, soundfile as sf
+import numpy as np, psutil, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
 import agent, coder, decider, fast_intent, hermes_memory, history, installer, messaging, opencode, pocket, settings, shortcuts, telegram_bot, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
 from hermes_memory import curator, hermes_bits, skills, voice_bits
@@ -5492,6 +5492,12 @@ def ready_text(wake):
     return "Say \u201cHey Jev\u201d and what you want, or hold right Alt" if wake else "Hold right Alt and talk"
 
 
+def in_use():
+    """Her memory now (the working set, on Windows), for the log as each part loads: 1,090 MB at start against a
+    917-1,002 MB target, and only the PC itself can say which part to cut."""
+    return f"{psutil.Process().memory_info().rss / 2 ** 20:,.0f} MB in use"
+
+
 def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     engine = settings.get("stt_engine")
     print(f"loading speech models ({engine})...")
@@ -5510,7 +5516,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         print(f"  smart turn didn't load: {exc!r}")
         turn = None
     print(f"[ears: {ears.engine}{', words as you talk' if ears.live else ''}, smart turn "
-          f"{'on' if turn else 'off'}]")
+          f"{'on' if turn else 'off'}, {in_use()}]")
     transcribe = ears.transcribe  # audio -> (text, ms)
     speaker = [None]  # speech.Speaker, whose voice a turn is: loaded when voice ID is on, or to learn your voice
     profile = voiceid.Profile()  # your voice, see voiceid.py
@@ -5520,15 +5526,19 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         if speaker[0] is None:
             try:
                 speaker[0] = speech.Speaker(starting)
+                print(f"[voice ID loaded, {in_use()}]")
             except Exception as exc:
                 print(f"  voice ID didn't load: {exc!r}")
         return speaker[0]
 
+    def warm_decider():
+        relevant_skills("hello", (routines(), _skill_cache[1])[1])
+        print(f"[decider loaded, {in_use()}]")
+
     if voiceid.mode() != "off":
         threading.Thread(target=load_speaker, daemon=True).start()  # beside the rest, so starting isn't slower
     if decider.available():  # its model, ready before the first turn, and the skills' numbers worked out
-        threading.Thread(target=lambda: relevant_skills("hello", (routines(), _skill_cache[1])[1]),
-                         daemon=True).start()
+        threading.Thread(target=warm_decider, daemon=True).start()
 
     def voice_print(audio):
         if speaker[0] is None or (voiceid.mode() == "off" and enrolling[0] is None):
