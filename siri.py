@@ -1521,6 +1521,12 @@ def sys_intent(t):
 _skill_cache = [0.0, []]
 
 
+def used_later(name):
+    """skills.used, off the turn: Hermes' bookkeeping locks, reads and writes its usage file, and "work mode" waited
+    18-26 ms for it inside quick(), before anything happened."""
+    threading.Thread(target=skills.used, args=(name,), daemon=True).start()
+
+
 def routines():
     """(phrase, skill) for every skill with steps and the phrases that start it, read again every few seconds."""
     if time.time() - _skill_cache[0] > 5:
@@ -1771,7 +1777,7 @@ def _quick(words, gate=False):
     for phrase, skill in routines():
         if phrase and t == phrase:
             print(f"  routine: {skill['dir']}")
-            skills.used(skill["dir"])
+            used_later(skill["dir"])
             return make_plan(skill["plan"]["steps"], skill["plan"]["say"])
     # Without her name the model decides it was for her first: staging opens the chat with the words typed in
     # ("WhatsApp Mum: running late" from across the room), and an install sits through winget searches
@@ -2288,7 +2294,7 @@ def skills_block(text=""):
         entries = [e for e in _skill_cache[1] if not e.get("procedure") or e["dir"] in runnable]
         detail = relevant_skills(text, entries)
         for name in detail:
-            skills.used(name)
+            used_later(name)
         return skills.system_prompt_block(entries, detail)
     except Exception as exc:
         print(f"  couldn't list her skills: {exc!r}")
@@ -2943,7 +2949,7 @@ def run_info(steps, links=False):
                             "headlines": untrusted(web.news(s.get("topic"), links=links))})
             elif do == "skill_view":
                 out.append({"skill_view": s.get("name"), "result": skills.skill_view(str(s.get("name") or ""))})
-                skills.used(str(s.get("name") or ""))
+                used_later(str(s.get("name") or ""))
             else:
                 query, day = str(s.get("query") or ""), _day(s.get("day"))
                 if not query.strip() and not day:

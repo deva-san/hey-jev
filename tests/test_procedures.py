@@ -808,6 +808,22 @@ class Kept(Agent):
         self.assertNotIn("send-mail", agent.procedures())
         self.assertNotIn("send-mail", siri.skills_block("mail"))
 
+    def test_her_procedures_stats_are_read_once_till_they_change(self):
+        """match() runs on every quick(), and it read .procedures.json each time: quick()'s median doubled. Read once,
+        and again after any change, so a procedure kept a moment ago runs and one taken off doesn't."""
+        learned("send-mail", MAIL)
+        reads = []
+        with mock.patch.object(agent, "load_stats", lambda real=agent.load_stats: reads.append(1) or real()):
+            for _ in range(3):
+                self.assertIn("send-mail", agent.procedures())
+            self.assertEqual(len(reads), 1)
+            data = agent.load_stats()
+            data.pop("send-mail")
+            agent._save_stats(data)  # taken off: no longer runs
+            self.assertNotIn("send-mail", agent.procedures())
+            agent.keep("send-mail", MAIL)  # and kept again, with nothing else changed but the file
+            self.assertIn("send-mail", agent.procedures())
+
     def test_one_with_no_sha_written_by_code_doesnt_run(self):
         skills.create_skill("sneaky", skills.build_content("sneaky", "x", "y", procedure=MAIL))
         siri._skill_cache[0] = 0.0
