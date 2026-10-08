@@ -8,7 +8,7 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows without
 import subprocess
 import numpy as np, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
-import coder, decider, fast_intent, hermes_memory, history, installer, messaging, opencode, pocket, settings, telegram_bot, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
+import coder, decider, fast_intent, hermes_memory, history, installer, messaging, opencode, pocket, settings, shortcuts, telegram_bot, speech, sysinfo, tasks as tasking, vision, voiceid, watch, web, winplatform as win
 from hermes_memory import curator, hermes_bits, skills, voice_bits
 from hermes_memory.threat_patterns import INVISIBLE_CHARS, first_threat_message
 from secrets_store import get_secret, missing_secrets
@@ -1492,7 +1492,23 @@ def _quick(words, gate=False):
     if fast:
         print("  fast local intent")
         return fast
-    return None
+    return shortcut_plan(words, gate)
+
+
+def shortcut_plan(words, gate=False):
+    """A keyboard shortcut from shortcuts.py for these words, in the app in front: "show the desktop", "snap this
+    window left", "reopen the closed tab", "turn on captions". Said without her name, only one that just shows or
+    moves things, in two words or more: "back" from a TV isn't a request to go back a page."""
+    t = fast_intent.clean_text(words)
+    try:
+        found = shortcuts.find(t, shortcuts.scopes(win.foreground_exe(), focused_on("youtube")))
+    except Exception as exc:  # never in the way of a turn: the model takes it instead
+        print(f"  shortcut lookup failed: {exc!r}")
+        return None
+    if found is None or (gate == "cold" and (found.kind != "safe" or len(t.split()) < 2)):
+        return None
+    print(f"  shortcut: {found.keys} ({found.scope})")
+    return make_plan([{"do": "shortcut", "id": found.id}])
 
 
 _fast_matcher = None
@@ -2368,7 +2384,7 @@ KNOWN_STEPS = {"open", "close", "minimise", "website", "youtube", "google", "med
                "new_tab", "timer", "cancel_timers", "dark_mode", "lock", "sleep", "shutdown", "restart", "abort_shutdown",
                "dictate", "screen", "memory", "lookup", "recall", "web", "read", "weather", "news", "skill_view",
                "skill", "research", "note", "open_notes", "command", "schedule", "install", "message", "contact", "code",
-               "send_screenshot",
+               "send_screenshot", "shortcut",
                "task_control", "window", "open_folder", "screenshot", "message_send", "install_run", "task_queued",
                "click", "wait"}
 
@@ -3459,17 +3475,22 @@ def not_into_shell(keys=()):
         raise RuntimeError("I only send a message after reading it back to you, so say message and who it's to")
 
 
-def press_keys(combo):
+def press_keys(combo, vetted=False):
+    """Presses a shortcut. vetted: one of shortcuts.py's, the only ones the Windows key is ever pressed for: a model's
+    plan never presses it, as Win+R or the Start menu and typing would run anything."""
     from pynput.keyboard import Key
     names = []
     for part in re.split(r"\s*\+\s*", str(combo or "").lower().strip()):
         part = KEY_NAMES.get(part, part.replace(" ", "_"))
         if part in ("win", "windows", "cmd", "super", "meta", "start"):
-            raise RuntimeError("I don't press the Windows key")
+            if not vetted:
+                raise RuntimeError("I don't press the Windows key")
+            part = "cmd"  # pynput's name for it
         if not part or (len(part) > 1 and not hasattr(Key, part)):
             raise RuntimeError(f"There's no {part or 'such'} key")
         names.append(part)
-    not_into_shell(names)
+    if "cmd" not in names:  # Windows' own shortcuts never type into the window in front
+        not_into_shell(names)
     win.press(*names)
 
 
@@ -3604,6 +3625,12 @@ def do_step(step):
     if do == "screenshot":
         win.open_snipping_tool()
         return "screenshot"
+    if do == "shortcut":  # only ever one of shortcuts.py's, by its id: never keys a model made up
+        found = shortcuts.BY_ID.get(str(step.get("id") or ""))
+        if found is None:
+            raise RuntimeError("I don't know that shortcut")
+        press_keys(found.keys, vetted=True)
+        return found.keys
     if do == "send_screenshot":  # only ever to your own paired Telegram (telegram_bot.owner), her popup left out
         chat = telegram_bot.owner()
         if chat is None or PHONE["photo"] is None:
