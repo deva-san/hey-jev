@@ -135,6 +135,30 @@ class TaskSteps(Turn):
         self.assertIn(siri.TASK_STEPS, self.system("make it 10 instead", recent))
 
 
+class Lookups(Turn):
+    """P2: 21 of 30 spoken answers took a look-up, a whole model round trip more, and "what's the capital of Japan"
+    and the moon's distance were looked up on the web 2 times in 3. What doesn't change is answered from what the
+    model knows; what changes is still looked up."""
+
+    def asked(self, words):
+        self.think(words, False, '{"steps": [], "say": "Okay."}')
+        return self.model.calls[0][0][-1]["content"]
+
+    def test_a_fact_that_doesnt_change_is_answered_without_a_look_up(self):
+        self.assertIn("What doesn't change (capitals, distances", siri.PROMPT)
+        for words in ("what's the capital of Japan", "how far away is the moon", "what's 15% of 2,400",
+                      "who wrote Pride and Prejudice", "what does serendipity mean", "how many feet in a mile"):
+            with self.subTest(words=words):
+                self.assertTrue(self.asked(words).endswith(siri.KNOWN_NOTE))
+
+    def test_what_changes_is_still_looked_up(self):
+        for words in ("what's the weather in Tokyo", "what's the latest news on the monsoon", "who won the match today",
+                      "what's the price of gold now", "who is the prime minister of Japan", "what does this button mean",
+                      "how far is my office", "google the capital of Japan", "open notepad"):
+            with self.subTest(words=words):
+                self.assertNotIn(siri.KNOWN_NOTE, self.asked(words))
+
+
 class GoogleQuestion(Turn):
     """A22: "Google when is ..." is a question, with or without a question mark."""
 
