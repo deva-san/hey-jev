@@ -269,6 +269,54 @@ class Fixes(unittest.TestCase):
         self.assertFalse(bot.running)
 
 
+class Hiccups(unittest.TestCase):
+    """A network hiccup at the wrong moment never loses what you sent or tapped without a word: she always answers."""
+
+    def setUp(self):
+        from telegram.error import TimedOut
+        self.got, self.hiccup = [], TimedOut
+        self.bot = telegram_bot.Bot(on_message=lambda text, chat: self.got.append((text, chat)),
+                                    on_tap=lambda *a: self.got.append(a), transcribe=lambda audio: ("open notepad", 5))
+        p = mock.patch.dict(siri.settings._load(), {"telegram_owner": 7})
+        p.start()
+        self.addCleanup(p.stop)
+
+    async def fails(self, *a, **kw):
+        raise self.hiccup()
+
+    def test_fetching_a_voice_note_is_answered(self):
+        """A TimedOut while fetching the voice note ended the turn there: no answer, and the command was lost."""
+        upd, replies = update(None, voice=SimpleNamespace(file_size=4000, get_file=self.fails))
+        asyncio.run(self.bot._message(upd, Context()))
+        self.assertEqual(replies, ["I couldn't make out that voice note."])
+
+    def test_showing_what_she_heard_doesnt_lose_the_turn(self):
+        upd, _ = update(None, voice=SimpleNamespace(file_size=4000))
+        upd.effective_message.reply_text = self.fails  # the "🎤 open notepad" line doesn't go
+
+        async def hear(msg):
+            return "open notepad"
+        with mock.patch.object(self.bot, "_hear", hear):
+            asyncio.run(self.bot._message(upd, Context()))
+        self.assertEqual(self.got, [("open notepad", 7)])
+
+    def test_a_tap_is_taken_though_the_button_keeps_spinning(self):
+        """Acknowledging the tap came first, and when that failed (or Telegram called the tap too old), your Yes was
+        dropped and the question waited out its 5 minutes."""
+        q = SimpleNamespace(data="yes:4", answer=self.fails, message=SimpleNamespace(chat_id=7, message_id=50))
+        asyncio.run(self.bot._tap(SimpleNamespace(callback_query=q, effective_user=SimpleNamespace(id=7)), None))
+        self.assertEqual(self.got, [(True, "4", 7, 50)])
+
+    def test_whatever_else_goes_wrong_you_hear_about_it_in_one_line(self):
+        """No error handler: the library only wrote "No error handlers are registered" and a traceback to the log."""
+        mine, ctx = update("open notepad")[0], Context()
+        ctx.error = self.hiccup()
+        asyncio.run(self.bot._error(mine, ctx))
+        asyncio.run(self.bot._error(None, ctx))  # asking Telegram for messages: nobody's to tell
+        asyncio.run(self.bot._error(update("hi", user_id=99)[0], ctx))  # nor a stranger
+        self.assertEqual(ctx.sent, [(7, "Something went wrong with that. Send it again.")])
+
+
 class Pictures(unittest.TestCase):
     """A photo you send her: downloaded on this PC, and what your words with it (or a moment after) are about."""
 

@@ -306,6 +306,7 @@ class Bot:
             self.app = Application.builder().token(token).post_init(self._ready).build()
             self.app.add_handler(MessageHandler(filters.ChatType.PRIVATE, self._message))
             self.app.add_handler(CallbackQueryHandler(self._tap))
+            self.app.add_error_handler(self._error)
             print("[phone: listening on Telegram" + ("" if owner() else ", not paired yet: only /start is answered")
                   + "]")
             # Paired: what came in while she was off is dropped (drop_pending_updates), the rest by OLDEST. Not
@@ -422,7 +423,10 @@ class Bot:
             if not text:
                 await self._reply(msg, "I couldn't make out that voice note.")
                 return
-            await self._reply(msg, f"\U0001f3a4 {text}")
+            try:  # what she heard, then the turn: a hiccup sending this one line lost the whole voice note
+                await self._reply(msg, f"\U0001f3a4 {text}")
+            except Exception as exc:
+                print(f"  telegram: couldn't show what she heard ({type(exc).__name__})")
         if text == "/start":
             await self._reply(msg, "I'm here. Ask me anything, or tell me what to do on the PC.")
         elif picture or kept:  # the words with it, if any, are about it
@@ -522,17 +526,17 @@ class Bot:
         note = msg.voice or msg.audio
         if (note.file_size or 0) > 20 * 1024 * 1024:  # Telegram's own limit for a bot downloading a file
             return ""
-        data = await (await note.get_file()).download_as_bytearray()
 
-        def write():
+        def write(data):
             audio, rate = sf.read(io.BytesIO(bytes(data)), dtype="float32", always_2d=True)
             audio = audio.mean(axis=1)
             if rate != 16000:
                 n = int(len(audio) * 16000 / rate)
                 audio = np.interp(np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio).astype(np.float32)
             return str(self.transcribe(audio)[0]).strip()
-        try:
-            return await asyncio.get_running_loop().run_in_executor(None, write)
+        try:  # the download too: a network hiccup there ended the turn with no answer, the note lost
+            data = await (await note.get_file()).download_as_bytearray()
+            return await asyncio.get_running_loop().run_in_executor(None, write, data)
         except Exception as exc:
             print(f"  voice note failed: {exc!r}")
             return ""
@@ -541,16 +545,34 @@ class Bot:
         q, user = update.callback_query, update.effective_user
         if q is None:
             return
-        await q.answer()  # stops the button spinning, whoever tapped
-        if user is None or user.id != owner() or q.message is None:
-            return  # a tap from anyone else does nothing
-        answer, _, ask = str(q.data or "").partition(":")
-        key = (q.message.chat_id, q.message.message_id)
-        if answer in ("yes", "no") and key not in self.answered:  # a second tap, before the buttons came off: no
-            self.answered[key] = time.time()
-            while len(self.answered) > 200:
-                self.answered.pop(next(iter(self.answered)))
-            self.on_tap(answer == "yes", ask, q.message.chat_id, q.message.message_id)
+        if user is not None and user.id == owner() and q.message is not None:  # a tap from anyone else does nothing
+            answer, _, ask = str(q.data or "").partition(":")
+            key = (q.message.chat_id, q.message.message_id)
+            if answer in ("yes", "no") and key not in self.answered:  # a second tap, before the buttons came off: no
+                self.answered[key] = time.time()
+                while len(self.answered) > 200:
+                    self.answered.pop(next(iter(self.answered)))
+                self.on_tap(answer == "yes", ask, q.message.chat_id, q.message.message_id)
+        try:  # stops the button spinning, whoever tapped. After the tap is taken: first, a hiccup here, or a tap
+            # Telegram calls too old, dropped your Yes and the question waited out its 5 minutes
+            await q.answer()
+        except Exception as exc:
+            print(f"  telegram: couldn't stop the button spinning ({type(exc).__name__})")
+
+    async def _error(self, update, context):
+        """What went wrong, in one line: with no handler the library logged each network hiccup as a whole traceback.
+        A message or tap of yours it cut short is answered, never left in silence."""
+        print(f"[phone: {type(context.error).__name__}]")  # never its message, which can hold the token
+        chat, user = getattr(update, "effective_chat", None), getattr(update, "effective_user", None)
+        if chat is None or user is None or user.id != owner():
+            return
+        sent = _sending()
+        try:
+            await context.bot.send_message(chat.id, "Something went wrong with that. Send it again.")
+        except Exception as exc:
+            print(f"  telegram: couldn't say so ({type(exc).__name__})")
+        finally:
+            sent[1] = time.time()
 
     def _call(self, coro_fn):
         """Runs a send on the bot's own loop, from Jev's side. False if it couldn't."""
