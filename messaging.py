@@ -423,8 +423,15 @@ def type_into(app, hwnd, text):
 
 def open_chat(app, handle, text):
     """Open that person's chat with the text typed in, through the app's own link. Nothing is sent."""
-    spec = APPS[app]
-    link = spec["link"].format(id=quote(str(handle), safe=""), text=quote(text, safe=""))
+    link = APPS[app]["link"].format(id=quote(str(handle), safe=""), text=quote(text, safe=""))
+    hwnd = bring_up(app, link)
+    time.sleep(1.2)  # the chat and the typed text need a moment to appear
+    return hwnd
+
+
+def bring_up(app, link):
+    """Start the app's link and wait for its window to show, then put it in front: shown from the tray too, where
+    WhatsApp's window is hidden and has nothing in it to read. Its window, or raises."""
     before = window_of(app)
     subprocess.run(["cmd", "/c", "start", "", link], check=False, stdin=subprocess.DEVNULL,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=win.CREATE_NO_WINDOW,
@@ -436,12 +443,11 @@ def open_chat(app, handle, text):
         if hwnd and user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
             break
     if hwnd is None:
-        raise RuntimeError(f"I couldn't open {spec['say']}")
+        raise RuntimeError(f"I couldn't open {APPS[app]['say']}")
     try:
         win.bring_to_front(hwnd)
     except Exception:
         pass
-    time.sleep(1.2)  # the chat and the typed text need a moment to appear
     return hwnd
 
 
@@ -473,6 +479,261 @@ def _hosted_by(front, hwnd):
     except (psutil.Error, OSError):
         return False
     return False
+
+
+# --------------------------------------------------------------------------- finding someone in WhatsApp itself
+# Someone she hasn't been told about is often in your WhatsApp already, saved on your phone. She looks them up the way
+# you would: the name in WhatsApp's own search, each chat it finds opened, the number read off its contact panel, and
+# then she asks you if that's them (siri.look_up). No key is pressed: the search box is filled and emptied through UI
+# Automation, and a chat is opened with a click on its result only where that spot is WhatsApp's own window, so
+# nothing can land in a chat, and nothing is sent. Opening a chat does mark it read, as it would for you.
+LOOK_AT = 3  # chats she opens to read the number of, a second or two each
+LOADING = 25.0  # seconds for WhatsApp started from closed to draw its page: "Close WhatsApp" quits it
+SHOWN_NUMBER = re.compile(r"\+\d[\d\s()-]{6,}\d")  # a number as WhatsApp shows it: "+91 95733 09199"
+MARKS = re.compile("[\u200e\u200f\u202a-\u202e\u2066-\u2069]")  # the direction marks it wraps a number in
+HEADINGS = ("Chats", "Contacts", "Groups in common", "Messages", "Other contacts")  # rows among the results too
+PEOPLE = ("Chats", "Contacts", "Other contacts")  # the headings people are under: not groups, not messages
+PANELS = ("Contact info", "Business info", "Group info")  # the contact panel's title says what the chat is
+
+
+def whatsapp_people(name, most=LOOK_AT, stop=None):
+    """The people WhatsApp itself finds for a name, in its order, at most most and no groups: [{"name": "Buntyyy",
+    "number": "919573309199", "shown": "+91 95733 09199"}]. [] if it finds nobody. RuntimeError if WhatsApp can't
+    be looked in. Not linked to the phone, it finds nobody: the message she then stages says why. stop: called
+    before each chat is opened, True to open no more (you talked over her)."""
+    name = clean_search(name)
+    hwnd = bring_up("whatsapp", "whatsapp:")
+    uia = _uia()
+    root = uia.ElementFromHandle(hwnd)
+    box, end = None, time.time() + LOADING
+    while box is None:  # started from closed, its page takes a while to draw: the window shows long before
+        box = again(lambda: _search_box(uia, root))
+        if box is None:
+            if time.time() > end:
+                raise RuntimeError("I couldn't find WhatsApp's search box")
+            time.sleep(0.5)
+            root = uia.ElementFromHandle(hwnd)
+    try:
+        found = _look_for(uia, root, hwnd, box, name, most, stop)
+        words = name.split()
+        if not found and len(words) > 1 and len(words[0]) >= 3 and not (stop and stop()):
+            found = _look_for(uia, root, hwnd, box, words[0], most, stop)  # "Bunty Kumar", saved as just Bunty
+        print(f"  WhatsApp found {len(found)} for {name!r}")
+        return found
+    finally:
+        try:
+            _set_value(box, "")  # its chat list back
+        except Exception as exc:
+            print(f"  couldn't empty WhatsApp's search: {exc!r}")
+
+
+def _search_box(uia, root):
+    """WhatsApp's search box: the first box that isn't a chat's message box. None if there's none."""
+    found = root.FindFirst(4, uia.CreateAndCondition(uia.CreatePropertyCondition(30003, 50004), uia.CreateNotCondition(
+        uia.CreatePropertyConditionEx(30005, APPS["whatsapp"]["compose"], 3))))
+    return found if found else None
+
+
+def _set_value(element, text):
+    """Fill or empty a box through UI Automation: no key is pressed, so nothing can land anywhere else. Keys typed
+    into WhatsApp's search box just after it was given the keyboard were lost, every time."""
+    from comtypes.gen.UIAutomationClient import IUIAutomationValuePattern
+    element.GetCurrentPattern(10002).QueryInterface(IUIAutomationValuePattern).SetValue(text)
+
+
+def _look_for(uia, root, hwnd, box, name, most, stop=None):
+    box.SetFocus()  # the keyboard in WhatsApp's page: without it a click on a result didn't open its chat
+    time.sleep(0.3)
+    stale = again(lambda: _rows(uia, root)) if box_value(box) else None  # the results for what's in the box now
+    _set_value(box, name)
+    labels = _results(uia, root, None if stale is None else [label for label, _ in stale])
+    if labels is None:
+        raise RuntimeError("WhatsApp didn't show its search results")
+    found = []
+    for i, label in enumerate(labels[:most + 2]):  # a group or two among them, not a long list
+        if len(found) >= most or (stop and stop()):
+            break
+        try:  # never tried again: that would click the chat again
+            person = _read_person(uia, root, hwnd, i, label)
+        except Exception as exc:
+            print(f"  couldn't read that WhatsApp contact: {type(exc).__name__}")
+            continue
+        if person and all(p["number"] != person["number"] for p in found):
+            found.append(person)
+    return found
+
+
+STALE_FOR = 2.0  # seconds the results of what was in the search box before don't count: it searches again by then
+
+
+def _results(uia, root, stale=None, wait=5.0):
+    """The labels of the people WhatsApp's search shows ("Buntyyy 9:47 am Photo"), once two looks agree: it draws
+    them as you type. [] if it shows nobody, None if it shows neither. stale: what showed for the text before, not
+    taken for the answer until it has had time to search again."""
+    start, last = time.time(), None
+    while True:
+        time.sleep(0.5)
+        began = time.time()
+        rows = again(lambda: _rows(uia, root))
+        labels = None if rows is None else [label for label, _ in rows]
+        if stale is not None and labels == stale and began - start < STALE_FOR:
+            labels = None
+        if labels is not None and labels == last:
+            return labels
+        if began - start > wait:  # a look begun after the wait has the last word: one begun before may have missed
+            return labels
+        last = labels
+
+
+NOBODY = "No chats, contacts or messages found"  # what its search shows in place of results
+
+
+def _rows(uia, root):
+    """(label, row) for each person among the search results, in order: the rows under Chats or Contacts that open a
+    chat. Each shows three times in the tree; one of them can be picked. [] if WhatsApp says it found nobody, None
+    if it shows neither yet: one lookup for both, as a lookup for what isn't there reads the whole page, for seconds."""
+    shown = root.FindFirst(4, uia.CreateOrCondition(
+        uia.CreateAndCondition(uia.CreatePropertyCondition(30003, 50028),
+                               uia.CreatePropertyCondition(30005, "Search results.")),
+        uia.CreateAndCondition(uia.CreatePropertyCondition(30003, 50020), uia.CreatePropertyCondition(30005, NOBODY))))
+    if not shown:
+        return None
+    if shown.CurrentControlType != 50028:
+        return []
+    items = shown.FindAll(4, uia.CreatePropertyCondition(30003, 50029))
+    out, under = [], ""
+    for i in range(items.Length if items else 0):
+        try:
+            row = items.GetElement(i)
+            label = str(row.CurrentName or "")
+            if label in HEADINGS:
+                under = label
+            elif under in PEOPLE and row.CurrentIsKeyboardFocusable and row.GetCurrentPropertyValue(30036):
+                out.append((label, row))  # 30036: it can be picked (SelectionItem)
+        except Exception:  # gone while it redrew: what follows can't be placed under a heading
+            under = ""
+    return out
+
+
+def _read_person(uia, root, hwnd, i, label):
+    """Open the i-th person among the results, if it's still label, and read their number off the contact panel:
+    {"name", "number", "shown"}, both as the panel shows them, and only if the panel is that result's chat. None for
+    a group, a panel with no number, or another chat's."""
+    rows = _rows(uia, root) or []
+    if i >= len(rows) or rows[i][0] != label:
+        return None  # the results changed under her
+    if not _open_row(hwnd, rows[i][1], label):
+        return None
+    details = _find_button(hwnd, "Profile details")
+    if details is None:
+        return None
+    try:
+        _click(details)
+    except Exception as exc:  # Invoke often reports an error for a click that worked: _panel sees if it opened
+        print(f"  opening WhatsApp's contact panel: {type(exc).__name__}")
+    panel, title = _panel(uia, root, hwnd)
+    if panel is None:
+        return None
+    try:
+        if title == "Group info":
+            return None
+        texts = panel.FindAll(4, uia.CreatePropertyCondition(30003, 50020))
+        said = [" ".join(MARKS.sub("", str(texts.GetElement(j).CurrentName or "")).split())
+                for j in range(texts.Length if texts else 0)]
+        # the number on a line of its own, under the name: never one inside their About
+        at = next((j for j, s in enumerate(said) if SHOWN_NUMBER.fullmatch(s)), None)
+        if at is None:
+            return None
+        name, shown = (said[at - 1] if at and said[at - 1] not in PANELS else ""), said[at]
+        # the panel names the chat she clicked: by its name, or by its number for one not saved (the result then
+        # starts with the number). Never the result's own label for a name: it ends with their last message
+        if not _same_chat(label, name or shown):
+            return None  # another chat's panel: the one she clicked hadn't come up
+        return {"name": name or shown, "number": clean_number(shown), "shown": shown}
+    finally:
+        try:
+            close = panel.FindFirst(4, uia.CreateAndCondition(uia.CreatePropertyCondition(30003, 50000),
+                                                              uia.CreatePropertyCondition(30005, "Close")))
+            if close:  # the panel's own: the window's Close sent WhatsApp to the tray
+                _click(close)
+        except Exception as exc:  # the number read stands
+            print(f"  closing WhatsApp's contact panel: {type(exc).__name__}")
+
+
+def _open_row(hwnd, row, label):
+    """Open a search result's chat with a click on its name, as you would: a result's own action opened one chat
+    and then nothing more, every time. Only if WhatsApp is in front and that spot is its own window, so nothing else
+    is ever clicked: not the popup over it, not another app. True once the chat open is that result's, by the name
+    its message box is to; False if it isn't clicked, or doesn't come up."""
+    with win._real_pixels():  # the real pixels window_at and click use, whatever the screen's scaling
+        r = row.CurrentBoundingRectangle
+    x, y = r.left + (r.right - r.left) * 0.6, (r.top + r.bottom) / 2  # on the name, clear of the photo
+    if r.right <= r.left or r.bottom <= r.top or not in_front("whatsapp", hwnd) or not _ours(hwnd, win.root_at(x, y)):
+        return False
+    win.click(x, y)
+    start = time.time()
+    while True:
+        time.sleep(0.3)
+        began = time.time()
+        _, to = compose_box("whatsapp", hwnd)
+        if to and _same_chat(label, to):
+            if began - start < 0.5:  # it was to them already: a chat by the same name may still be coming up
+                time.sleep(0.8)
+            return True
+        if began - start > 4.0:
+            return False
+
+
+def _ours(hwnd, at):
+    """True if window at is WhatsApp's own, or the web view its page is in."""
+    return bool(at) and (at == hwnd or _hosted_by(at, hwnd))
+
+
+def _letters(text):
+    """"Buntyyy 🐼 9:47 am" -> "buntyyy947am": a name compared without its emoji or spaces."""
+    return re.sub(r"\W+", "", str(text)).casefold()
+
+
+def _same_chat(label, name):
+    """True if a search result's label starts with that name: by its letters and digits, or as it is for a name
+    that's only emoji."""
+    key = _letters(name)
+    if key:
+        return _letters(label).startswith(key)
+    name = " ".join(str(name).split())
+    return bool(name) and " ".join(str(label).split()).startswith(name)
+
+
+def _panel(uia, root, hwnd, wait=3.0):
+    """The contact panel just opened and its title: (element, "Contact info"), or (None, "") if it didn't open. The
+    panel is the title's container, as far up as it keeps clear of the chat list and the chat, and below WhatsApp's
+    window: a number in a message is never read as theirs, and only the panel's own Close is ever found."""
+    titles = uia.CreatePropertyCondition(30005, PANELS[0])
+    for title in PANELS[1:]:
+        titles = uia.CreateOrCondition(titles, uia.CreatePropertyCondition(30005, title))
+    want = uia.CreateAndCondition(uia.CreatePropertyCondition(30003, 50020), titles)
+    end = time.time() + wait
+    while True:
+        time.sleep(0.3)
+        head = root.FindFirst(4, want)
+        if head:
+            break
+        if time.time() > end:
+            return None, ""
+    keep_clear = [e.CurrentBoundingRectangle for e in (_search_box(uia, root), compose_box("whatsapp", hwnd)[0]) if e]
+    if not keep_clear:  # nothing to tell the panel from the rest of the page by: no guessing
+        return None, ""
+    walker, panel = uia.ControlViewWalker, head
+    while True:
+        up = walker.GetParentElement(panel)
+        if not up or uia.CompareElements(up, root):
+            break
+        r = up.CurrentBoundingRectangle
+        if r.right <= r.left or any(r.left <= (k.left + k.right) / 2 <= r.right and
+                                    r.top <= (k.top + k.bottom) / 2 <= r.bottom for k in keep_clear):
+            break
+        panel = up
+    return panel, str(head.CurrentName)
 
 
 # Files and photos, on WhatsApp: put on the clipboard as File Explorer's Copy does and pasted into the chat, where

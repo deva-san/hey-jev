@@ -215,15 +215,24 @@ Other ways to say it: "Send hi to Mum on WhatsApp", "On Telegram to bittu send h
 
 You have 90 seconds to say yes ("yes", "yes, send it", "go ahead"); after the first few seconds, start with her name: "Jev, send it". Saying nothing for 90 seconds leaves the message unsent; saying **no** ("not now", "forget it") drops it, and clears the box in the apps she typed into herself. After the first few seconds, asking for something else, like "Jev, stop the music", does that instead, and the message stays typed in, unsent.
 
-**She learns who people are.** The first time you name someone she doesn't know, she asks once:
+**She learns who people are.** The first time you name someone she doesn't know on WhatsApp, she looks for them in your WhatsApp, the way you would:
 
-- "Message Mum on WhatsApp: running late" → *"I don't know Mum on WhatsApp yet. What's their phone number, with the country code?"*
+1. "Message Bunty on WhatsApp: hi" → *"Let me look for Bunty in your WhatsApp."*
+2. She types the name into WhatsApp's own search. For each chat it finds (up to three, groups left out), she opens it and reads the number off its contact panel.
+3. *"I found Buntyyy in your WhatsApp, number plus 9 1, 9 5 7 3 3, 0 9 1 9 9. Is that them?"* On your phone she shows the number as WhatsApp does.
+4. **Yes** saves them and types the message in, then she asks *"Send it?"* as usual; a second yes sends it. **No** moves on to the next one she found, and after the last she asks for the number.
+
+She never presses a key in WhatsApp while looking: the search box is filled through Windows' accessibility interface, and a chat is opened with a click only when that spot is WhatsApp's own window. She reads only the name and number on the contact panel, never the messages, though opening a chat marks it read, as it would for you. Nothing is saved without your yes to her question.
+
+If WhatsApp has nobody by that name, or on Telegram, she asks once:
+
+- "Message Mum on WhatsApp: running late" → *"I couldn't find Mum in your WhatsApp. What's their phone number, with the country code?"*
 - "+91 98765 43210" → she saves it, then carries on with the message that was waiting. The reply has to be just the number or username. A number without its country code, like 98765 43210, gets asked for again.
 - From then on, "message Mum on WhatsApp: hi" is one step.
 
 You can also teach her outright: "Mum's WhatsApp number is +91 98765 43210", "Save bittu on Telegram as @bittu_01". The **Contacts** tab lists everyone she knows, and you can fix or remove them there. They are kept in `%APPDATA%\Hey Jev\contacts.json`, on this PC only.
 
-**Why a number or username, and not a name search.** On WhatsApp and Telegram she opens the chat with the app's own link (`whatsapp://send`, `tg://resolve`), which puts the text in the box without sending. Searching a chat list for a name she heard could land on the wrong person, and "Mum" and "Mom" are different chats; an explicit number cannot be mistaken. It also means she can message someone whose chat isn't open yet.
+**Why a number or username, and not a name search.** On WhatsApp and Telegram she opens the chat with the app's own link (`whatsapp://send`, `tg://resolve`), which puts the text in the box without sending. Searching a chat list for a name she heard could land on the wrong person, and "Mum" and "Mom" are different chats; an explicit number cannot be mistaken. That's why WhatsApp's search only ever finds her a number, which you confirm, and never picks the chat she sends to. It also means she can message someone whose chat isn't open yet.
 
 **Apps with no link of their own.** Signal, Slack, Discord, Teams and the rest get done the long way round, the way you would:
 
@@ -236,9 +245,11 @@ That yes is also what teaches her. The shortcut that worked and the name that fo
 
 If you say **no** to one of these, she selects the message she typed and deletes it, so nothing is left sitting in someone's chat.
 
-She refuses rather than guesses: an app that isn't on this PC, someone not in the book on WhatsApp or Telegram, an empty message, WhatsApp Desktop not linked to your phone, the app not in front when the yes comes, the app losing focus part-way through typing (she stops there and sends nothing), or the text in the box no longer matching what she read back. A shortcut she doesn't recognise is ignored rather than pressed, including anything odd hand-edited into `recipes.json`.
+She refuses rather than guesses: an app that isn't on this PC, someone not in the book (or confirmed by you from WhatsApp's own search), an empty message, WhatsApp Desktop not linked to your phone, the app not in front when the yes comes, the app losing focus part-way through typing (she stops there and sends nothing), or the text in the box no longer matching what she read back. A shortcut she doesn't recognise is ignored rather than pressed, including anything odd hand-edited into `recipes.json`.
 
-Not supported on purpose: groups, replying to the last message, attachments, voice notes, email, and anything scheduled or automatic. Messaging always needs you there to say yes. She never reads your chats and never screenshots one.
+**Files and photos on WhatsApp.** "Send this to Amma" sends the file or photo you just sent her from your phone, or the files selected in File Explorer in front of you. They wait in WhatsApp's preview, she reads their names back, and they go only after your yes. She never picks a file herself.
+
+Not supported on purpose: groups, replying to the last message, voice notes, email, and anything scheduled or automatic. Messaging always needs you there to say yes. She never reads your messages and never screenshots a chat.
 
 ### Installing and updating apps, with a yes first
 

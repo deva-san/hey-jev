@@ -417,6 +417,80 @@ class YesOrNo(Turn):
         self.assertTrue(self.said[0].endswith("so check it on screen."), self.said)
 
 
+class FoundInWhatsApp(Turn):
+    """"Message Buntyy": she looks in WhatsApp, asks if who she found is them, and the message waits for its own yes."""
+    def setUp(self):
+        super().setUp()
+        m, self.sent = siri.messaging, []
+
+        def prepare(app, contact, text):
+            if not m.read_contacts().get(m.alias_key(contact), {}).get("whatsapp"):
+                raise m.NeedContact(f"I don't know {contact} on WhatsApp yet.")
+            return {**staged(app, contact, text), "to": "Buntyyy"}
+        found = [{"name": "Buntyyy \U0001f43c", "number": "919573309199", "shown": "+91 95733 09199"},
+                 {"name": "Bunty K", "number": "918888802607", "shown": "+91 88888 02607"}]
+        for target, name, value in ((m, "prepare", prepare), (m, "whatsapp_people", lambda name, **kw: list(found)),
+                                    (m, "send", lambda ready: self.sent.append(ready["contact"]) or (True, "Sent.")),
+                                    (m, "discard", lambda ready: True)):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(lambda: (siri.FOUND.update(people=[], until=0.0), siri.ASKED.update(alias="", until=0.0),
+                                 m._write_json(m.CONTACTS_PATH, {})))
+
+    def test_yes_to_them_then_yes_to_the_message_sends_it(self):
+        siri.handle("message buntyy on whatsapp: hi")
+        self.assertEqual(self.said[0], "Let me look for buntyy in your WhatsApp.")
+        self.assertTrue(self.said[-1].endswith("The first is Buntyyy, number plus 9 1, 9 5 7 3 3, 0 9 1 9 9. "
+                                               "Is that them?"), self.said)
+        siri.handle("Yes, that's him.", gate=True)
+        self.assertEqual(self.said[-1], "“hi” to buntyy on WhatsApp. Send it? The chat open is Buntyyy.")
+        self.assertEqual(self.sent, [])  # saved, and asked about: not sent
+        siri.handle("Yes, send it.", gate=True)
+        self.assertEqual(self.sent, ["buntyy"])
+        self.assertEqual(siri.messaging.read_contacts()["buntyy"]["whatsapp"], "919573309199")
+
+    def test_no_then_the_next_one(self):
+        siri.handle("message buntyy on whatsapp: hi")
+        siri.handle("No.", gate=True)
+        self.assertEqual(self.said[-1], "Then is it Bunty K, number plus 9 1, 8 8 8 8 8, 0 2 6 0 7?")
+        siri.handle("No.", gate=True)
+        self.assertEqual(self.said[-1], "Okay. What's their phone number, with the country code?")
+        self.assertEqual((siri.messaging.read_contacts(), self.sent), ({}, []))
+
+    def test_a_laugh_saves_nobody(self):
+        siri.handle("message buntyy on whatsapp: hi")
+        siri.handle("Ha.", gate=True)
+        siri.handle("Right.", gate=True)
+        self.assertEqual(siri.messaging.read_contacts(), {})
+
+    def test_yes_send_it_and_yes_thats_them_by_name(self):
+        """Review: "Yes, send it" and "Yes, that's Bunty" weren't a yes, and the question went to the model."""
+        for words in ("Yes, send it.", "Yes, that's buntyy."):
+            siri.messaging._write_json(siri.messaging.CONTACTS_PATH, {})
+            siri.handle("message buntyy on whatsapp: hi")
+            siri.handle(words, gate=True)
+            self.assertEqual(self.said[-1], "“hi” to buntyy on WhatsApp. Send it? The chat open is Buntyyy.",
+                             words)
+            self.assertEqual(self.sent, [], words)
+
+    def test_cancel_ends_the_lookup(self):
+        """Review: "Cancel" moved on to the next one she found, then asked for the number."""
+        siri.handle("message buntyy on whatsapp: hi")
+        siri.handle("Cancel.", gate=True)
+        self.assertIn(self.said[-1], siri.REPLIES["confirm_no"])
+        self.assertEqual((siri.FOUND["people"], siri.ASKED["alias"], siri.messaging.read_contacts()), ([], "", {}))
+
+    def test_the_number_she_read_isnt_kept(self):
+        """Review: a number read off WhatsApp went into history, and from there to the model."""
+        kept = []
+        with mock.patch.object(siri.history, "add", lambda *a: kept.append(a)):
+            siri.handle("message buntyy on whatsapp: hi")
+        self.assertIn("9 5 7 3 3", self.said[-1])
+        self.assertTrue(kept)
+        self.assertNotIn("9 5 7 3 3", repr(kept))
+
+
 def tripwire_quit(app):
     raise AssertionError(f"quit {app.name}")
 

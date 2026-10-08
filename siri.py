@@ -883,6 +883,8 @@ def stage_message(app, contact, text):
         ready = messaging.prepare(app, contact, text) if key else \
             messaging.prepare_other(app, find_app(app), contact, text)
     except messaging.NeedContact as exc:
+        if key == "whatsapp":  # she looks in your WhatsApp first, and asks if who she finds is them
+            return look_up(contact, text, None, str(exc))
         ASKED.update(alias=str(contact), app=key or "", text=str(text), until=staged_for(), files=None)
         return make_plan(say=str(exc))
     except (RuntimeError, ValueError) as exc:
@@ -957,6 +959,8 @@ def stage_files(app, contact, paths, caption=""):
     try:
         ready = messaging.prepare_files(app, contact, paths, caption)
     except messaging.NeedContact as exc:
+        if messaging.app_key(app) == "whatsapp":
+            return look_up(contact, caption or "", list(paths), str(exc))
         ASKED.update(alias=str(contact), app=messaging.app_key(app) or "", text=str(caption or ""),
                      until=staged_for(), files=list(paths))
         return make_plan(say=str(exc))
@@ -1077,6 +1081,110 @@ def finish_asked(words):
     if not text:
         return make_plan(say=f"Saved {saved}.")
     return stage_message(app, alias, text)
+
+
+# Someone she doesn't know yet is often in your WhatsApp already, saved on your phone: rather than ask you for their
+# number, she looks them up there (messaging.whatsapp_people) and asks if who she found is them, one at a time with
+# the number, as you asked on 8 October. A yes saves them and carries on with the message or files, which she then
+# asks about as ever; a no to the last one asks you for the number. Her question's yes is the only way to save one.
+FOUND = {"alias": "", "text": "", "files": None, "people": [], "until": 0.0, "id": ""}  # id: the question's, so a
+# yes to an older question, on the phone say, can't save who a later lookup found
+CANCEL = re.compile(r"\b(?:cancel|stop|never ?mind|forget|leave it|wait|hold on)\b")  # a no that ends the lookup
+
+
+def look_up(alias, text, files, asked):
+    """The plan when she doesn't know alias on WhatsApp: who she found there, asked about, or asked (NeedContact's
+    question) if WhatsApp can't be looked in, or the number if it has nobody by that name."""
+    said = " ".join(str(alias).split())[:40] or "them"
+    ASKED.update(alias="", app="", text="", until=0.0, files=None)  # an older question's: a number said now isn't
+    # for it. And a message typed in before stays there unsent: once she's opened other chats, a no would clear the
+    # wrong one
+    STAGED.update(ready=None, until=0.0)
+    talking, stop = None, None
+    if origin() == "voice":  # it takes a few seconds: said while she looks, never over the question that follows
+        talking = threading.Thread(target=contextvars.copy_context().run, daemon=True,
+                                   args=(say, f"Let me look for {said} in your WhatsApp.", None))
+        talking.start()
+        stop = HER.stop.is_set  # talked over: no more chats opened
+    try:
+        people = messaging.whatsapp_people(alias, stop=stop)
+    except Exception as exc:
+        print(f"  couldn't look in WhatsApp: {exc!r}")
+        people = None
+    finally:
+        if talking:
+            talking.join(timeout=15)
+    if stop and stop():
+        return make_plan(say="Okay, I've stopped looking.")
+    if not people:
+        ASKED.update(alias=str(alias), app="whatsapp", text=str(text or ""), until=staged_for(), files=files)
+        return make_plan(say=asked if people is None else
+                         f"I couldn't find {said} in your WhatsApp. What's their phone number, with the country code?")
+    FOUND.update(alias=str(alias), text=str(text or ""), files=files, people=list(people), until=staged_for(),
+                 id=os.urandom(8).hex())
+    return found_question(True)
+
+
+def found_question(first):
+    """"I found Buntyyy in your WhatsApp, number plus 9 1, ... Is that them?", about the next one she found."""
+    person, many = FOUND["people"][0], len(FOUND["people"])
+    FOUND["until"] = staged_for()  # each question waits as long as the first
+    if origin() == "phone":  # read, not heard: as WhatsApp shows them
+        name, number = person["name"], person["shown"]
+    else:  # her voice says numbers as numbers: "95733" was ninety-five thousand and more
+        name = re.sub(r"[^\w\s'.-]", "", person["name"]).strip() or FOUND["alias"]
+        number = spoken_number(person["shown"])
+    if not first:
+        say = f"Then is it {name}, number {number}?"
+    elif many == 1:
+        say = f"I found {name} in your WhatsApp, number {number}. Is that them?"
+    else:
+        say = f"I found {many} who could be them in your WhatsApp. The first is {name}, number {number}. Is that them?"
+    # kept without the number: it's someone else's, read off WhatsApp, and what she said goes to the model later
+    return {"steps": [], "say": say, "keep": say.replace(f", number {number}", ""),
+            "confirm": {"steps": [{"do": "contact_found", "id": FOUND["id"], "who": f"{FOUND['alias']} {name}"}],
+                        "say": ""}}
+
+
+def spoken_number(shown):
+    """"+91 95733 09199" -> "plus 9 1, 9 5 7 3 3, 0 9 1 9 9": digit by digit, in WhatsApp's groups."""
+    groups = re.findall(r"\d+", str(shown))
+    return ("plus " if str(shown).strip().startswith("+") else "") + ", ".join(" ".join(g) for g in groups)
+
+
+def use_found(step):
+    """Yes, that's them, to the question step was: saved, then on with the message or the files waiting for them."""
+    if not FOUND["id"] or step.get("id") != FOUND["id"] or time.time() > FOUND["until"] or not FOUND["people"]:
+        return make_plan(say="That was a while ago now. Ask me again.")
+    person, alias, text, files = FOUND["people"][0], FOUND["alias"], FOUND["text"], FOUND["files"]
+    forget_found()
+    try:
+        saved = messaging.save_contact(alias, "whatsapp", person["number"])
+    except (ValueError, RuntimeError) as exc:
+        return make_plan(say=f"I couldn't save them: {exc}.")
+    print(f"  learned contact from WhatsApp: {saved}")
+    if files:
+        return stage_files("whatsapp", alias, files, text)
+    if not text:
+        return make_plan(say=f"Saved {saved}.")
+    return stage_message("whatsapp", alias, text)
+
+
+def not_them(step):
+    """No, not them: the next one she found, or your number for them after the last."""
+    if not FOUND["id"] or step.get("id") != FOUND["id"]:
+        return make_plan(say=say_line("confirm_no"))
+    FOUND["people"] = FOUND["people"][1:]
+    if FOUND["people"] and time.time() < FOUND["until"]:
+        return found_question(False)
+    alias, text, files = FOUND["alias"], FOUND["text"], FOUND["files"]
+    forget_found()
+    ASKED.update(alias=alias, app="whatsapp", text=text, until=staged_for(), files=files)
+    return make_plan(say="Okay. What's their phone number, with the country code?")
+
+
+def forget_found():
+    FOUND.update(alias="", text="", files=None, people=[], until=0.0, id="")
 
 
 KEY_WORDS = {"control": "ctrl", "ctrl": "ctrl", "shift": "shift", "alt": "alt", "option": "alt", "command": "cmd",
@@ -2596,6 +2704,8 @@ def parse_plan(raw):
         plan = {"steps": [{k: v for k, v in plan.items() if k != "say"}], "say": plan.get("say") or ""}
     steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
     plan["steps"] = _known(steps)
+    for key in ("confirm", "exact", "said", "voice_error", "keep"):  # hers to set, never the model's: a "confirm"
+        plan.pop(key, None)  # in its reply became her question, and the next yes ran what the model wrote
     return plan
 
 
@@ -4594,12 +4704,13 @@ YES_AROUND = rf"u+m+|u+h+|h+m+|e+r+|a+h+|o+h+|so|and|then|just|kindly|thanks|tha
 CLEAR_YES = (r"yes|yeah|yep|yup|sure|ok|okay|alright|all right|haan|avunu|of course|absolutely|definitely|do it|"
              r"do that|please do|go ahead|go on|go for it|correct|that's right|you can|why not")
 YES_VERBS = {"message_send": "send", "install_run": "install|update|upgrade|download",  # the question's own verb
+             "contact_found": "send|(?:that'?s|it'?s|(?:it|that) is)(?: (?:them|him|her|the one|right|correct|it))?",
              "task_control": "start|run|begin",
              "shutdown": "shut(?: it| the (?:computer|pc|laptop))? down|turn (?:it )?off|power (?:it )?off",
              "restart": "restart|reboot", "close": "close|quit|exit", "minimise": "minimi[sz]e|hide", "lock": "lock",
              "sleep": "sleep", "type": "type|write", "keys": "press|hit", "screen": "look|check|see|have a look|take a look"}
 # a laugh, "right" or a bare "please" never send a message, install an app or shut down: those need a clear yes or the verb
-STRICT_YES = {"message_send", "install_run", "task_control"} | POWER_STEPS  # task_control: a coding job, a command
+STRICT_YES = {"message_send", "install_run", "task_control", "contact_found"} | POWER_STEPS  # task_control: a coding job, a command
 
 
 def said_yes(words, plan):
@@ -4607,7 +4718,8 @@ def said_yes(words, plan):
     t = " ".join(re.sub(r"[^\w\s']", " ", str(words).lower().replace("\u2019", "'")).split())
     steps = [s for s in plan.get("steps") or [] if isinstance(s, dict)]
     verbs = "|".join(YES_VERBS[s["do"]] for s in steps if s.get("do") in YES_VERBS)
-    names = "".join(f"|{re.escape(w)}" for s in steps for w in key_of(s.get("app") or "").split())  # "close Chrome"
+    names = "".join(f"|{re.escape(w)}" for s in steps for w in key_of(f"{s.get('app') or ''} {s.get('who') or ''}")
+                    .split())  # "close Chrome", "yes, that's Bunty"
     said = SAYS_YES + (rf"|(?:{verbs})(?: (?:it|that|this|them|the (?:message|app|update|computer|pc|laptop|tab|"
                        rf"window){names}))*" if verbs else "")
     if not re.fullmatch(rf"(?:(?:{YES_AROUND}) )*(?:{said})(?: (?:{said}|{YES_AROUND}))*", t):
@@ -4667,11 +4779,20 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
             POWER_OK["until"] = time.time() + 20  # this yes, and only this one, lets the shutdown or restart run
         if any(s.get("do") in ASKS_YES for s in plan.get("steps") or []):
             SEND_OK["until"] = time.time() + 30  # and this one the message, the files or the install
+        found = next((s for s in plan.get("steps") or [] if s.get("do") == "contact_found"), None)
+        if found:
+            plan = use_found(found)  # saved, then the message staged and asked about: a yes to that sends it
     # any no in the first few seconds; after that a message stays waiting, and "Jev, stop the music" or "cancel the
     # timer" is that, where it was taken as a no to the message and the music played on
     elif pending and NO.fullmatch(answer) and (time.time() < PENDING["soon"] or not COMMAND.search(answer)):
-        drop_staged()
-        plan = make_plan(say=say_line("confirm_no"))
+        found = next((s for s in pending.get("steps") or [] if s.get("do") == "contact_found"), None)
+        if found and not CANCEL.search(answer):
+            plan = not_them(found)  # "No", "not him": the next one she found. Nothing's staged, so nothing to clear
+        else:  # "Cancel", "never mind": the lookup's over too, nobody saved or asked for
+            if found:
+                forget_found()
+            drop_staged()
+            plan = make_plan(say=say_line("confirm_no"))
     elif gate and sure < UNSURE:  # mumbling, another language or talk across the room, and no name
         print(f"  (no name and only {sure:.0%} sure of the words, staying quiet)")
         emit(notify, "Ready", None)
@@ -4779,7 +4900,9 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         # message read back used it up and the yes came too late. A message or install waits for its yes as long as
         # it's typed in or looked up (90 s), said with her name once the follow-up window has shut
         waits = [STAGED["until"] if s.get("do") == "message_send" else STAGED_INSTALL["until"]
-                 for s in plan["confirm"].get("steps") or [] if s.get("do") in ("message_send", "install_run")]
+                 if s.get("do") == "install_run" else FOUND["until"]
+                 for s in plan["confirm"].get("steps") or [] if s.get("do") in ("message_send", "install_run",
+                                                                                "contact_found")]
         soon = time.time() + (PHONE_WAITS if origin() == "phone" else FOLLOW_UP + 8)
         PENDING.update(plan=plan["confirm"], soon=soon, until=max([soon] + waits), origin=origin(),
                        id=hashlib.sha1(os.urandom(16)).hexdigest()[:12])  # an old button can't match a new question
@@ -4787,9 +4910,12 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     kept = {"steps": plan.get("steps") or [],
             "say": ((str(plan.get("say") or "") if plan.get("exact") else tidy(plan.get("say"), not plan.get("confirm")))
                     if not failed else "") or " ".join(spoken)}
+    keep = plan.get("keep")  # her line as kept, when what she said had someone's number in it
+    record = {**kept, "say": keep} if keep else kept
     try:  # kept on this PC, so she can recall it, and in the day's file
         history.add(words or text, describe(kept["steps"]) + (f" (failed: {'; '.join(failed)})" if failed else ""),
-                    " ".join(spoken), json.dumps({**kept, "failed": failed} if failed else kept, ensure_ascii=False))
+                    keep if keep and spoken else " ".join(spoken),
+                    json.dumps({**record, "failed": failed} if failed else record, ensure_ascii=False))
     except Exception as exc:
         print(f"  couldn't keep this turn: {exc!r}")
     learn_later(words or text, [s for s in kept["steps"] if isinstance(s, dict)], failed, gate)

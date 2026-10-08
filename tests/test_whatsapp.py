@@ -2,6 +2,7 @@
 it puts its web view in front once the box has the keyboard. She types the text herself, reads it back, says which
 chat is open, and presses Enter only on exactly that, in that chat. Nothing here touches the real WhatsApp."""
 import importlib.util
+import time
 import os
 import unittest
 from types import SimpleNamespace
@@ -291,6 +292,246 @@ class Asking(unittest.TestCase):
 
     def test_another_word_for_her_is_said_too(self):  # "mama" is an uncle in Telugu: names are said as they are
         self.assertIn("The chat open is Amma.", self.ask("Amma"))
+
+
+BUNTY = {"name": "Buntyyy \U0001f43c", "number": "919573309199", "shown": "+91 95733 09199"}
+OTHER = {"name": "Buntyyy \U0001f43c", "number": "918888802607", "shown": "+91 88888 02607"}
+
+
+class FindingThem(unittest.TestCase):
+    """Asked on 8 October: someone she doesn't know is looked up in your WhatsApp and asked about with their number,
+    rather than "What's their number?". Nobody is saved, and nothing staged, without a yes to that."""
+
+    def setUp(self):
+        from tests.support import siri
+        self.siri, self.staged, self.found = siri, [], [BUNTY]
+        m = siri.messaging
+
+        def known(contact):
+            if not m.read_contacts().get(m.alias_key(contact), {}).get("whatsapp"):
+                raise m.NeedContact(f"I don't know {contact} on WhatsApp yet. What's their phone number, with the "
+                                    f"country code?")
+
+        def prepare(app, contact, text):
+            known(contact)
+            self.staged.append((contact, text))
+            return {"app": app, "contact": contact, "text": text, "checked": True, "say": "WhatsApp",
+                    "to": "Buntyyy \U0001f43c"}
+
+        def prepare_files(app, contact, paths, caption=""):
+            known(contact)
+            self.staged.append((contact, paths))
+            return {"app": app, "contact": contact, "text": caption, "files": paths, "say": "WhatsApp", "to": ""}
+
+        def people(name, **kw):
+            if isinstance(self.found, Exception):
+                raise self.found
+            return list(self.found)
+        for target, name, value in ((m, "prepare", prepare), (m, "prepare_files", prepare_files),
+                                    (m, "whatsapp_people", people), (siri, "say", lambda line, notify: None)):
+            p = mock.patch.object(target, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(lambda: (siri.FOUND.update(alias="", text="", files=None, people=[], until=0.0),
+                                 siri.ASKED.update(alias="", app="", text="", until=0.0, files=None),
+                                 siri.STAGED.update(ready=None, until=0.0),
+                                 m._write_json(m.CONTACTS_PATH, {})))
+
+    def ask(self):
+        self.plan = self.siri.stage_message("whatsapp", "buntyy", "hi")
+        return self.plan
+
+    def step(self):
+        """The step her last question's yes or no is to."""
+        return self.plan["confirm"]["steps"][0]
+
+    def yes(self):
+        self.plan = self.siri.use_found(self.step())
+        return self.plan
+
+    def no(self):
+        self.plan = self.siri.not_them(self.step())
+        return self.plan
+
+    def test_she_asks_with_their_number_before_saving_anything(self):
+        plan = self.ask()
+        self.assertEqual(plan["say"], "I found Buntyyy in your WhatsApp, number plus 9 1, 9 5 7 3 3, 0 9 1 9 9. "
+                                      "Is that them?")
+        self.assertEqual(self.step()["do"], "contact_found")
+        self.assertEqual((self.siri.messaging.read_contacts(), self.staged), ({}, []))
+
+    def test_yes_saves_them_and_the_message_is_asked_about_as_ever(self):
+        self.ask()
+        asked = self.step()
+        plan = self.yes()
+        self.assertEqual(self.siri.messaging.read_contacts()["buntyy"]["whatsapp"], "919573309199")
+        self.assertEqual(self.staged, [("buntyy", "hi")])
+        self.assertEqual(plan["say"], "\u201chi\u201d to buntyy on WhatsApp. Send it? The chat open is Buntyyy.")
+        self.assertEqual(plan["confirm"]["steps"], [{"do": "message_send"}])
+        self.assertEqual(self.siri.use_found(asked)["say"], "That was a while ago now. Ask me again.")  # one yes, one save
+
+    def test_no_asks_about_the_next_then_for_the_number(self):
+        self.found = [BUNTY, OTHER]
+        self.assertTrue(self.ask()["say"].startswith("I found 2 who could be them in your WhatsApp. The first is "
+                                                     "Buntyyy, number plus 9 1, 9 5 7 3 3"))
+        plan = self.no()
+        self.assertEqual(plan["say"], "Then is it Buntyyy, number plus 9 1, 8 8 8 8 8, 0 2 6 0 7?")
+        self.assertEqual(self.step()["do"], "contact_found")
+        self.assertEqual(self.no()["say"], "Okay. What's their phone number, with the country code?")
+        self.assertEqual((self.siri.messaging.read_contacts(), self.staged), ({}, []))
+        self.siri.finish_asked("+91 98765 43210")  # and the number you give her is saved, as before
+        self.assertEqual(self.siri.messaging.read_contacts()["buntyy"]["whatsapp"], "919876543210")
+        self.assertEqual(self.staged, [("buntyy", "hi")])
+
+    def test_the_second_one_yes(self):
+        self.found = [BUNTY, OTHER]
+        self.ask()
+        self.no()
+        self.yes()
+        self.assertEqual(self.siri.messaging.read_contacts()["buntyy"]["whatsapp"], "918888802607")
+
+    def test_the_first_one_said_to_the_second_question_is_no_yes(self):
+        """Review: "the first one" to "Then is it Buntyyy, number ...2607?" saved the 2607 one."""
+        self.found = [BUNTY, OTHER]
+        self.ask()
+        self.no()
+        for words in ("The first one", "Oh, the first one", "The first number", "Same one"):
+            self.assertFalse(self.siri.said_yes(words, self.plan["confirm"]), words)
+
+    def test_a_yes_to_an_older_question_saves_nobody(self):
+        """Review: one lookup's yes, from the phone say, saved who a later lookup found."""
+        self.ask()
+        old = self.step()
+        self.found = [OTHER]
+        self.ask()  # another lookup since
+        self.assertEqual(self.siri.use_found(old)["say"], "That was a while ago now. Ask me again.")
+        self.assertEqual(self.siri.not_them(old)["say"] in self.siri.REPLIES["confirm_no"], True)
+        self.assertEqual(self.siri.messaging.read_contacts(), {})
+
+    def test_a_step_without_its_question_saves_nobody(self):
+        self.ask()
+        self.siri.use_found({"do": "contact_found"})  # as a model might write it
+        self.assertEqual(self.siri.messaging.read_contacts(), {})
+
+    def test_the_number_isnt_kept_in_history(self):
+        plan = self.ask()
+        self.assertEqual(plan["keep"], "I found Buntyyy in your WhatsApp. Is that them?")
+
+    def test_nobody_by_that_name_asks_for_the_number(self):
+        self.found = []
+        self.assertEqual(self.ask()["say"], "I couldn't find buntyy in your WhatsApp. What's their phone number, "
+                                            "with the country code?")
+        self.assertEqual(self.siri.ASKED["alias"], "buntyy")
+
+    def test_an_older_question_for_a_number_is_dropped(self):
+        """Review: a number said in reply to "Is that them?" was saved under whoever was asked about before."""
+        self.siri.ASKED.update(alias="ravi", app="whatsapp", text="hello", until=time.time() + 60)
+        self.ask()
+        self.assertEqual(self.siri.ASKED["alias"], "")
+        self.assertIsNone(self.siri.finish_asked("+91 98765 43210"))
+        self.assertEqual(self.siri.messaging.read_contacts(), {})
+
+    def test_whatsapp_that_cant_be_looked_in_is_asked_as_before(self):
+        self.found = RuntimeError("I couldn't open WhatsApp")
+        self.assertEqual(self.ask()["say"], "I don't know buntyy on WhatsApp yet. What's their phone number, with "
+                                            "the country code?")
+
+    def test_on_the_phone_the_number_shows_as_whatsapp_shows_it(self):
+        siri = self.siri
+        to = siri.REPLY_TO.set([])
+        try:
+            say = self.ask()["say"]
+        finally:
+            siri.REPLY_TO.reset(to)
+        self.assertEqual(say, "I found Buntyyy \U0001f43c in your WhatsApp, number +91 95733 09199. Is that them?")
+
+    def test_files_go_on_after_the_yes(self):
+        self.plan = self.siri.stage_files("whatsapp", "buntyy", ["C:/x/a.jpg"])
+        self.assertEqual(self.staged, [])
+        self.yes()
+        self.assertEqual(self.staged, [("buntyy", ["C:/x/a.jpg"])])
+
+    def test_a_yes_that_comes_too_late_saves_nobody(self):
+        self.ask()
+        self.siri.FOUND["until"] = 0.0
+        self.yes()
+        self.assertEqual((self.siri.messaging.read_contacts(), self.staged), ({}, []))
+
+    def test_the_model_cant_plan_the_save(self):
+        self.assertNotIn("contact_found", self.siri.KNOWN_STEPS)
+
+    def test_a_confirm_in_the_models_reply_is_dropped(self):
+        """Review: a "confirm" the model wrote became her question, and the next yes ran it."""
+        for raw in ('{"steps": [], "say": "Is that them?", "confirm": {"steps": [{"do": "contact_found"}]}}',
+                    '{"steps": [], "say": "Send it?", "confirm": {"steps": [{"do": "message_send"}]}, "exact": true}'):
+            plan = self.siri.parse_plan(raw)
+            self.assertNotIn("confirm", plan)
+            self.assertNotIn("exact", plan)
+
+    def test_its_yes_is_a_clear_one(self):
+        self.ask()
+        plan = self.plan["confirm"]
+        for words in ("Yes.", "Yes, that's him.", "Yeah that's them", "Correct.", "That's the one", "It is.",
+                      "Yes, send it.", "Yes, that's buntyy", "Yes, that's Buntyyy."):
+            self.assertTrue(self.siri.said_yes(words, plan), words)
+        for words in ("Ha.", "Right.", "Hmm.", "No, the other one", "Who?", "That's wrong", "Yes, the other one"):
+            self.assertFalse(self.siri.said_yes(words, plan), words)
+
+
+class ReadingThePanel(unittest.TestCase):
+    """Review: the number is read only off the panel of the chat she clicked, and named as that panel names it."""
+
+    def read(self, texts, label="Buntyyy \U0001f43c 9:47 am hi there", title="Contact info"):
+        m = real_messaging()
+
+        class Texts:
+            Length = len(texts)
+
+            def GetElement(self, j):
+                return SimpleNamespace(CurrentName=texts[j])
+
+        panel = SimpleNamespace(FindAll=lambda *a: Texts(), FindFirst=lambda *a: None)
+        uia = SimpleNamespace(CreatePropertyCondition=lambda *a: None, CreateAndCondition=lambda *a: None)
+        for name, value in (("_rows", lambda uia, root: [(label, object())]), ("_open_row", lambda *a: True),
+                            ("_find_button", lambda *a: object()), ("_click", lambda b: None),
+                            ("_panel", lambda *a: (panel, title))):
+            p = mock.patch.object(m, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        return m._read_person(uia, None, 1, 0, label)
+
+    def test_a_saved_contacts_panel(self):
+        self.assertEqual(self.read(["Contact info", "Buntyyy", "+91 95733 09199", "About", "Call me +91 11111 11111"]),
+                         {"name": "Buntyyy", "number": "919573309199", "shown": "+91 95733 09199"})
+
+    def test_another_chats_panel_is_never_read_as_theirs(self):
+        self.assertIsNone(self.read(["Contact info", "Amma", "+91 98765 43210"]))
+        self.assertIsNone(self.read(["Contact info", "+91 98765 43210", "~Ramesh"]))  # a number not saved
+        self.assertIsNone(self.read(["Contact info", "\u2764\ufe0f", "+91 98765 43210"]))  # a name that's only emoji
+
+    def test_a_number_not_saved_is_named_by_its_number(self):
+        self.assertEqual(self.read(["Contact info", "+91 98765 43210", "~Ramesh"], label="+91 98765 43210 Yesterday hi"),
+                         {"name": "+91 98765 43210", "number": "919876543210", "shown": "+91 98765 43210"})
+
+    def test_a_group_or_a_panel_without_a_number(self):
+        self.assertIsNone(self.read(["Group info", "Buntyyy", "+91 95733 09199"], title="Group info"))
+        self.assertIsNone(self.read(["Contact info", "Buntyyy", "About", "Call me +91 95733 09199"]))
+
+
+class WhatsAppNumbers(unittest.TestCase):
+    """Reading the contact panel: the number on a line of its own, as WhatsApp shows it."""
+
+    def test_the_panels_number(self):
+        m = real_messaging()
+        shown = "\u202a+91 95733 09199\u202c"  # wrapped in direction marks
+        cleaned = " ".join(m.MARKS.sub("", shown).split())
+        self.assertTrue(m.SHOWN_NUMBER.fullmatch(cleaned))
+        self.assertEqual(m.clean_number(cleaned), "919573309199")
+        self.assertIsNone(m.SHOWN_NUMBER.fullmatch("Call me on +91 95733 09199"))  # their About isn't their number
+
+    def test_names_compare_without_emoji(self):
+        m = real_messaging()
+        self.assertTrue(m._letters("Buntyyy \U0001f43c 9:47 am Photo").startswith(m._letters("Buntyyy\U0001f43c")))
 
 
 if __name__ == "__main__":

@@ -1242,10 +1242,15 @@ def screenshot():
 
 def window_at(x, y):
     """The .exe of the window at a point on the screen, in real pixels, or ""."""
+    hwnd = root_at(x, y)
+    return window_exe(hwnd) if hwnd else ""
+
+
+def root_at(x, y):
+    """The top-level window at a point on the screen, in real pixels, or None."""
     with _real_pixels():
         hwnd = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
-    hwnd = user32.GetAncestor(hwnd, GA_ROOT) if hwnd else None
-    return window_exe(hwnd) if hwnd else ""
+    return user32.GetAncestor(hwnd, GA_ROOT) if hwnd else None
 
 
 def click(x, y, button="left", double=False):

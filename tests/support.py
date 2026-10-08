@@ -48,7 +48,8 @@ WIN_ACTIONS = (
 for _name in WIN_ACTIONS:
     if hasattr(winplatform, _name):
         setattr(winplatform, _name, tripwire(f"win.{_name}"))
-for _name in ("open_chat", "send", "prepare", "prepare_other", "_send_other", "_type_now", "discard", "focus_other"):
+for _name in ("open_chat", "send", "prepare", "prepare_other", "_send_other", "_type_now", "discard", "focus_other",
+              "whatsapp_people", "bring_up"):
     if hasattr(messaging, _name):
         setattr(messaging, _name, tripwire(f"messaging.{_name}"))
 for _name in ("prepare", "install", "_run", "find"):
