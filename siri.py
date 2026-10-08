@@ -1178,7 +1178,7 @@ def found_question(first):
     FOUND["until"] = staged_for()  # each question waits as long as the first
     if origin() == "phone":  # read, not heard: as WhatsApp shows them
         name, number = person["name"], person["shown"]
-    else:  # her voice says numbers as numbers: "95733" was ninety-five thousand and more
+    else:  # her voice says numbers as numbers: "55555" was fifty-five thousand and more
         name = re.sub(r"[^\w\s'.-]", "", person["name"]).strip() or FOUND["alias"]
         number = spoken_number(person["shown"])
     if not first:
@@ -1194,7 +1194,7 @@ def found_question(first):
 
 
 def spoken_number(shown):
-    """"+91 95733 09199" -> "plus 9 1, 9 5 7 3 3, 0 9 1 9 9": digit by digit, in WhatsApp's groups."""
+    """"+91 55555 01234" -> "plus 9 1, 5 5 5 5 5, 0 1 2 3 4": digit by digit, in WhatsApp's groups."""
     groups = re.findall(r"\d+", str(shown))
     return ("plus " if str(shown).strip().startswith("+") else "") + ", ".join(" ".join(g) for g in groups)
 

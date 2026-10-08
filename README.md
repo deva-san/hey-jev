@@ -221,7 +221,7 @@ You have 90 seconds to say yes ("yes", "yes, send it", "go ahead"); after the fi
 
 1. "Message Bunty on WhatsApp: hi" → *"Let me look for Bunty in your WhatsApp."*
 2. She types the name into WhatsApp's own search. For each chat it finds (up to three, groups left out), she opens it and reads the number off its contact panel.
-3. *"I found Buntyyy in your WhatsApp, number plus 9 1, 9 5 7 3 3, 0 9 1 9 9. Is that them?"* On your phone she shows the number as WhatsApp does.
+3. *"I found Buntyyy in your WhatsApp, number plus 9 1, 5 5 5 5 5, 0 1 2 3 4. Is that them?"* On your phone she shows the number as WhatsApp does.
 4. **Yes** saves them and types the message in, then she asks *"Send it?"* as usual; a second yes sends it. **No** moves on to the next one she found, and after the last she asks for the number.
 
 She never presses a key in WhatsApp while looking: the search box is filled through Windows' accessibility interface, and a chat is opened with a click only when that spot is WhatsApp's own window. She reads only the name and number on the contact panel, never the messages, though opening a chat marks it read, as it would for you. Nothing is saved without your yes to her question.

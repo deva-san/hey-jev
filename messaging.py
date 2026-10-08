@@ -542,7 +542,7 @@ def _hosted_by(front, hwnd):
 # nothing can land in a chat, and nothing is sent. Opening a chat does mark it read, as it would for you.
 LOOK_AT = 3  # chats she opens to read the number of, a second or two each
 LOADING = 25.0  # seconds for WhatsApp started from closed to draw its page: "Close WhatsApp" quits it
-SHOWN_NUMBER = re.compile(r"\+\d[\d\s()-]{6,}\d")  # a number as WhatsApp shows it: "+91 95733 09199"
+SHOWN_NUMBER = re.compile(r"\+\d[\d\s()-]{6,}\d")  # a number as WhatsApp shows it: "+91 55555 01234"
 MARKS = re.compile("[\u200e\u200f\u202a-\u202e\u2066-\u2069]")  # the direction marks it wraps a number in
 HEADINGS = ("Chats", "Contacts", "Groups in common", "Messages", "Other contacts")  # rows among the results too
 PEOPLE = ("Chats", "Contacts", "Other contacts")  # the headings people are under: not groups, not messages
@@ -551,7 +551,7 @@ PANELS = ("Contact info", "Business info", "Group info")  # the contact panel's 
 
 def whatsapp_people(name, most=LOOK_AT, stop=None):
     """The people WhatsApp itself finds for a name, in its order, at most most and no groups: [{"name": "Buntyyy",
-    "number": "919573309199", "shown": "+91 95733 09199"}]. [] if it finds nobody. RuntimeError if WhatsApp can't
+    "number": "915555501234", "shown": "+91 55555 01234"}]. [] if it finds nobody. RuntimeError if WhatsApp can't
     be looked in. Not linked to the phone, it finds nobody: the message she then stages says why. stop: called
     before each chat is opened, True to open no more (you talked over her)."""
     name = clean_search(name)
