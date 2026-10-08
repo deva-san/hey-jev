@@ -1902,7 +1902,7 @@ Reply with one JSON object and nothing else: {"steps": [...], "say": "..."}
 {"do":"new_tab"}  a new tab in their browser
 {"do":"timer","seconds":300,"label":"Tea","alert":"Hey, your tea's ready."}  a timer or a reminder, the alert is said when it ends. Give it a label and alert only if they say what it's for
 {"do":"cancel_timers"}  {"do":"dark_mode","on":true}  {"do":"lock"}  {"do":"sleep"}  {"do":"shutdown"}  {"do":"restart"}  {"do":"abort_shutdown"}  {"do":"dictate"}  dictate writes down what they say next, until they say stop transcribing
-{"do":"screen","task":"click the second video on the page"}  look at their screen and do this, or answer it: what's on the screen, read or sum up this page, click, pick or fill in something, or a task in an app or site no step or skill covers, like a Windows setting. Write the task in full, every detail. It can come after steps that open something. Use it with "say" ""
+{"do":"screen","task":"click the second video on the page"}  look at their screen and do this, or answer it: what's on the screen, read or sum up this page, click, pick or fill in something, or a task in an app or site no step or skill covers, like a Windows setting, an email, the calendar or files and folders: never refuse one. Write the task in full, every detail. It can come after steps that open something. Use it with "say" ""
 {"do":"memory","action":"add","target":"user","content":"Their website CareerID is careerid.in"}  save to your memory. action add, replace or remove. target user (who they are: names, sites, people, apps, likes, words) or memory (your own notes, like what works on this PC). replace and remove find the entry by "old_text", a few words from it
 {"do":"lookup","what":"disk"}  facts about this PC: disk, battery, cpu, memory (RAM), apps (what's using the most), network, uptime, system, or messages (what came in on WhatsApp, Teams, Messages and so on, and who from). Never say you can't check these
 {"do":"recall","query":"careerid","day":"2026-10-03"}  search your past conversations with them by words, a day, or both: "what did we talk about yesterday", "what was that video". "after":"7d" for the last week
@@ -1914,7 +1914,7 @@ lookup, recall, web, read, weather, news and skill_view send the results back to
 {"do":"skill","action":"create","name":"work-mode","description":"Their work setup","triggers":["work mode"],"steps":[...],"say":"Work mode's on.","notes":"..."}  learn something to do again. When they teach you a routine ("when I say X, do Y"), save it with its steps, so next time X runs straight away. Steps are the ones here that act, not lookups. Without fixed steps, put how to do it in "notes". action create, patch (with "old" and "new" text from it) or delete
 {"do":"research","topic":"budget phones in India under 20,000"}  for "look into", "research", "find out all about", the topic in a few words: you work on it in the background while they carry on, then tell them and save a note
 {"do":"note","title":"Shopping list","text":"..."}  save a note for them. {"do":"open_notes"}  show their notes
-{"do":"command","command":"npm test","cwd":"C:\\\\path\\\\to\\\\project","description":"Run the tests"}  only when they explicitly ask for terminal, command, test, build, lint, Git or system-diagnostic work: run it in the background, hidden. Code checks it: read-only checks and tests run; anything that changes files or programs waits for their explicit approval; destructive/admin/security/credential/download commands are blocked. Always give an existing full cwd. Never put secrets in a command
+{"do":"command","command":"npm test","cwd":"C:\\\\path\\\\to\\\\project","description":"Run the tests"}  only when they explicitly ask for terminal, command, test, build, lint, Git or system-diagnostic work, never for files or folders: run it in the background, hidden. Code checks it: tests run, changes wait for their approval, risky ones are blocked. Always give an existing full cwd. Never put secrets in a command
 {"do":"schedule","when":"2026-10-07T18:00:00","repeat":"","description":"Check C drive","task":{"kind":"lookup","what":"disk"}}  durable work at a time. when: local ISO date/time, "tomorrow at 6 PM", "in 2 hours". repeat is empty, "every 30 minutes", "daily at 6 PM", or "every Monday at 9 AM". task is one of: {"kind":"reminder","text":"call Mum"}; {"kind":"lookup","what":"disk|battery|cpu|memory|apps|network|uptime|system"}; {"kind":"research","topic":"..."}; {"kind":"command","command":"git status","cwd":"C:\\\\path"}. Never schedule send, delete, publish, pay, account, security, typing, clicking or screen actions
 {"do":"send_screenshot"}  a picture of their screen to their own phone, only when asked ("send me a screenshot"). On the phone, "screenshot" means this
 {"do":"code","task":"add a dark mode toggle to the settings page","cwd":"C:\\\\path\\\\to\\\\project"}  coding work on one of their projects, when they ask for it: OpenCode does it in the background in that git project folder, she asks first and tells them when it's done. Always the full folder
@@ -2114,6 +2114,7 @@ class LiveSay:
         self.owner, self.player, self.used, self.said, self.error, self.started = None, None, 0, [], None, None
         self.chunker, self.lines, self.lock = SentenceChunker(), queue.Queue(), threading.Lock()
         self.first_text = None  # when the first words came, from any try
+        self.queued = 0  # letters of it to be said, see tidy: a 374-letter answer was said whole, a sentence at a time
 
     def feed(self, key, text):
         """Try key's reply so far."""
@@ -2152,8 +2153,13 @@ class LiveSay:
 
     def _queue(self, sentence):
         line = tidy(sentence)
-        if line:
-            self.lines.put((line, self.make(line)))
+        if not line or self.queued > SAY_MOST:
+            return
+        if self.queued and self.queued + len(line) > SAY_MOST:  # as much as tidy says out loud, and nothing after it
+            self.queued = SAY_MOST + 1
+            return
+        self.queued += len(line) + 1
+        self.lines.put((line, self.make(line)))
 
     def _play(self):
         rec = MIC[0]
@@ -2706,8 +2712,8 @@ def context():
              f"In front: {win.front_app_name() or 'nothing'}.",
              f"Their apps: {', '.join(sorted(set(APP_SAY.values())))}."]  # so "open prone" can be Chrome
     if settings.get("name"):
-        lines.append(f"Their name is {settings.get('name')}. Use it now and then, the way a person would, not in every "
-                     f"reply.")
+        lines.append(f"Their name is {settings.get('name')}, never any other. Use it now and then, the way a person "
+                     f"would, not in every reply.")
     if not settings.get("vision"):
         lines.append("They've turned off looking at the screen in Settings, so never use screen: say it's off there.")
     try:
@@ -4556,12 +4562,28 @@ def fix_names(text):
     return text
 
 
+SAY_MOST = 250  # letters of an answer said out loud, two or three sentences: 374-letter ones with lists were said whole
+LIST_MARK = re.compile(r"(?m)^[ \t]*(?:\d{1,2}[.)]|[-•])(?:[ \t]+(.*?))?[ \t]*$")  # "1. Pixel 9a", "- Pixel 9a"
+
+
 def tidy(line, cut=True):
-    """Her line, ready to say: no markdown, and at most three sentences, since a chatty model can run on. Not cut
-    (cut False) when she asks before doing something: a long message read back stopped before who it was to and
-    "Send it?", and a yes still sent it."""
+    """Her line, ready to say: no markdown, and out loud no list numbers and whole sentences up to SAY_MOST letters,
+    since a chatty model can run on. In full on the phone, where it's read. Not cut (cut False) when she asks before
+    doing something: a long message read back stopped before who it was to and "Send it?", and a yes still sent it."""
     line = re.sub(r"[*_#`]+", "", str(line or "")).strip()
-    return " ".join(re.split(r"(?<=[.!?])\s+", line)[:3]) if cut and len(line) > 400 else line
+    if REPLY_TO.get() is not None:
+        return line
+    # "1. Pixel 9a\n2. Galaxy A55": said as sentences, never "one point" and never run together
+    line = " ".join(LIST_MARK.sub(lambda m: (m[1] or "") + ("." if m[1] and m[1][-1] not in ".!?:;," else ""),
+                                  line).split())
+    if not cut or len(line) <= SAY_MOST:
+        return line
+    said = []
+    for sentence in re.split(r"(?<=[.!?])\s+", line):
+        if said and len(" ".join(said + [sentence])) > SAY_MOST:
+            break
+        said.append(sentence)
+    return " ".join(said)
 
 
 # --------------------------------------------------------------------------- Is it for her?

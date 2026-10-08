@@ -794,6 +794,13 @@ class Plans(Agent):
         self.assertIn("a task in an app or site no step or skill covers, like a Windows setting", siri.PROMPT)
         self.assertLess(len(siri.DEFAULT_SOUL + "\n\n" + siri.PROMPT) + 700, 12000)
 
+    def test_mail_the_calendar_and_files_go_to_the_screen_step_never_a_command(self):
+        """The model said "I can't send emails directly", though she can do Gmail on the screen, and made a folder on
+        the Desktop with mkdir and emptied the Recycle Bin with Clear-RecycleBin, commands that are blocked."""
+        self.assertIn("like a Windows setting, an email, the calendar or files and folders: never refuse one",
+                      siri.PROMPT)
+        self.assertIn("system-diagnostic work, never for files or folders", siri.PROMPT)
+
 
 class Kept(Agent):
     """Procedures only code wrote run, unchanged, cut down to what one may do, and listed without their words."""
