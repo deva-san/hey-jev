@@ -19,6 +19,7 @@ from tests.test_listening import Assistant, FakeEars
 from tests.test_safety import untripped_winplatform
 
 import agent
+import history
 from hermes_memory import skills
 
 SEND = "Send \u202a(Ctrl-Enter)\u202c"  # Gmail's Send button, as UI Automation names it
@@ -327,7 +328,7 @@ NIGHT = "turn on night light"
 
 
 class Learning(Live):
-    def night_light(self, front="settings", before=True):
+    def night_light(self, front="settings", before=True, gate=False):
         """Night light turned on live, by the model, from the planner's open Settings then screen step."""
         settings(self.app)
         gmail(self.app)
@@ -340,7 +341,7 @@ class Learning(Live):
                      "expect": {"has": "Night light", "state": "on"}, "say": "Night light's on."})
         with self.planner(*open_settings, {"do": "screen", "task": NIGHT}), \
                 mock.patch.dict(siri._learning, turns=10, last=0.0):  # any other turn now would start a review
-            siri.handle(NIGHT)
+            siri.handle(NIGHT, gate=gate)
         return script
 
     def test_night_light_is_learned_by_name_and_done_again_with_no_model(self):
@@ -365,6 +366,47 @@ class Learning(Live):
         self.assertEqual(self.app.windows["settings"].switch.state, "on")
         self.assertNotIn("opencode.chat", TRIPPED)
         self.assertEqual(agent.load_stats()[name]["ok"], 1)
+
+    def test_a_task_asked_for_in_so_many_words_is_learned_without_her_name(self):
+        """Night light was turned on and off on 8 October without her name and never learned: "her name wasn't said
+        for it", and on this PC she's rarely called by name. Said in so many words, and done without asking, it
+        was plainly yours."""
+        self.night_light(gate="cold")
+        self.assertEqual(self.said, [f"Okay: {NIGHT}.", "Night light's on, and I've learned how."])
+        self.assertEqual(list(self.learned()), ["turn-on-night-light"])
+
+    def test_a_task_she_asked_about_is_learned_after_your_yes(self):
+        """Words that don't say the task in so many words get "Should I ...?" first: the yes makes it as plainly
+        yours as her name would. Only her name counted, so a task done after a yes was never learned."""
+        settings(self.app)
+        gmail(self.app)
+        self.app.show("mail.google.com")
+        self.model(lambda: {"steps": [{"do": "click", "id": self.app.id("Display")}], "say": ""},
+                   lambda: {"steps": [{"do": "click", "id": self.app.id("Night light"), "state": "on"}], "done": True,
+                            "expect": {"has": "Night light", "state": "on"}, "say": "Night light's on."})
+        siri.PENDING.update(plan={"steps": [{"do": "open", "app": "Settings"}, {"do": "screen", "task": NIGHT}],
+                                  "say": ""}, until=time.time() + 30, soon=time.time() + 30, origin="voice",
+                            words="the night light thing")
+        with mock.patch.dict(siri._learning, turns=10, last=0.0):
+            siri.handle("Yes.", gate=True)
+        self.assertEqual(self.said[-1], "Night light's on, and I've learned how.")
+        self.assertEqual(list(self.learned()), ["turn-on-night-light"])
+
+    def test_a_cold_click_send_still_waits_for_the_yes_to_send(self):
+        """"Click send in Gmail" says the task in so many words, so she no longer asks "Should I ...?" first: the Send
+        itself still waits for your yes to her own question, with the mail read back."""
+        gmail(self.app)
+        self.app.show("mail.google.com")
+        self.app.control("Compose").on()
+        for name, value in (("To", "ravi.kumar@gmail.com"), ("Subject", "Lunch"), ("Message Body", "See you at 1")):
+            self.app.control(name).value = value
+        history.add("email ravi dot kumar at gmail dot com about lunch", "", "")  # the address, said a turn before
+        self.model({"steps": [{"do": "screen", "task": "click send in Gmail"}], "say": ""},
+                   lambda: {"steps": [{"do": "click", "id": self.app.id("Send")}], "done": True,
+                            "expect": {"gone": "Subject"}, "say": "Sent."})
+        siri.handle("Click send in Gmail.", gate="cold")
+        self.assertEqual(self.app.sent, [])
+        self.assertTrue(self.said[-1].endswith("Should I press Send on mail.google.com?"), self.said)
 
     def test_its_own_open_is_where_it_starts_when_the_plan_had_none(self):
         script = self.night_light(front="mail.google.com", before=False)

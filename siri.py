@@ -1936,6 +1936,11 @@ ASKS_FOR = {"type": EDIT_WORDS, "keys": EDIT_WORDS, "close": re.compile(r"\b(?:c
             "minimise": re.compile(r"\b(?:minimi[sz]e|hide)", re.I), "lock": re.compile(r"\block", re.I),
             "sleep": re.compile(r"\bsleep", re.I),
             "send_screenshot": re.compile(r"\b(?:screen ?shot|screen|snap|picture|photo)", re.I)}
+# A task in an app the words ask for in so many words, after plain(): "Turn on night light", "Click chat messages",
+# "Select smile emoji". On 8 October 7 of the 17 "Should I look at your screen?" or "Should I ...?" asks were for
+# requests as plain as these. Room talk the model took for a task doesn't start like this, so it's still asked about
+TASK_WORDS = re.compile(r"(?:click|double click|right click|tap|select|choose|toggle|tick|untick|uncheck|"
+                        r"turn (?:on|off)|switch (?:on|off)) \w.*|(?:turn|switch) (?:[\w'-]+ ){1,3}(?:on|off)")
 # After reading the web or messages, only these go ahead without a yes, whatever the words: they show, play or look
 # things up, or ask for themselves later (a message, an install, a command's approval). Words can't count there:
 # "look up how to make biryani" would let a page's typing through, "make" being an edit word, and nothing would stop
@@ -3041,7 +3046,8 @@ def needs_asking(steps, text, read=False):
     messages, every step outside READ_SAFE asks, whatever the words. A yes runs the whole plan, so with a shutdown or
     restart in it that's the one asked about, or a yes to "Should I type that?" would let it through unasked.
     read comes before the look in the last minute: a screen step a page or a message could have steered always asks.
-    A procedure always asks without her name: it's a whole task in an app."""
+    A procedure, a whole task in an app, asks without her name too. Neither does for words that ask for the task in
+    so many words (TASK_WORDS): "Turn on night light", "Select smile emoji"."""
     t = plain(text)
     for s in steps:
         do = s["do"]
@@ -3049,6 +3055,8 @@ def needs_asking(steps, text, read=False):
             ask = False
         elif read:
             ask = do not in READ_SAFE
+        elif do in ("screen", "procedure") and TASK_WORDS.fullmatch(t):
+            ask = False
         elif do == "screen":
             ask = time.time() - LAST_SCREEN[0] > 60
         elif do == "procedure":
@@ -4568,9 +4576,8 @@ CHECK_BELOW = 0.7  # with her name, below this the model is told the words may b
 # Below CHECK_BELOW, said to her (her name, right Alt, or a follow-up that sounds like a request), she asks "Did you
 # say: ...?" before doing anything, and a yes does what she heard: speech-to-text gets words wrong (asked for on 8
 # October: say the message back first). Talk around the room she lets go quietly, as before; and the words she acts
-# on show above the popup every time ("Heard", see assistant_ui). named: whether they were said to her by name
-# (agent.NAMED), which the yes often isn't, as for PENDING: a task asked about that way was never learned
-HEARD = {"words": None, "until": 0.0, "named": False}
+# on show above the popup every time ("Heard", see assistant_ui)
+HEARD = {"words": None, "until": 0.0}
 SLIPS = re.compile(r"\b(" + "|".join(sorted((re.escape(k) for k in fast_intent.COMMON_SLIPS), key=len, reverse=True))
                    + r")\b", re.I)
 
@@ -4796,11 +4803,10 @@ def tab_not_browser(plan, words):
     return {**plan, "say": confirm_question(risky), "confirm": mended} if risky else mended
 
 
-PENDING = {"plan": None, "until": 0.0, "soon": 0.0, "origin": "voice", "id": "", "words": "", "named": False}  # a
-# plan waiting on a yes or no, see think. soon: see handle. origin: where it was asked, voice or phone: a yes at the PC
-# can't answer a question asked on the phone, or the other way round. id: which question, for the phone's buttons.
-# words: what you said that it's for, so the yes turn's agent.SAID is still that and not "yes"; named: and whether
-# that was said to her by name (agent.NAMED), as a yes without it often is
+PENDING = {"plan": None, "until": 0.0, "soon": 0.0, "origin": "voice", "id": "", "words": ""}  # a plan waiting on a
+# yes or no, see think. soon: see handle. origin: where it was asked, voice or phone: a yes at the PC can't answer a
+# question asked on the phone, or the other way round. id: which question, for the phone's buttons. words: what you
+# said that it's for, so the yes turn's agent.SAID is still that and not "yes"
 REPLY_TO = contextvars.ContextVar("reply_to", default=None)  # a turn from your phone: her lines go here, not out loud
 PHONE_CHAT = contextvars.ContextVar("phone_chat", default=None)  # and the chat it came from, for a task's result
 PHONE = {"send": None, "ask": None, "photo": None}  # set by run_voice_assistant once Telegram is there: send(chat,
@@ -4914,20 +4920,22 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     text, words = fix_names(text), fix_names(text if words is None else words)
     text, words = fix_vocab(text), fix_vocab(words)  # their dictionary, as for dictation
     MEMORY.reset_consolidation_failures()
-    asked, was_named = (HEARD["words"], HEARD.get("named", False)) \
-        if time.time() < HEARD["until"] and origin() == "voice" else (None, False)
-    HEARD.update(words=None, until=0.0, named=False)
+    asked = HEARD["words"] if time.time() < HEARD["until"] and origin() == "voice" else None
+    HEARD.update(words=None, until=0.0)
     named = not gate
     if asked and YES.fullmatch(plain(words)):  # "Did you say: open Notepad?" "Yes": what she heard, as sure as can be
         print(f"  (yes, they said {asked!r})")
         text = words = speech.heard(str(asked), 1.0)
         sure = 1.0
-        named = named or was_named  # said to her by name when she asked; the yes often isn't
+        named = True  # a yes to "Did you say ...?": asked of her as plainly as with her name
     elif asked and NO.fullmatch(plain(words)):
         say("Okay, say it again.", notify)
         return True
     agent.SAID.set(str(words or text))  # the words a task in an app may take an address or a site from, never "yes"
-    agent.NAMED.set(named)  # and whether they were said to her by name, which learning a task from them needs
+    # and whether they were plainly asked of her, which learning a task from them needs: by name, or a task asked for in
+    # so many words (TASK_WORDS), which is done without "Should I ...?" first. Only her name counted, and on this PC
+    # she's rarely called by it: night light, turned on and off on 8 October, was never learned
+    agent.NAMED.set(named or bool(TASK_WORDS.fullmatch(plain(words))))
     note = None  # shown in the window instead of her line, when something needs fixing
     # kept through talk she lets go ("Hmm", a mumble, someone else), so the yes can still follow; gone once she acts
     pending = PENDING["plan"] if time.time() < PENDING["until"] and PENDING["origin"] == origin() and \
@@ -4942,7 +4950,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         print("  (yes, doing what she asked about)")
         plan = pending
         agent.SAID.set(str(PENDING.get("words") or words))  # what you asked for, which "yes" is the answer about
-        agent.NAMED.set(bool(PENDING.get("named")) or not gate)
+        agent.NAMED.set(True)  # her question, answered yes: asked of her as plainly as with her name
         if any(s.get("do") in POWER_STEPS for s in plan.get("steps") or []):
             POWER_OK["until"] = time.time() + 20  # this yes, and only this one, lets the shutdown or restart run
         if any(s.get("do") in ASKS_YES for s in plan.get("steps") or []):
@@ -4975,7 +4983,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     elif sure < CHECK_BELOW and origin() == "voice" and not TAPPED.get() and \
             (not gate or (gate is True and could_be_request(words))) and not YES.fullmatch(plain(words)):
         # unsure of the words, and said to her: what she heard, back to you before she does anything
-        HEARD.update(words=str(words), until=time.time() + FOLLOW_UP + 8, named=not gate)
+        HEARD.update(words=str(words), until=time.time() + FOLLOW_UP + 8)
         print(f"  (only {sure:.0%} sure of the words: asking)")
         emit(notify, "Heard", heard_as(words))
         plan = make_plan(say=f"Did you say: {heard_as(words)}?")
@@ -5089,14 +5097,13 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
                  for s in plan["confirm"].get("steps") or [] if s.get("do") in ("message_send", "install_run",
                                                                                 "contact_found", "agent_resume")]
         soon = time.time() + (PHONE_WAITS if origin() == "phone" else FOLLOW_UP + 8)
-        # the words and name a yes is for: a held step's from its run (agent.take_ask, built by code), any other plan's
-        # this turn's. Never a model's plan's own "words" or "named", which parse_plan leaves in (a review's "words" is
-        # its dictionary): a page that steered the model made its own address "your words", and an unnamed turn named
+        # the words a yes is for: a held step's from its run (agent.take_ask, built by code), any other plan's this
+        # turn's. Never a model's plan's own "words", which parse_plan leaves in (a review's "words" is its dictionary):
+        # a page that steered the model made its own address "your words"
         own = any(s.get("do") == "agent_resume" for s in plan["confirm"].get("steps") or [])
         PENDING.update(plan=plan["confirm"], soon=soon, until=max([soon] + waits), origin=origin(),
                        id=hashlib.sha1(os.urandom(16)).hexdigest()[:12],  # an old button can't match a new question
-                       words=str((own and plan["confirm"].get("words")) or agent.SAID.get() or words or text),
-                       named=bool(plan["confirm"].get("named")) if own else agent.NAMED.get())
+                       words=str((own and plan["confirm"].get("words")) or agent.SAID.get() or words or text))
     # what she said, also when it came from the screen: the next turn's "play the third one" needs what she saw.
     # What a procedure writes is kept as its length only (agent.redact). With a task in an app, the planner's line
     # was never said (agent.intro), so it isn't kept as hers either

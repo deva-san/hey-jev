@@ -138,7 +138,9 @@ STOP = threading.Event()  # set by HER.cut and a phone "stop", kept till the nex
 RUNNING = threading.Event()  # set while a task in an app runs, so what the mic hears is listened to for "stop"
 _running = [0, threading.Lock()]  # how many runs are going (one late from the last turn, one now), for RUNNING
 SAID = contextvars.ContextVar("said", default="")  # this turn's words as you said them, set by siri.handle
-NAMED = contextvars.ContextVar("named", default=False)  # her name was said for them, or right Alt or the phone
+# and whether they were plainly asked of her: her name, right Alt or the phone, a yes to her question, or a task asked
+# for in so many words (siri.handle)
+NAMED = contextvars.ContextVar("named", default=False)
 RUN = contextvars.ContextVar("run", default=None)  # the run this thread's steps belong to, for see() and act()
 TURN = contextvars.ContextVar("turn", default=None)  # the Turn of the plan that's running, set by siri.run_plan
 HELD, ASK, CURRENT = {}, [None], [None]  # the step waiting on your yes; her question about it; the latest run
@@ -169,9 +171,9 @@ class Turn:
 
 class Run:
     """One go at a task, bound to its turn. over: the turn's over, it can't act any more. approved: the one step your
-    yes was for. read: the turn read web pages, messages or pictures, which might be steering it. named: her name
-    was said for it, which learning from it needs. alone: the plan was just it and the steps that opened its app, so
-    your words asked for nothing else, which starting what's learned from them needs (match).
+    yes was for. read: the turn read web pages, messages or pictures, which might be steering it. named: it was
+    plainly asked of her (NAMED), which learning from it needs. alone: the plan was just it and the steps that opened
+    its app, so your words asked for nothing else, which starting what's learned from them needs (match).
     A live run (run) also has the steps of the plan that opened its app (before), the procedure it's mending from
     step base_i on (base), what she did as a procedure keeps it (rec) and in a few words for the model (notes)."""
 
@@ -288,7 +290,7 @@ def hold(r, i, question, verb, target=None, step=None, no="", focus=False, sendi
                     until=time.time() + (host.PHONE_WAITS if host.origin() == "phone" else HOLD_FOR))
         short = f"Should I {verb.split('|')[0]} it?"  # kept in her history in place of the read-back
         ASK[0] = {"steps": [{"do": "agent_resume", "hold": HELD["id"], "verb": verb}], "say": "", "words": r.words,
-                  "named": r.named, "run": r.id, "question": question, "short": short}
+                  "run": r.id, "question": question, "short": short}
     r.outcome = "held"
     return question
 
@@ -2066,16 +2068,17 @@ KIND_SAY = {"email": "the address they say", "said": "their own words", "write":
 
 
 def unlearnable(r):
-    """Why run r isn't one to learn from, or "": the screen tried to give her orders (tainted); learning is off; her
-    name wasn't said; it was mostly done by sight, too short to be worth it, or too long to keep; your words were a
-    yes or a no, not the task; or it was about what's on the screen ("the second video"), which changes."""
+    """Why run r isn't one to learn from, or "": the screen tried to give her orders (tainted); learning is off; it
+    wasn't plainly asked of her (named); it was mostly done by sight, too short to be worth it, or too long to keep;
+    your words were a yes or a no, not the task; or it was about what's on the screen ("the second video"), which
+    changes."""
     steps = list((r.base or {}).get("steps", [])[:r.base_i]) + r.before + r.rec
     if r.tainted:
         return "something on the screen tried to give her orders"
     if not host.settings.get("learning"):
         return "learning is off in Settings"
     if not r.named:
-        return "her name wasn't said for it"
+        return "it wasn't plainly asked of her, by name, with a yes or in so many words"
     if sum(s.get("do") == "look" for s in steps) > 2:
         return "too much of it was done by sight"
     if sum(s.get("do") in ("ui", "keys", "open", "website") for s in steps) < 2:
