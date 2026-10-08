@@ -1,13 +1,15 @@
 """Faster answers: a plain answer said as the model writes it (LiveSay), the streamed reply (opencode._streamed), a
 second try only when the first hasn't started writing (ask_model), a "One moment" when she's slow (fill_silence),
 and the prompt kept small. No model, voice or network: fakes throughout."""
+import ast
 import json
+import os
 import threading
 import time
 import unittest
 from unittest import mock
 
-from tests.support import siri
+from tests.support import ROOT, siri
 
 import opencode
 
@@ -177,6 +179,20 @@ class Filler(unittest.TestCase):
             threading.Timer(0.01, siri.TURN_SPOKE.set).start()  # the answer came first
             siri.fill_silence("open notepad and write a poem", None)
             self.assertEqual(len(said), 1)
+
+
+class Startup(unittest.TestCase):
+    def test_her_compiled_code_is_kept_whatever_python_was_told(self):
+        """Her modules' cached bytecode was found stale, as if she ran with PYTHONDONTWRITEBYTECODE or -B: each start
+        compiled her 24k lines again. app.py turns writing it back on before it imports any of them."""
+        tree = ast.parse(open(os.path.join(ROOT, "app.py"), encoding="utf-8").read())
+        before = []
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) or (isinstance(node, ast.Import) and
+                                                    any(a.name not in ("os", "sys") for a in node.names)):
+                break  # the first of her own modules
+            before.append(ast.unparse(node))
+        self.assertIn("sys.dont_write_bytecode = False", before)
 
 
 class PromptSize(unittest.TestCase):

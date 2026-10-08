@@ -1,7 +1,9 @@
 """Jev on your phone (telegram_bot.py and the phone turns in siri): pairing, only your account, nothing late, her
 questions answered only by a tap there, and a yes at the PC never answering a phone question. Telegram is faked."""
 import asyncio
+import contextlib
 import datetime
+import io
 import json
 import os
 import time
@@ -234,6 +236,16 @@ class Fixes(unittest.TestCase):
             self.assertTrue(gate.wait(5))
             bot.stop()
         self.assertEqual(len(polls), 3)
+
+    def test_a_network_hiccup_is_one_line_in_the_log(self):
+        """Six Telegram network errors in a morning each logged a ~140-line traceback: "No error handlers are
+        registered, logging exception." The library rides them out by itself, so one line each is enough."""
+        from telegram.error import NetworkError
+        app = telegram_bot.Bot(on_message=None, on_tap=None)._app("123:abc")
+        out = io.StringIO()
+        with self.assertNoLogs("telegram", level="ERROR"), contextlib.redirect_stdout(out):
+            asyncio.run(app.process_error(None, NetworkError("httpx.ConnectError: All connection attempts failed")))
+        self.assertEqual(out.getvalue(), "[phone: Telegram NetworkError, carrying on]\n")
 
     def test_a_bad_token_is_said_once_and_it_stops(self):
         stops = []
