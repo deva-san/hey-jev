@@ -47,6 +47,7 @@ class Messaging(unittest.TestCase):
             self.box.value += text
         for target, name, value in (
                 (m, "compose_box", lambda app, hwnd: (self.box, "Amma \U0001f496") if self.box else (None, "")),
+                (m, "window_of", lambda app: 99),  # open already, in the tray or not
                 (m, "box_value", lambda box: " ".join(box.value.split())),
                 (m, "in_front", lambda app, hwnd: True),
                 (m, "open_chat", lambda app, handle, text: 99),
@@ -102,6 +103,32 @@ class Messaging(unittest.TestCase):
             with self.assertRaises(RuntimeError) as err:
                 self.m.send(ready)
         self.assertIn("still sitting", str(err.exception))
+
+    def test_from_closed_its_page_is_waited_for_before_the_chat(self):
+        """"Close WhatsApp" quits the 2025 app, whose page takes up to 25 s to draw: the chat was looked for 4 s, and a
+        number that was fine got "WhatsApp didn't open the chat with amma", so you had to ask again."""
+        for page_at, box_at in ((10.0, 11.0), (None, None)):
+            with self.subTest(page_at=page_at):
+                self.typed.clear()
+                clock = [0.0]
+
+                def chat(app, hwnd):  # the chat the link asked for, once the page is there
+                    return (self.box, "Amma") if box_at is not None and clock[0] >= box_at else (None, "")
+                with mock.patch.object(self.m, "time", SimpleNamespace(time=lambda: clock[0], sleep=lambda s: clock.
+                                                                       __setitem__(0, clock[0] + s))), \
+                        mock.patch.object(self.m, "window_of", lambda app: None), \
+                        mock.patch.object(self.m, "_uia", lambda: SimpleNamespace(ElementFromHandle=lambda h: None)), \
+                        mock.patch.object(self.m, "_search_box", lambda uia, root: "search" if page_at is not None
+                                          and clock[0] >= page_at else None), \
+                        mock.patch.object(self.m, "compose_box", chat), mock.patch.object(self.m, "_compose_box", chat):
+                    if page_at is not None:
+                        self.assertTrue(self.m.prepare("whatsapp", "amma", "Hi")["checked"])
+                        self.assertEqual(self.typed, ["Hi"])
+                    else:  # still drawing after all that time: said so, never blamed on the chat
+                        with self.assertRaises(RuntimeError) as err:
+                            self.m.prepare("whatsapp", "amma", "Hi")
+                        self.assertIn("WhatsApp is still starting", str(err.exception))
+                        self.assertEqual((self.typed, self.pressed), ([], []))
 
     def test_the_new_name_of_the_box_is_read(self):
         m = real_messaging()
@@ -170,6 +197,7 @@ class Files(unittest.TestCase):
             self.copies += 1
         for target, name, value in (
                 (m.m, "compose_box", lambda app, hwnd: (box, "Amma")), (m.m, "box_value", lambda b: ""),
+                (m.m, "window_of", lambda app: 99),
                 (m.m, "in_front", lambda app, hwnd: True), (m.m, "open_chat", lambda app, handle, text: 99),
                 (m.m, "find_contact", lambda contact, app: ("amma", "919999999999")),
                 (m.m, "offline_reason", lambda app, hwnd: None), (m.m, "typed_text", lambda app, hwnd: ""),

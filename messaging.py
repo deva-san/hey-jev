@@ -474,6 +474,25 @@ def type_into(app, hwnd, text):
         raise RuntimeError(f"{APPS[app]['say']} didn't take the message, so I've not sent anything")
 
 
+def drawn(hwnd):
+    """True once WhatsApp's page is drawn, its search box there, giving it up to LOADING. Started from closed ("Close
+    WhatsApp" quits the 2025 app) the window shows long before: the chat was looked for 4 s, and a number that was
+    fine got "didn't open the chat", so you had to ask again."""
+    end, why = time.time() + LOADING, None
+    while True:
+        try:
+            uia = _uia()
+            if again(lambda: _search_box(uia, uia.ElementFromHandle(hwnd))) is not None:
+                return True
+        except Exception as exc:  # the window may still be coming up
+            why = exc
+        if time.time() > end:
+            if why is not None:
+                print(f"  couldn't look at WhatsApp's page: {why!r}")
+            return False
+        time.sleep(0.5)
+
+
 def open_chat(app, handle, text):
     """Open that person's chat with the text typed in, through the app's own link. Nothing is sent."""
     link = APPS[app]["link"].format(id=quote(str(handle), safe=""), text=quote(text, safe=""))
@@ -907,7 +926,11 @@ def prepare_files(app, contact, paths, caption=""):
     paths = check_files(paths)
     caption = " ".join(str(caption or "").split())[:MAX_TEXT]
     name, handle = find_contact(contact, app)
+    cold = window_of(app) is None  # as in prepare
     hwnd = open_chat(app, handle, "")
+    if cold and not drawn(hwnd):
+        raise RuntimeError(offline_reason(app, hwnd) or f"{APPS[app]['say']} is still starting, so I've not sent "
+                           f"anything. Ask me again in a moment")
     if box_shown(app, hwnd) is None:  # as in prepare: not linked, or the chat didn't open
         why = offline_reason(app, hwnd)
         raise RuntimeError(why or f"{APPS[app]['say']} didn't open the chat with {name}, so I've not sent anything")
@@ -1046,7 +1069,11 @@ def prepare(app, contact, text):
         raise RuntimeError("I can only message on WhatsApp or Telegram so far")
     text = clean_text(text)
     name, handle = find_contact(contact, app)
+    cold = APPS[app]["compose"] and window_of(app) is None  # quit, not just in the tray: see drawn
     hwnd = open_chat(app, handle, text)
+    if cold and not drawn(hwnd):
+        raise RuntimeError(offline_reason(app, hwnd) or f"{APPS[app]['say']} is still starting, so I've not typed "
+                           f"anything. Ask me again in a moment")
     if APPS[app]["compose"] and box_shown(app, hwnd) is None:
         # no message box: not linked to the phone (the Reconnect button: a 7 s look on the 2025 app's big page, so
         # only now), or the chat didn't open, as for a number not on WhatsApp. Never Enter into whatever that is
