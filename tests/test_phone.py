@@ -317,6 +317,29 @@ class Hiccups(unittest.TestCase):
         self.assertEqual(ctx.sent, [(7, "Something went wrong with that. Send it again.")])
 
 
+class OnThePC(unittest.TestCase):
+    def test_what_you_type_on_the_phone_and_her_answer_stay_off_its_screen(self):
+        """"What does this blood report say?" from the phone was shown in the popup at the bottom of the PC's screen,
+        and her answer in its window, for anyone in the room to read."""
+        shown, lines = [], []
+        plan = {"steps": [], "say": "Your haemoglobin is a little low, the rest is normal."}
+        with mock.patch.object(siri, "ask_plan", return_value=(json.dumps(plan), dict(plan), {}, "test")), \
+                mock.patch.object(siri, "context", return_value=""), \
+                mock.patch.object(siri, "learn_later", lambda *a, **k: None):
+            to, chat = siri.REPLY_TO.set(lines), siri.PHONE_CHAT.set(7)
+            try:
+                siri.handle("what does this blood report say", "what does this blood report say",
+                            notify=lambda state, detail="": shown.append((state, detail)))
+            finally:
+                siri.REPLY_TO.reset(to)
+                siri.PHONE_CHAT.reset(chat)
+        self.assertEqual(lines, [plan["say"]])  # on the phone, as ever
+        self.assertTrue(shown)
+        for state, detail in shown:
+            self.assertNotIn("blood", str(detail), state)
+            self.assertNotIn("haemoglobin", str(detail), state)
+
+
 class Pictures(unittest.TestCase):
     """A photo you send her: downloaded on this PC, and what your words with it (or a moment after) are about."""
 

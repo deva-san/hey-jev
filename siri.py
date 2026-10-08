@@ -4802,6 +4802,7 @@ REPLY_TO = contextvars.ContextVar("reply_to", default=None)  # a turn from your 
 PHONE_CHAT = contextvars.ContextVar("phone_chat", default=None)  # and the chat it came from, for a task's result
 PHONE = {"send": None, "ask": None, "photo": None}  # set by run_voice_assistant once Telegram is there: send(chat,
 # line), ask(chat, question), photo(chat, png bytes, caption)
+PHONE_SHOWN = ("A message from your phone", "Answered on your phone")  # all the PC shows of a phone turn
 TAPPED = contextvars.ContextVar("tapped", default=False)  # the phone's Yes button: the only yes for a phone question
 PHONE_PICTURES = {}  # chat -> ([pictures as data URLs], when): the last you sent from your phone, an album's together
 PICTURE_FOR = 600.0  # seconds pictures you sent stay what your messages are about, for "and which is cheaper?"
@@ -5004,7 +5005,8 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         if plan:
             print(f"  quick: {json.dumps(plan['steps']) if plan['steps'] else 'reply'}")
         else:
-            emit(notify, "Thinking", words or text)
+            # what you typed on your phone isn't shown on the PC's screen for the room to read, nor her answer (below)
+            emit(notify, "Thinking", (words or text) if origin() == "voice" else PHONE_SHOWN[0])
             TURN_SPOKE.clear()
             if not gate and STREAM_SAY and origin() == "voice":  # with her name it's for her: "One moment" if slow
                 threading.Thread(target=fill_silence, args=(words or text, notify), daemon=True).start()
@@ -5111,7 +5113,8 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         print(f"  couldn't keep this turn: {exc!r}")
     learn_later(words or text, [s for s in kept["steps"] if isinstance(s, dict)], failed, gate)
     note = note or voice_error
-    emit(notify, "Something went wrong" if note else "Ready", note or kept["say"] or describe(kept["steps"]) or "Done")
+    emit(notify, "Something went wrong" if note else "Ready", note or (PHONE_SHOWN[1] if origin() == "phone" else
+                                                                       kept["say"] or describe(kept["steps"]) or "Done"))
     if dictate:
         return "dictate"
     if playing_after([s for s in kept["steps"] if isinstance(s, dict) and s.get("do")]):
