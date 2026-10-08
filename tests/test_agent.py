@@ -1192,6 +1192,44 @@ class Safety(Live):
             self.assertIn("could start a program", line)
         self.assertEqual(self.app.done, [])
 
+    def test_an_editors_own_terminal_is_a_command_window(self):
+        """VS Code, Kiro and Cursor aren't command windows, but their terminal is: "build my project in VS Code" was
+        planned as npm run build typed into it and Enter, and the gate let both through."""
+        for exe in ("code.exe", "kiro.exe", "cursor.exe"):
+            w = self.app.window(exe, exe, "app.py - project - Visual Studio Code")
+            terminal = Control("Terminal 1, powershell", "edit", value="")
+            w.controls = [Control("app.py, Editor Group 1", "edit", value="print(1)"), terminal, Control("Explorer"),
+                          Control("Search"), Control("Run and Debug")]
+            self.app.focus = terminal
+            self.app.show(exe)
+            for step in ({"do": "type", "text": "npm run build"}, {"do": "keys", "keys": "enter"}):
+                self.model({"steps": [step]})
+                line, r = self.run_task(f"build my project in {exe[:-4]}")
+                self.assertEqual(r.outcome, "refused", (exe, step))
+                self.assertIn("could start a program", line)
+        self.assertEqual(self.app.done, [])
+        self.app.focus = self.app.front.controls[0]  # the editor itself: typing goes, as anywhere
+        self.model({"steps": [{"do": "type", "text": "# done"}], "done": True, "expect": {"has": "Search"}})
+        self.run_task("add a comment in cursor")
+        self.assertEqual(self.app.done, [("app.py, Editor Group 1", "# done")])
+
+    def test_whatsapps_web_view_in_front_is_a_chat(self):
+        """With its message box focused, WhatsApp's 2025 app is msedgewebview2.exe in front, which the gate didn't
+        know as a chat: a plan could type there and press Enter, sending it to whichever chat was open."""
+        import psutil
+        w = self.app.window("view", "msedgewebview2.exe", "WhatsApp")
+        w.controls = [Control("Type a message to Ravi", "edit", value="")] + [Control(f"Chat {n}") for n in "abcd"]
+        self.app.focus = w.controls[0]
+        self.app.show("view")
+        app = SimpleNamespace(name=lambda: "WhatsApp.Root.exe", parent=lambda: None)
+        view = SimpleNamespace(parent=lambda: SimpleNamespace(name=lambda: "msedgewebview2.exe", parent=lambda: app))
+        self.patch(winplatform, "_pid", lambda hwnd: 2)
+        self.patch(psutil, "Process", lambda pid: view)
+        self.model({"steps": [{"do": "type", "text": "on my way"}, {"do": "keys", "keys": "enter"}]})
+        line, r = self.run_task("reply on my way")
+        self.assertEqual((r.outcome, line, self.app.done), ("chat", agent.CHAT_LINE, []))
+        self.assertTrue(agent.chat_in_front("msedgewebview2.exe", "WhatsApp", None))
+
     def test_a_switch_named_send_still_asks(self):
         w = self.app.window("app", "notes.exe", "Notes")
         w.controls = [Control("Send to everyone", "checkbox", state="off")] + [Control(f"Note {n}") for n in "abcd"]

@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from tests.support import DATA, ROOT, messaging, siri
@@ -263,6 +264,90 @@ class ChatApps(unittest.TestCase):
         said, pressed = self.keys(r"C:\Windows\System32\cmd.exe", "enter")
         self.assertFalse(pressed)
         self.assertIn("command windows", said)
+
+    def run_quick(self, exe, words, parents=(), focus=None):
+        """words through the quick path and do_step (keys on their own, as a model plans them: {"do": "keys"}), with
+        exe in front, its process started by parents (names, the nearest first), and focus the control with the
+        keyboard: (what she said, [what was pressed or pasted])."""
+        steps = [{"do": "keys", "keys": words[6:]}] if words.startswith("press ") else siri.quick(words)["steps"]
+        import psutil
+        chain = [SimpleNamespace(name=lambda n=n: n, parent=None) for n in parents] + [None]
+        for proc, up in zip(chain, chain[1:]):
+            proc.parent = lambda up=up: up
+        done, said = [], []
+        with mock.patch.object(siri.win, "foreground_exe", return_value=exe), \
+                mock.patch.object(siri.win, "_pid", lambda hwnd: 2), \
+                mock.patch.object(psutil, "Process", lambda pid: SimpleNamespace(parent=lambda: chain[0])), \
+                mock.patch.object(siri.win, "ui_focused", lambda: focus), \
+                mock.patch.object(siri.win, "paste", lambda text: done.append(("paste", text))), \
+                mock.patch.object(siri.win, "press", lambda *keys: done.append(keys)):
+            for step in steps:
+                try:
+                    siri.do_step(step)
+                except RuntimeError as exc:
+                    said.append(str(exc))
+        return said, done
+
+    def test_enter_isnt_pressed_in_whatsapps_web_view(self):
+        """WhatsApp's 2025 app puts its web view, msedgewebview2.exe, in front once its message box has the keyboard.
+        "Type see you soon and press enter" then sent it to whichever chat was open, with no read-back and no yes."""
+        view = r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\141.0\msedgewebview2.exe"
+        said, done = self.run_quick(view, "type see you soon and press enter",
+                                    parents=("msedgewebview2.exe", "WhatsApp.Root.exe"))
+        self.assertEqual(done, [("paste", "see you soon")])
+        self.assertIn("message", said[0])
+        for keys in ("ctrl+enter", "shift+enter"):
+            self.assertFalse(self.run_quick(view, f"press {keys}", ("msedgewebview2.exe", "WhatsApp.Root.exe"))[1])
+        # another app's web view is any window: Enter goes
+        self.assertEqual(self.run_quick(view, "type see you soon and press enter", parents=("olk.exe",)),
+                         ([], [("paste", "see you soon"), ("enter",)]))
+
+    def test_an_editors_terminal_is_a_command_window(self):
+        """"Build my project in VS Code" could type npm run build into Kiro's or VS Code's own terminal and press Enter:
+        the command ran with no yes and none of the command runner's rules."""
+        terminal = {"name": "Terminal 1, powershell", "role": "edit"}
+        for exe in (r"C:\Users\x\AppData\Local\Programs\Microsoft VS Code\Code.exe", r"C:\x\Kiro\Kiro.exe",
+                    r"C:\x\cursor.exe"):
+            said, done = self.run_quick(exe, "type npm run build and press enter", focus=terminal)
+            self.assertEqual(done, [], exe)
+            self.assertIn("command windows", said[0], exe)
+            self.assertEqual(self.run_quick(exe, "press enter", focus=None)[1], [], exe)  # can't tell where it'd go
+        for exe in (r"C:\x\alacritty.exe", r"C:\x\WezTerm\wezterm-gui.exe", r"C:\x\PuTTY\putty.exe"):
+            self.assertEqual(self.run_quick(exe, "type dir and press enter")[1], [], exe)
+        # the editor itself, a file called terminal.py too, is any window
+        for name in ("app.py, Editor Group 1", "terminal.py, Editor Group 1"):
+            self.assertEqual(self.run_quick(r"C:\x\Code.exe", "type hello and press enter",
+                                            focus={"name": name, "role": "edit"}),
+                             ([], [("paste", "hello"), ("enter",)]), name)
+
+    def test_start_search_is_never_typed_into(self):
+        """A plan pressed Win+S, typed a command into Start's search and pressed Enter, which runs it."""
+        search = r"C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\SearchHost.exe"
+        said, done = self.run_quick(search, "type cmd /c calc and press enter")
+        self.assertEqual(done, [])
+        self.assertIn("Start's search", said[0])
+        self.assertEqual(self.run_quick(search, "press escape")[1], [("esc",)])  # only what can't start anything
+
+
+class PlannedShortcuts(unittest.TestCase):
+    """README: the Windows key is only ever pressed for one of shortcuts.py's, never for a plan the model made."""
+
+    def test_a_plan_cant_press_the_windows_key_by_a_shortcut_id(self):
+        """Her history shows the model plans like {"do": "shortcut", "id": "windows:win+d"}. Copying the format, a
+        plan pressed Win+S as vetted, pasted a command into Start's search and pressed Enter."""
+        raw = json.dumps({"steps": [{"do": "shortcut", "id": "windows:win+s"}, {"do": "type", "text": "cmd /c calc"},
+                                    {"do": "keys", "keys": "enter"}], "say": ""})
+        self.assertEqual([s["do"] for s in siri.parse_plan(raw)["steps"]], ["type", "keys"])
+        tool = '<tool_call>shortcut<arg_key>id</arg_key><arg_value>windows:win+r</arg_value></tool_call>'
+        self.assertEqual(siri.parse_plan(tool)["steps"], [])
+
+    def test_her_own_shortcuts_still_go(self):
+        with mock.patch.object(siri.win, "foreground_exe", return_value=r"C:\Windows\explorer.exe"), \
+                mock.patch.object(siri, "focused_on", lambda site: False), \
+                mock.patch.object(siri.win, "press") as press:
+            for step in siri.quick("open clipboard history")["steps"]:
+                siri.do_step(step)
+        press.assert_called_once_with("cmd", "v")
 
 
 def untripped_winplatform():

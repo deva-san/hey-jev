@@ -953,7 +953,8 @@ def chat_in_front(exe, title, site, address=""):
     one: WhatsApp Web or Discord installed as an app is chrome.exe with no address bar, titled "WhatsApp" or "Discord",
     and was driven, Enter and all, as if it were any page."""
     return exe in host.CHATS or bool(CHAT_SITES.search(site or "") or CHAT_SITES.search(address or "")) or \
-        (exe in WEB_EXES and not site and bool(CHAT_APPS.search(title or "")))
+        (exe in WEB_EXES and not site and bool(CHAT_APPS.search(title or ""))) or \
+        (exe == "msedgewebview2.exe" and host.hosted_chat(win.front_window()))  # WhatsApp's 2025 app, its box focused
 
 
 def gate(r, i, s, el=None, checked=False, trusted=()):
@@ -977,8 +978,10 @@ def gate(r, i, s, el=None, checked=False, trusted=()):
     focus = el if do in ("ui", "click") else win.ui_focused() if do in ("type", "keys") else None
     if do == "type" and not focus:
         return "stop", "There's nowhere to type that in front, so I've stopped."
+    # a code editor's own terminal too (siri.in_terminal): "build my project in VS Code" could type npm run build into
+    # Kiro's and press Enter, with no yes and none of the command runner's rules
     if (do in ("type", "keys") or text is not None) and (
-            exe in host.SHELLS or exe in LAUNCHERS or (exe == "explorer.exe" and title == "Run") or
+            host.in_terminal(exe, focus) or exe in LAUNCHERS or (exe == "explorer.exe" and title == "Run") or
             (exe == "explorer.exe" and text is not None and str((focus or {}).get("name") or "").lower()
              .startswith("address") and not FOLDER.match(str(text)))):
         return "stop", f"Typing there could start a program, so {LEAVE_IT}."

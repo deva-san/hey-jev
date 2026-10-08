@@ -2774,8 +2774,11 @@ def _attr(value):
 
 def _known(steps):
     """The well-formed steps, mended (see _mend), without names there are no steps for. A screen or procedure step
-    without "read", "exact" or "learned", which only she sets (think, _quick, run_plan)."""
+    without "read", "exact" or "learned", which only she sets (think, _quick, run_plan). Never a shortcut, which
+    only shortcut_plan makes: one presses the Windows key, and a model copying one from her history could plan
+    Win+S, typing a command and Enter."""
     steps = [_mend(s) for s in steps if isinstance(s, dict) and isinstance(s.get("do"), str) and s["do"]]
+    steps = [s for s in steps if s["do"] != "shortcut"]
     unknown = [s["do"] for s in steps if s["do"] not in KNOWN_STEPS]
     if unknown:
         print(f"  no such steps, left out: {', '.join(unknown)}")
@@ -3442,7 +3445,8 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
                     "Chrome/141.0 Safari/537.36", "Accept-Language": "en-US,en;q=0.9"}
 # keys and typing never go to these, so nothing she hears, a video included, can run commands on the PC
 SHELLS = {"cmd.exe", "powershell.exe", "pwsh.exe", "windowsterminal.exe", "wt.exe", "openconsole.exe", "conhost.exe",
-          "wsl.exe", "bash.exe", "mintty.exe"}
+          "wsl.exe", "bash.exe", "mintty.exe", "alacritty.exe", "wezterm-gui.exe", "tabby.exe", "putty.exe",
+          "powershell_ise.exe"}
 KEY_NAMES = {"control": "ctrl", "escape": "esc", "return": "enter", "pgup": "page_up", "pageup": "page_up",
              "pgdn": "page_down", "pagedown": "page_down", "del": "delete", "arrowleft": "left", "arrowright": "right",
              "arrowup": "up", "arrowdown": "down", "spacebar": "space",
@@ -3749,11 +3753,53 @@ CHATS = {"whatsapp.exe", "whatsapp.root.exe", "telegram.exe", "signal.exe", "sla
          "mattermost.exe"}
 
 
+# Code editors with a terminal of their own: typing and Enter in it run a command as in a command window, so their
+# terminal counts as one. It's the box with the focus named "Terminal 1, powershell" (VS Code's and its forks'), not
+# a file called terminal.py
+IDES = {"code.exe", "code - insiders.exe", "cursor.exe", "kiro.exe", "windsurf.exe", "vscodium.exe", "trae.exe"}
+TERMINAL_BOX = re.compile(r"\s*terminal\b(?!\.)", re.I)
+
+
+def in_terminal(exe, focus=False):
+    """True if the window in front, of program exe, is a command window, or a code editor with its terminal focused
+    or with nothing it can tell has the focus. focus: the control with the focus (winplatform.ui_focused), if known."""
+    if exe in SHELLS:
+        return True
+    if exe not in IDES:
+        return False
+    focus = win.ui_focused() if focus is False else focus
+    return focus is None or bool(TERMINAL_BOX.match(str(focus.get("name") or "")))
+
+
+def hosted_chat(hwnd):
+    """True if window hwnd is a web view (msedgewebview2.exe) that a chat app (CHATS) started, or one it can't tell
+    the app of. WhatsApp's 2025 app puts its web view in front once its message box has the keyboard, and "type see
+    you soon and press enter" pressed Enter there, sending it to whichever chat was open, as msedgewebview2.exe isn't
+    a chat app's own program."""
+    import psutil
+    try:
+        proc = psutil.Process(win._pid(hwnd))
+        for _ in range(4):  # the view's own process, the web view's main one, then the app
+            proc = proc.parent()
+            if proc is None:
+                return False
+            if proc.name().lower() in CHATS:
+                return True
+    except (psutil.Error, OSError):
+        return True
+    return False
+
+
 def not_into_shell(keys=()):
+    """Raises if typing (no keys) or keys would go where they run a command or send a message with nobody asked."""
     front = os.path.basename(win.foreground_exe()).lower()
-    if front in SHELLS:
+    if in_terminal(front):
         raise RuntimeError("I don't type into command windows")
-    if keys and keys[-1] == "enter" and front in CHATS:
+    # Start's search, where typing and Enter start any program: a plan once pressed Win+S, typed and pressed Enter
+    if front in agent.LAUNCHERS and (not keys or keys[-1] == "enter"):
+        raise RuntimeError("I don't type into Start's search, as that could start any program")
+    if keys and keys[-1] == "enter" and (front in CHATS or (front == "msedgewebview2.exe" and
+                                                            hosted_chat(win.front_window()))):
         raise RuntimeError("I only send a message after reading it back to you, so say message and who it's to")
 
 
