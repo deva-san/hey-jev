@@ -249,7 +249,16 @@ She refuses rather than guesses: an app that isn't on this PC, someone not in th
 
 **Files and photos on WhatsApp.** "Send this to Amma" sends the file or photo you just sent her from your phone, or the files selected in File Explorer in front of you. They wait in WhatsApp's preview, she reads their names back, and they go only after your yes. She never picks a file herself.
 
-Not supported on purpose: groups, replying to the last message, voice notes, email, and anything scheduled or automatic. Messaging always needs you there to say yes. She never reads your messages and never screenshots a chat.
+**When they reply.** Everyone she sends a message or a file to for you is watched for a reply, day and night, with no time limit:
+
+1. Their reply shows up in Windows' notifications, as it would for you. She knows it's theirs by the chat's own name in WhatsApp, or their number, never a shorter name another chat might share. On Telegram and the apps she types her way into she can't read the chat's name, so there it's by the name you call them, and only if that's what the app shows.
+2. On your phone's Telegram, straight away and at any hour: *"Buntyyy 🐼 replied on WhatsApp: 'ok see you at 5'. What should I reply?"* A few messages in a row come as one.
+3. On the PC, the same out loud, when Heads-ups is on. From 11 at night to 7 in the morning she keeps quiet on the PC, and says at 7 any your phone didn't get. While she's waiting for your answer to another question, like "Send it?", she holds it back until that's answered, so your yes can't go to the wrong question.
+4. "Tell him I'm on my way", "reply ok", "ask her what time": the reply is drafted to the person whose reply you last heard, there or on the phone, and asked about as ever. A yes sends it, and she keeps following that conversation. "Reply to Amma ..." is Amma's, never the last who replied.
+
+After a message goes, she puts back the window you were in. WhatsApp shows no notification for a reply in the chat you're looking at, so with it left in front she'd never hear of one. What they wrote is said and sent to your phone, but her history keeps only that they replied, so it reaches the answer model only when you ask her to read it. Who she's following is kept in `%APPDATA%\Hey Jev\follow_ups.json`, on this PC only.
+
+Not supported on purpose: groups, replying to the last message, voice notes, email, and anything scheduled or automatic. Messaging always needs you there to say yes. She never opens your chats to read them and never screenshots one: a reply's words come from its notification, as you'd see it pop up.
 
 ### Installing and updating apps, with a yes first
 
