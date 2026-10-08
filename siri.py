@@ -4272,7 +4272,7 @@ class Line:
         if str(self.v).startswith(("onecore:", "sapi:")) or os.path.exists(self.path):
             return
         if str(self.v).startswith("pocket:"):
-            self.audio = pocket.stream(text, self.v.split(":", 1)[1], stop=HER.stop.is_set)
+            self.audio = pocket.stream(text, self.v.split(":", 1)[1], stop=HER.stopper())
         else:
             self.audio = queue.Queue()
             threading.Thread(target=self._fish, daemon=True).start()
@@ -4633,6 +4633,7 @@ class Her:
     def __init__(self):
         self.stop = threading.Event()  # she stops: every player looks between SLICE pieces
         self.turn, self.until, self.level, self.asking = 0, 0.0, 1.0, False
+        self.cut_upto = -1  # the last turn she was stopped in, see stopper
 
     def begin(self):
         """A turn of hers starts: she may talk again, at full volume."""
@@ -4651,10 +4652,18 @@ class Her:
     def unduck(self):
         self.until = 0.0
 
+    def stopper(self):
+        """stop() for a line being made now: True once she's stopped, and still after this turn, when stop is cleared
+        for the next. With her voice on this PC, a stopped answer's queued sentences were made anyway, one after
+        another under its one lock, once end() cleared stop: the next answer started 3 to 10 s late."""
+        turn = self.turn
+        return lambda: self.stop.is_set() or turn <= self.cut_upto
+
     def cut(self, why, turn=None):
         """Stops her, if this is still the turn it was meant for. True if she was stopped."""
         if (turn is not None and turn != self.turn) or self.stop.is_set():
             return False
+        self.cut_upto = self.turn
         self.stop.set()
         agent.STOP.set()  # a task she's doing in an app stops too, and doesn't act again (agent.stopped)
         voice_bits.mark_speech_interrupted()  # the model is told, next turn (think)
