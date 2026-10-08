@@ -1,4 +1,4 @@
-"""Vision mode's eyes: a screenshot of the screen in front, made small enough to send to the answer model, and the
+"""Vision mode's eyes: a screenshot of the window in front, made small enough to send to the answer model, and the
 way back from a point in it to a point on the screen. Only taken when you ask her to look, see siri.see()."""
 import base64
 import struct
@@ -57,5 +57,15 @@ class Shot:
 
 
 def capture():
-    """The screen in front now, as a Shot. Her popup is left out of it."""
-    return Shot(*win.screenshot())
+    """The window in front now, with what's open from it (winplatform.front_area), cut from the screen it's on, as a
+    Shot. Not the whole screen: WhatsApp or your bank beside Settings went to the model with it, when only the window
+    in front had been judged. Her popup is left out of it. Raises if there's no window in front to cut it to."""
+    rgb, rect = win.screenshot()
+    area = win.front_area()
+    if area is None:
+        raise RuntimeError("there's no window in front to look at")
+    left, top = max(rect[0], area[0]), max(rect[1], area[1])
+    right, bottom = min(rect[2], area[2]), min(rect[3], area[3])
+    if right - left < 8 or bottom - top < 8:  # off this screen
+        raise RuntimeError("there's no window in front to look at")
+    return Shot(rgb[top - rect[1]:bottom - rect[1], left - rect[0]:right - rect[0]], (left, top, right, bottom))

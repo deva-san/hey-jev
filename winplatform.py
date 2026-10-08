@@ -115,7 +115,7 @@ HWND_BROADCAST = HWND(0xFFFF)
 WM_CLOSE, WM_SYSCOMMAND, WM_SETTINGCHANGE = 0x10, 0x112, 0x1A
 SC_MONITORPOWER = 0xF170
 SMTO_ABORTIFHUNG = 0x2
-DWMWA_CLOAKED = 14
+DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS = 14, 9
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 MONITOR_DEFAULTTOPRIMARY = 1
 
@@ -1268,6 +1268,31 @@ def owner_of(hwnd):
     """The app window a window is part of: itself, or for a dialog, a menu or a list that dropped down from it, the
     window that owns it. None for none."""
     return user32.GetAncestor(hwnd, GA_ROOTOWNER) if hwnd else None
+
+
+def front_area():
+    """Where the window in front is, (left, top, right, bottom) in real pixels, with what's open from it, which can
+    reach outside it: its dialogs, and the menus and lists that dropped down from it (owner_of), and a menu (#32768).
+    None if there's no window in front. vision.capture cuts the task's picture to it."""
+    front = user32.GetForegroundWindow()
+    if not front:
+        return None
+    root, boxes = owner_of(front), []
+
+    def visit(hwnd, _):
+        if hwnd == front or (user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd) and
+                             (owner_of(hwnd) == root or _class_name(hwnd) == "#32768")):
+            rect = RECT()  # without the invisible border Windows 10 and 11 put round a window to resize it by
+            if dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, ctypes.byref(rect),
+                                            ctypes.sizeof(rect)) == 0 or user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                if rect.right > rect.left and rect.bottom > rect.top:
+                    boxes.append((rect.left, rect.top, rect.right, rect.bottom))
+        return True
+    with _real_pixels():
+        user32.EnumWindows(WNDENUMPROC(visit), 0)
+    if not boxes:
+        return None
+    return min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)
 
 
 def window_exists(hwnd):
