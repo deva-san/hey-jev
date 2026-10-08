@@ -467,6 +467,23 @@ class CommandPolicy(unittest.TestCase):
         self.assertEqual(self.level("Get-Process | Format-Table"), "confirm")
         self.assertEqual(self.level("node -e console.log(1)"), "confirm")
 
+    def test_a_folder_deleted_by_node_or_python_code_is_blocked(self):
+        """node -e "require('fs').rmSync('C:/x',{recursive:true,force:true})" only waited for approval: the deletion
+        rule looks for a delete command, and this one is inside the code node runs."""
+        for command in ("node -e \"require('fs').rmSync('C:/x',{recursive:true,force:true})\"",
+                        "node -e \"require('fs').rmdirSync('C:/x', { recursive: true })\"",
+                        "node -e \"require('fs/promises').rm('x', {recursive: true})\"",
+                        "node -e \"require('fs-extra').removeSync('C:/x')\"", "npx rimraf C:/x",
+                        "python -c \"import shutil; shutil.rmtree('C:/x')\"",
+                        "py -c \"__import__('shutil').rmtree(r'C:\\x', ignore_errors=True)\"",
+                        "python -c \"import os; os.removedirs('C:/x/y')\""):
+            self.assertEqual(tasks.command_policy(command, self.folder), ("block", "recursive deletion is blocked"),
+                             command)
+        for command in ("node -e \"require('fs').unlinkSync('x.txt')\"", "python -c \"import os; os.remove('x.txt')\"",
+                        "python -c \"print(42)\"", "node -e \"console.log(require('os').cpus().length)\"",
+                        "git log --grep=rmtree"):
+            self.assertNotEqual(self.level(command), "block", command)  # one file asks; looking is fine
+
     def test_the_real_blocks_stay(self):
         for command in ("format C: /q", "Format-Volume -DriveLetter D", "powershell -enc abc", "pwsh -e abc",
                         r"& 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -enc abc", "ssh me@host",
