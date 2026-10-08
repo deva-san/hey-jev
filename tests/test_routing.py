@@ -7,6 +7,7 @@ from unittest import mock
 from tests.support import siri, winplatform
 
 import fast_intent
+import speech
 
 
 class Routing(unittest.TestCase):
@@ -98,6 +99,46 @@ class Play(Routing):
         self.assertEqual(self.steps("play Arijit Singh songs"),
                          [{"do": "youtube", "query": "arijit singh songs", "play": True}])
         self.assertEqual(self.steps("play It's My Life"), [{"do": "youtube", "query": "it's my life", "play": True}])
+
+
+class MisheardQueries(Routing):
+    """R2: "play avengers doomshare tyler" played the misheard words, and "search career eye dee on you tube" googled
+    "career eye dee on you tube", on the PC before the model, which is told to put misheard words right, saw them."""
+
+    def test_words_heard_unsure_go_to_the_model(self):
+        for gate in (False, "cold"):
+            with self.subTest(gate=gate):
+                asked, ran, _ = self.handle(speech.heard("play avengers doomshare tyler", 0.8), gate)
+                self.assertTrue(asked)
+                self.assertIsNone(ran)
+
+    def test_letters_spelled_out_go_to_the_model(self):
+        for words in ("search career eye dee on you tube", "search for career eye dee", "play pee dee eff tutorial"):
+            with self.subTest(words=words):
+                self.assertIsNone(self.quick(words))
+
+    def test_sure_words_and_known_names_stay_on_the_pc(self):
+        for words, sure, step in (
+                ("play arijit singh songs", 0.95, {"do": "youtube", "query": "arijit singh songs", "play": True}),
+                ("play see you again", 0.95, {"do": "youtube", "query": "see you again", "play": True}),
+                ("play bee gees", 0.95, {"do": "youtube", "query": "bee gees", "play": True}),
+                ("open notepad", 0.8, {"do": "open", "app": "Notepad"}),  # a name she knows, not words to look for
+                ("play the second video", 0.8, {"do": "youtube", "query": "lofi", "play": True, "rank": 2})):
+            with self.subTest(words=words), mock.patch.object(siri, "LAST_QUERY", ["lofi"]):  # its last search
+                asked, ran, _ = self.handle(speech.heard(words, sure), False)
+                self.assertFalse(asked)
+                self.assertEqual(ran["steps"], [step])
+        routine = {"dir": "workout", "plan": {"steps": [{"do": "youtube", "query": "workout mix", "play": True}],
+                                              "say": ""}}
+        with mock.patch.object(siri, "routines", lambda: [("play my workout mix", routine)]):  # said as it was taught
+            self.assertFalse(self.handle(speech.heard("play my workout mix", 0.8), False)[0])
+
+    def test_on_you_tube_is_youtube(self):
+        self.assertEqual(self.steps("search lofi beats on you tube"),
+                         [{"do": "youtube", "query": "lofi beats", "play": False}])
+        self.assertEqual(self.steps("play lofi beats on you tube"),
+                         [{"do": "youtube", "query": "lofi beats", "play": True}])
+        self.assertEqual(self.steps("search career id"), [{"do": "google", "query": "career id"}])  # no "play"
 
 
 class RoomTalk(Routing):
@@ -210,7 +251,7 @@ class HeardAs(Routing):
         self.assertEqual(siri.fix_names("Jeff, switch to this code"), "Jeff, switch to VS Code")
         self.assertEqual(siri.fix_names("open my files and close keto"), "open File Explorer and close Kiro")
         self.assertEqual(self.steps(siri.fix_names("Prone.")), [{"do": "open", "app": "Google Chrome"}])
-        self.assertEqual(self.steps("google search"), [{"do": "google", "query": "search", "play": False}])
+        self.assertEqual(self.steps("google search"), [{"do": "google", "query": "search"}])
 
     def test_words_are_left_alone(self):
         for words in ("Message Mum on WhatsApp: starting keto from Monday", "Type I'm prone to typos",

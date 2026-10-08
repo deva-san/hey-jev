@@ -742,7 +742,8 @@ def _search(where):
             print("  a question: the model answers it out loud")
             return None
         dest = "youtube" if where == "google" and focused_on("youtube") else where
-        return make_plan([{"do": dest, "query": q, "play": False}],
+        # play only on a YouTube step: a Google search carried a stray "play": false
+        return make_plan([{"do": dest, "query": q, **({"play": False} if dest == "youtube" else {})}],
                          say_line("youtube_results" if dest == "youtube" else "google"))
     return make
 
@@ -1423,10 +1424,12 @@ QUICK = [(re.compile(p), make) for p, make in (
     (r"previous(?: (?:song|track|video|one))?|(?:play )?(?:the )?(?:previous|last) (?:song|track|video|one)"
      r"|go back a (?:song|track|video)", _step(do="media", action="previous")),
     # YouTube's own page, using the last search: no screenshot or model needed
-    (r"(?:play|open|click)(?: the)? (?P<n>first|second|third|fourth|fifth|[1-5]) (?:video|one)(?: on youtube)?", _nth),
-    (r"play (?P<q>.+?)(?: on youtube)?", _play),
-    (r"(?:search|look up|find)(?: for| about)? (?P<q>.+?) on youtube", _search("youtube")),
-    (r"(?:search )?youtube for (?P<q>.+)", _search("youtube")),
+    # "on you tube", as speech-to-text writes it at times: it googled "career eye dee on you tube"
+    (r"(?:play|open|click)(?: the)? (?P<n>first|second|third|fourth|fifth|[1-5]) (?:video|one)(?: on you ?tube)?",
+     _nth),
+    (r"play (?P<q>.+?)(?: on you ?tube)?", _play),
+    (r"(?:search|look up|find)(?: for| about)? (?P<q>.+?) on you ?tube", _search("youtube")),
+    (r"(?:search )?you ?tube for (?P<q>.+)", _search("youtube")),
     (r"(?:google|search(?: google)?(?: for| about)?|look up) (?P<q>.+?)(?: on google)?", _search("google")),
     # volume
     (r"(?:turn(?:ed)?|bring|crank)(?: the)?(?: volume| sound| music| it)? up(?: a bit| a little| more)?|(?:volume|sound) up"
@@ -1748,10 +1751,38 @@ def as_said(lowered, words):
     return m.group(0).strip() if m else lowered
 
 
-def quick(words, gate=False):
+# A search or video for the words heard goes to the model, which puts misheard words right, when speech-to-text was
+# less sure of them than QUERY_SURE, or they spell letters out: "play avengers doomshare tyler" played the misheard
+# words, and "search career eye dee on you tube" googled the letters. Clear speech comes out above 0.9 (speech.Heard).
+# Apps and sites are matched against names she knows, so those stay on the PC
+QUERY_SURE = 0.9
+# letters spelled out: two letters' names in a row, one of them no everyday word ("eye dee" is ID, "see you" is words)
+LETTER_NAMES = set("ay bee cee see dee ee eff ef gee aitch eye jay kay el em en oh pee cue ar ess es tee you vee ex "
+                   "why zed zee".split())
+ONLY_LETTERS = set("bee cee dee eff ef gee aitch el em en pee ar ess tee vee zed zee".split())
+
+
+def misheard_query(plan, words, sure=1.0):
+    """True if the plan searches or plays words that may well be misheard (see QUERY_SURE)."""
+    said = plain(words)
+    for s in plan.get("steps") or []:
+        q = str(s.get("query") or "").lower()
+        if s.get("do") not in ("youtube", "google") or s.get("rank") or not q or q not in said:
+            continue  # "play the second video" plays the last search
+        pairs = zip(q.split(), q.split()[1:])
+        if sure < QUERY_SURE or any({a, b} <= LETTER_NAMES and {a, b} & ONLY_LETTERS for a, b in pairs):
+            return not any(said == phrase for phrase, _ in routines())  # a routine's own words were heard right
+    return False
+
+
+def quick(words, gate=False, sure=1.0):
     """A plan for a simple command without asking the model, so it happens straight away. None if it isn't one.
-    gate as in handle: "cold" for words said without her name, which may not be for her."""
+    gate as in handle: "cold" for words said without her name, which may not be for her. sure: how sure
+    speech-to-text was of the words (speech.Heard)."""
     plan = _quick(words, gate)
+    if plan and misheard_query(plan, words, sure):
+        print("  what to look for may be misheard: the model")
+        return None
     for step in (plan or {}).get("steps") or []:
         if step.get("do") == "type" and step.get("text"):
             step["text"] = as_said(step["text"], words)
@@ -4986,7 +5017,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
             emit(notify, "Heard", heard_as(words))  # above the popup, before she acts: you can see she has the words
         # a screenshot for the phone: straight away when called by name, or asked on the phone; heard without her
         # name, the model decides it was for her first, as for anything that leaves the PC
-        plan = (None if gate else phone_screenshot(words)) or quick(words, gate)
+        plan = (None if gate else phone_screenshot(words)) or quick(words, gate, sure)
         if plan and phone_picture() and any(s.get("do") == "screen" for s in plan["steps"]) and \
                 POINTS_AT_PICTURE.search(plain(words)) and not NAMES_THE_PC.search(plain(words)):
             plan = None  # "what's this?" about the picture you just sent from your phone: the model sees it (think)
