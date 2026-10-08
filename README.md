@@ -84,7 +84,7 @@ The mic hands over 32 ms at a time, and each piece is worked on as it comes:
 3. Parakeet writes the words, in about 0.2 s, and she acts on them. Her name at the start of a longer phrase brings the popup up while you're still talking.
 4. Every 45 seconds a moment of quiet goes through Parakeet and Smart Turn, so Windows keeps them in memory. With little memory free, it had moved them out, and the first phrases of a test then took 3 to 9 seconds.
 
-From the end of a command to its words took about 0.65 s in `test_listen.py` on a quiet machine, against 0.88 s before, when half a second of quiet was the only sign you'd finished. With the PC busy it's more like 1 to 2 s. A pause to think, as in "open Gmail in my Work profile and... set the volume to thirty", stays one request. Smart Turn only runs at pauses, and took 64 to 367 ms a call on this PC under load. `test_listen.py` passes 12 of 12 with both Nemotron and Parakeet.
+From the end of a command to its words took about 0.65 s in `checks/listen.py` on a quiet machine, against 0.88 s before, when half a second of quiet was the only sign you'd finished. With the PC busy it's more like 1 to 2 s. A pause to think, as in "open Gmail in my Work profile and... set the volume to thirty", stays one request. Smart Turn only runs at pauses, and took 64 to 367 ms a call on this PC under load. `checks/listen.py` passes 12 of 12 with both Nemotron and Parakeet.
 
 Settings > Speech to text also has Nemotron ASR Streaming, which writes the words while you talk, about half a second at a time, and shows them in the popup. On 36 test lines in Windows' two voices it got fewer words wrong than Parakeet, 3.5% against 4.8%, but in Hari's own voice it kept losing her name: "Hey Jev" and "Hello Jev" came out as "Hello", 3 of 7 calls one evening. With Nemotron, a "Hello", "Hey" or "Hi" with nothing else now gets the chime, and for 8 seconds what you say next counts without her name, the way it does after she answers. Parakeet's bare greetings were nearly all room talk, so it only does that with Nemotron. The last 10 of those greetings are kept as clips in `%LOCALAPPDATA%\Hey Jev\Logs\missed`, to try fixes on a real voice (`MISSED_KEEP` in `siri.py`). Delete the folder any time. It's there to try, not the default.
 
@@ -125,7 +125,7 @@ For the first days she only learns: every turn is scored and logged and nobody i
 - Under a second of speech can't be told apart: on this PC, Windows' voices saying "Hey Jev" matched Hari's own. So a short turn counts with her name or just after she spoke, and a short one said cold, like "pause" across the room, is let go: say "Jev, pause".
 - Right Alt and dictation aren't checked: the key press is you.
 - A recording of your own voice on a phone or TV will usually pass. Family members of the same sex and accent are the likeliest to slip through.
-- "Answer everyone" turns it off, "only answer me" back on. `python test_voice_id.py` scores your recordings against Windows' voices with the real model.
+- "Answer everyone" turns it off, "only answer me" back on. `python checks\voice_id.py` scores your recordings against Windows' voices with the real model.
 
 ### The decider
 
@@ -141,7 +141,7 @@ Settings > Without her name > Answer without her name: no "Hey Jev" needed at an
 2. Simple commands run straight away: "open Chrome", "volume down", "YouTube", "new tab".
 3. The rest goes to the answer model, told it was overheard (`COLD_NOTE`), with up to three things said in the half minute before it that weren't for her, so it can tell a conversation. It answers `{"to": "others"}` for people talking to each other, a phone call, a video or garbled words, and she says nothing. If it says so out loud instead ("That sounded like someone else in the room"), she still says nothing. A question about what "you" did or ate ("why are you late?") is always to a person.
 
-In `test_open_mic.py`, all 20 phrases were taken right in each of three runs: 10 for her, like "open prone" (Chrome) and "who directed Iron Man", and 10 to someone else, like "I told him to open the door" and "did you watch the match yesterday". Only 3 of the 20 reach the model, though: the rest are settled on the PC, so it mostly tests those checks, not the model's judgement. Before the fixes it was 19, 19 and 18, and what it got wrong changed from run to run.
+In `checks/open_mic.py`, all 20 phrases were taken right in each of three runs: 10 for her, like "open prone" (Chrome) and "who directed Iron Man", and 10 to someone else, like "I told him to open the door" and "did you watch the match yesterday". Only 3 of the 20 reach the model, though: the rest are settled on the PC, so it mostly tests those checks, not the model's judgement. Before the fixes it was 19, 19 and 18, and what it got wrong changed from run to run.
 
 What could be a request goes to the answer model as text, with what was said just before it. Your voice never leaves the PC.
 
@@ -407,13 +407,13 @@ Useful for seeing what she heard, planned and did:
     .venv\Scripts\python.exe siri.py --wake                              # Hey Jev mode, always listening
     .venv\Scripts\python.exe siri.py --text "open notepad and write hello"   # one turn, no mic
     .venv\Scripts\python.exe siri.py --ui                                # same as the shortcut
-    .venv\Scripts\python.exe test_listen.py                              # checks the listening, no mic or keys needed
-    .venv\Scripts\python.exe test_listen.py parakeet                     # the same with another speech-to-text
-    .venv\Scripts\python.exe test_open_mic.py                            # without her name: hers, or someone else's?
+    .venv\Scripts\python.exe checks\listen.py                            # checks the listening, no mic or keys needed
+    .venv\Scripts\python.exe checks\listen.py parakeet                   # the same with another speech-to-text
+    .venv\Scripts\python.exe checks\open_mic.py                          # without her name: hers, or someone else's?
 
-`test_listen.py` has Windows' own voice say "Hey Jev, open Notepad", a follow-up, a bare "Hey Jev", "Hello Jev", a pause after her name, a pause to think mid-sentence and a few things that aren't for her. It runs them through the real voice detector, speech-to-text and Smart Turn, 32 ms at a time, and checks where each turn ended, what it was taken as and what the quick path would do.
+`checks/listen.py` has Windows' own voice say "Hey Jev, open Notepad", a follow-up, a bare "Hey Jev", "Hello Jev", a pause after her name, a pause to think mid-sentence and a few things that aren't for her. It runs them through the real voice detector, speech-to-text and Smart Turn, 32 ms at a time, and checks where each turn ended, what it was taken as and what the quick path would do.
 
-Tests: the unit tests live in `tests\`. Run them with `.venv\Scripts\python.exe -m unittest discover -s tests -t .`. `tests\support.py` points her app data at a temp folder and blocks anything that would act on the PC or go online.
+Tests: the unit tests live in `tests\`. Run them with `.venv\Scripts\python.exe -m unittest discover -s tests -t .`, never a bare `python -m unittest` from the repo root. `tests\support.py` points her app data at a temp folder and blocks anything that would act on the PC or go online, and a test run that reaches her real `%APPDATA%\Hey Jev` or `%LOCALAPPDATA%\Hey Jev` stops with an error instead of writing there. The hand checks in `checks\` use the real models and are run by hand, not by unittest.
 
 Keys can also go in a `.env` file in this folder (`OPENCODE_ZEN_API_KEY`, `FISH_AUDIO_API_KEY`). A key in `.env` takes priority over the one saved in Credential Manager. `.env` can also set `OPENCODE_MODEL`, free models only.
 
@@ -464,7 +464,7 @@ $0. The answer model is a free Kilo or OpenCode Zen model, the voice is Fish's f
 ## Files
 
 - `siri.py` all the logic: her name, the quick commands, the planner, the steps, Fish, the turn loop and the welcome
-- `speech.py` the ears: model downloads, Silero VAD, Smart Turn, where turns end, Parakeet (or Nemotron streaming, or Whisper), and the follow-up window. `test_listen.py` checks them, `test_open_mic.py` what she takes as hers without her name
+- `speech.py` the ears: model downloads, Silero VAD, Smart Turn, where turns end, Parakeet (or Nemotron streaming, or Whisper), and the follow-up window. `checks/listen.py` checks them, `checks/open_mic.py` what she takes as hers without her name
 - `winplatform.py` the Windows side: apps, windows, volume, media, scrolling, dark mode, clipboard, the right Alt hook, the lock screen and starting with Windows
 - `opencode.py` OpenCode Zen and Kilo Gateway, free models only
 - `tasks.py` the SQLite task queue, local schedule parser, command policy, hidden PowerShell runner, timeout, output cap and redaction

@@ -437,7 +437,7 @@ class FoundInWhatsApp(Turn):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.addCleanup(lambda: (siri.FOUND.update(people=[], until=0.0), siri.ASKED.update(alias="", until=0.0),
-                                 m._write_json(m.CONTACTS_PATH, {})))
+                                 m._write_json(m.CONTACTS_PATH, {}, emptying=True)))
 
     def test_yes_to_them_then_yes_to_the_message_sends_it(self):
         siri.handle("message buntyy on whatsapp: hi")
@@ -468,7 +468,7 @@ class FoundInWhatsApp(Turn):
     def test_yes_send_it_and_yes_thats_them_by_name(self):
         """Review: "Yes, send it" and "Yes, that's Bunty" weren't a yes, and the question went to the model."""
         for words in ("Yes, send it.", "Yes, that's buntyy."):
-            siri.messaging._write_json(siri.messaging.CONTACTS_PATH, {})
+            siri.messaging._write_json(siri.messaging.CONTACTS_PATH, {}, emptying=True)
             siri.handle("message buntyy on whatsapp: hi")
             siri.handle(words, gate=True)
             self.assertEqual(self.said[-1], "“hi” to buntyy on WhatsApp. Send it? The chat open is Buntyyy.",

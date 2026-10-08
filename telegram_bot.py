@@ -32,6 +32,7 @@ import settings
 from hermes_memory.gateway_bits import (ALPHABET, CODE_LENGTH, CODE_TTL_SECONDS, LOCKOUT_SECONDS, MAX_FAILED_ATTEMPTS,
                                         _hash_code, truncate_message, utf16_len)
 from secrets_store import get_secret
+from winplatform import own_data
 
 TOKEN = "TELEGRAM_BOT_TOKEN"
 OLDEST = 120  # seconds: a message older than this is dropped
@@ -65,7 +66,7 @@ def prune_files(max_age=KEEP_FOR):
 
 def files_dir():
     """Where what you send her from your phone is kept, to send on: Phone files, beside her log."""
-    return os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "Hey Jev", "Phone files")
+    return own_data(os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "Hey Jev", "Phone files"))
 
 
 def _sending():

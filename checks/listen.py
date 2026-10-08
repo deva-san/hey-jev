@@ -2,8 +2,8 @@
 end-of-speech detector, speech-to-text and Smart Turn decide where each turn ends and what it's for, and the quick
 path what to do about it.
 
-    .venv\\Scripts\\python test_listen.py            # with the speech-to-text picked in Settings
-    .venv\\Scripts\\python test_listen.py parakeet   # or name one: nemotron, parakeet or whisper
+    .venv\\Scripts\\python checks\\listen.py            # with the speech-to-text picked in Settings
+    .venv\\Scripts\\python checks\\listen.py parakeet   # or name one: nemotron, parakeet or whisper
 
 Prints what was heard and how long it took, and exits with 1 if anything is routed wrong.
 """
@@ -17,9 +17,14 @@ import time
 import numpy as np
 import soundfile as sf
 
-import settings
-import siri
-import speech
+# In checks\ since 8 Oct: from the repo root, `python -m unittest` imported these hand checks, and siri through them,
+# before tests/support.py had moved %APPDATA%, and the test run wrote into her real data. Under a test runner without
+# support.py, winplatform.own_data now refuses her real folders on the first import below.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+import settings  # noqa: E402
+import siri  # noqa: E402
+import speech  # noqa: E402
 
 # "[400]" in a line is a pause of 400 ms in the middle of it, said as one sentence, the way people pause to think
 SAY = r"""param($folder)
@@ -78,7 +83,7 @@ def voice(lines):
 
 def taken_as(text, kind):
     """What the app would make of a phrase: None, "wake", or (gate, request, first quick step / "say" / None). With
-    "Hey Jev" needed, whatever Settings say: Answer without her name sends more to the model, see test_open_mic.py."""
+    "Hey Jev" needed, whatever Settings say: Answer without her name sends more to the model, see checks/open_mic.py."""
     what = siri.route(text, kind, open_mic=False)
     if not isinstance(what, tuple):
         return what

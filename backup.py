@@ -23,6 +23,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Optional
 
+from winplatform import own_data
+
 logger = logging.getLogger(__name__)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -35,11 +37,11 @@ SIDE_FILES = (".db-wal", ".db-shm", ".db-journal")  # SQLite's own; the backup c
 
 
 def appdata():
-    return os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Hey Jev")
+    return own_data(os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Hey Jev"))
 
 
 def localdata():
-    return os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Hey Jev")
+    return own_data(os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Hey Jev"))
 
 
 def running():

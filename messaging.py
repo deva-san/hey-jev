@@ -17,11 +17,13 @@ shortcut that worked and the name that found the person are saved, so the next o
 """
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 from ctypes import wintypes as w
 from urllib.parse import quote
@@ -176,19 +178,31 @@ def save_contact(alias, app, handle):
     return f"{entry['name']} on {say_of(app)}"
 
 
-def _write_json(path, data):
+def _write_json(path, data, emptying=False):
+    """Write data whole or not at all. An empty book never replaces a contacts book with people in it unless that's
+    what was asked (emptying): on 8 Oct a test run's clean-up wrote {} over the real contacts.json at 19:03, and the
+    three people she'd learned that day were lost for good, the backup was from the night before."""
+    if path == CONTACTS_PATH and not data and not emptying and read_contacts():
+        raise ValueError("refusing to empty the contacts book without being asked to forget everyone")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:  # a temp file of its own, so two saves at once (the phone and the PC) can't write into each other's
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())  # on disk before it replaces the old one, so a power cut leaves one or the other
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
 
 
 def forget_contact(alias):
     book = read_contacts()
     if book.pop(alias_key(alias), None) is None:
         return False
-    _write_json(CONTACTS_PATH, book)
+    _write_json(CONTACTS_PATH, book, emptying=True)  # forgetting the last one you named leaves the book empty
     return True
 
 

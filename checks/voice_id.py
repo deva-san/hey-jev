@@ -1,4 +1,4 @@
-"""Checks only-your-voice with the real model, by hand: python test_voice_id.py
+"""Checks only-your-voice with the real model, by hand: python checks\\voice_id.py
 
 Scores your voice (the sentences you read for "learn my voice", in %LOCALAPPDATA%\\Hey Jev\\voice\\clips) against
 Windows' own voices saying commands, and times each voice print. Your clips are scored against the others, one left
@@ -14,7 +14,9 @@ import numpy as np
 import soundfile as sf
 from dotenv import load_dotenv
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# In checks\ since 8 Oct, see checks/listen.py: under a test runner, winplatform.own_data refuses her real folders
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, HERE)
 load_dotenv(os.path.join(HERE, ".env"))
 import speech  # noqa: E402
 import voiceid  # noqa: E402

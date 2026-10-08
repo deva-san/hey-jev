@@ -922,11 +922,11 @@ class MicTrouble(Case):
 
 
 
-# --------------------------------------------------------------------------- T2: test_listen.py's report
+# --------------------------------------------------------------------------- T2: checks/listen.py's report
 class ListenReport(Case):
     def test_phrases_go_with_the_line_they_were_said_in(self):
         """One line split in two is that line wrong, not every line after it."""
-        import test_listen
+        from checks import listen as test_listen
         lines = [(1000, 2000), (4000, 5000), (8000, 9000)]
         phrases = [(900, 2600), (3800, 4400), (4450, 5600), (7900, 9600)]  # the second line came out as two
         self.assertEqual(test_listen.pair(phrases, lines), [[0], [1, 2], [3]])

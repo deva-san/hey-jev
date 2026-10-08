@@ -339,7 +339,7 @@ That is 54 errors, against 22 wrong actions or replies (13 + 9).
   `handle()` between `quick()` and `think()` (3712–3733), and `let_go()` (3602). `history.add()` logs its answers.
 - **Expected (estimate, checked offline before going live):** model path right 46% → ~55%; requests for her that are
   let go or answered wrongly fall; room talk answered 28% → ~15%. Look-up turns save ~3 s.
-- **Tests:** `test_routing`, `YesOrNo`, `test_safety` and `test_open_mic.py`, plus:
+- **Tests:** `test_routing`, `YesOrNo`, `test_safety` and `checks/open_mic.py`, plus:
   - no decider answer can remove a question or clear `gate`;
   - negations never flip a safety ask;
   - low confidence falls back to today's behaviour.

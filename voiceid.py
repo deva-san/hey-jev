@@ -23,6 +23,7 @@ import time
 import numpy as np
 
 import settings
+from winplatform import own_data
 
 MIN_SPEECH = 1.0  # seconds of speech a turn needs to be checked, see above
 # Levels before calibration, from the clips above: with her name said (or straight after a bare "Hey Jev") a lower
@@ -48,7 +49,7 @@ _lock = threading.Lock()
 
 
 def folder():
-    return os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Hey Jev", "voice")
+    return own_data(os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Hey Jev", "voice"))
 
 
 def mode():

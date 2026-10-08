@@ -308,7 +308,7 @@ if __name__ == "__main__":
 
 class HeardNames(unittest.TestCase):
     def test_jet_and_jeth_are_her_name_after_hey(self):
-        """README Troubleshooting's own miss, "Hey Jet, open Spotify", and Parakeet's "Hey Jeth" in test_listen."""
+        """README Troubleshooting's own miss, "Hey Jet, open Spotify", and Parakeet's "Hey Jeth" in checks/listen.py."""
         self.assertEqual(siri.find_name("Hey Jet open Spotify"), (True, "open Spotify"))
         self.assertEqual(siri.find_name("Hey Jeth, check the space of the C drive")[0], True)
 

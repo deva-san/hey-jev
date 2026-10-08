@@ -2,19 +2,22 @@
 and what she'd do. The real local filter (siri.could_be_request), quick path and answer model decide, but nothing is
 done on the PC: no steps run, nothing is said out loud, and nothing is kept in her history.
 
-    .venv\\Scripts\\python test_open_mic.py
+    .venv\\Scripts\\python checks\\open_mic.py
 
 The phrases go to the answer model in Settings, as text. Exits with 1 if more than ALLOWED are taken wrong: the
 model decides the unclear ones, so it can miss one now and then.
 """
 import contextlib
 import io
+import os
 import sys
 import time
 
-import history
-import siri
-import speech
+# In checks\ since 8 Oct, see checks/listen.py: under a test runner, winplatform.own_data refuses her real folders
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import history  # noqa: E402
+import siri  # noqa: E402
+import speech  # noqa: E402
 
 # (what's said with no name, what it should be taken as: the first step she'd take, "say" for an answer, None for
 #  someone else's conversation)

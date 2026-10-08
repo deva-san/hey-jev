@@ -10,6 +10,10 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# First, before any project import: the real folders, which winplatform.own_data then refuses for the whole run
+# (on 8 Oct a run that imported siri before this file wrote its test turns into her real history)
+REAL = os.environ.setdefault("HEYJEV_TESTING", os.pathsep.join(
+    (os.environ.get("APPDATA", ""), os.environ.get("LOCALAPPDATA", ""))))
 DATA = tempfile.mkdtemp(prefix="heyjev-tests-")
 os.environ["APPDATA"] = DATA
 os.environ["LOCALAPPDATA"] = DATA

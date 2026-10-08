@@ -335,7 +335,7 @@ class FindingThem(unittest.TestCase):
         self.addCleanup(lambda: (siri.FOUND.update(alias="", text="", files=None, people=[], until=0.0),
                                  siri.ASKED.update(alias="", app="", text="", until=0.0, files=None),
                                  siri.STAGED.update(ready=None, until=0.0),
-                                 m._write_json(m.CONTACTS_PATH, {})))
+                                 m._write_json(m.CONTACTS_PATH, {}, emptying=True)))
 
     def ask(self):
         self.plan = self.siri.stage_message("whatsapp", "buntyy", "hi")

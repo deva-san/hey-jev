@@ -24,6 +24,7 @@ import numpy as np
 
 import settings
 import speech
+from winplatform import own_data
 
 ENCODER = "minilm-l6"  # <models>\minilm-l6: model_quint8_avx2.onnx and tokenizer.json from huggingface.co/sentence-transformers/all-MiniLM-L6-v2
 DIM = 384
@@ -31,7 +32,7 @@ KINDS = ("follow_up", "other", "cold")  # how a turn reached her, as context for
 
 
 def folder():
-    return os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Hey Jev", "decider")
+    return own_data(os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Hey Jev", "decider"))
 
 
 def mode():

@@ -168,7 +168,7 @@ class AskedContact(unittest.TestCase):
 
     def setUp(self):
         self.addCleanup(lambda: (siri.ASKED.update(alias="", app="", text="", until=0.0),
-                                 messaging._write_json(messaging.CONTACTS_PATH, {})))
+                                 messaging._write_json(messaging.CONTACTS_PATH, {}, emptying=True)))
         self.staged = mock.patch.object(siri, "stage_message", return_value={"steps": [], "say": "staged"})
         self.staged.start()
         self.addCleanup(self.staged.stop)
@@ -220,7 +220,7 @@ class Contacts(unittest.TestCase):
                 "sunil sharma": {"name": "Sunil Sharma"}}
         messaging._write_json(messaging.CONTACTS_PATH, {k: {**v, "whatsapp": f"9198765{i:05}"}
                                                          for i, (k, v) in enumerate(book.items())})
-        self.addCleanup(messaging._write_json, messaging.CONTACTS_PATH, {})
+        self.addCleanup(messaging._write_json, messaging.CONTACTS_PATH, {}, emptying=True)
 
     def test_a_name_inside_another_name_is_someone_else(self):
         for said in ("Ravindra", "Gravity", "Supriya", "Priyanka", "Joanna", "Hannah"):
