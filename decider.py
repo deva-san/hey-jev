@@ -9,9 +9,10 @@ either can be swapped in later without changing callers.
 
 Settings "decider":
     "off"     not asked
-    "shadow"  asked and logged (%LOCALAPPDATA%\\Hey Jev\\decider\\shadow.jsonl), nothing changes (the default)
-    "on"      a turn it's sure isn't for her is let go without a model call. It never drops a question she'd
-              ask first, never clears the checks for words said without her name, and never acts on its own.
+    "shadow"  asked and logged (%LOCALAPPDATA%\\Hey Jev\\decider\\shadow.jsonl), nothing changes
+    "on"      a turn it's sure isn't for her is let go without a model call (the default), unless its words ask
+              for something or name an app or a site (siri.asks_something). It never drops a question she'd ask
+              first, never clears the checks for words said without her name, and never acts on its own.
 
 A head only acts above the levels train_decider.py set from held-out turns, where it was right 95% of the time.
 """

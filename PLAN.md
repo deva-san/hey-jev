@@ -19,14 +19,13 @@ pass.
 | 0 Fresh start | `backup.py`, the first-run greeting | – | – |
 | 1 Your voice | CAM++ voice ID, enrolment by voice, learning mode that switches itself on | Say **"Hey Jev, learn my voice"** and read the 10 sentences | Turns under 1 s aren't checked: on this PC, Windows' voices saying "Hey Jev" matched yours. A short command said without her name is let go once it's on |
 | 2 Faster | Streaming plain answers, the filler, Pocket voice ("Jev on this PC"), Kilo warm-up, 3 history turns | Try "Jev on this PC" in Settings > Voice. Fish stays until 30 Nov, then switches by itself | Ling's thinking stays "low": "none" was tested on 34 requests and was no faster, with more mistakes. Skill notes went into phase 4 |
-| 3 Decider | MiniLM decider, trained on your 487 labelled turns, in shadow mode | Nothing. Switch it on later with Settings `"decider": "on"` | Held-out result: it would stop 11 of 44 wrong answers to room talk and miss 3 of 63 requests, so it stays shadow-only until real-use logs say otherwise |
+| 3 Decider | MiniLM decider, trained on your 487 labelled turns, on by default since 8 October | Nothing. Settings `"decider": "shadow"` puts it back to logging only | Held-out result: it would stop 11 of 44 wrong answers to room talk and miss 3 of 63 requests, so it stayed shadow-only until real use: on 8 October its "sure it isn't for her" was right 16 times in 18, and the 2 it got wrong asked for something, which it now never lets go |
 | 4 Hermes learning | Hermes code synced at 3569fba6; curator; review rules; instant corrections; undo; better search; skills that fit written out | – | With full memory and 40 skills the prompt is about **4,900 tokens**, not ≤ 4,000. Trimming the step list is next, with a re-run of the 34-request test |
 | 5 Telegram | Bot, pairing, buttons, voice notes, owner-only, "send me a screenshot" | Paired (done) | Listens whenever a token is saved, so `/start` always gets an answer. Before this, it stayed off until Pair was pressed, and a `/start` sent first got nothing. It keeps trying when Telegram can't be reached, and says so on the PC if the token stops working |
 | 6 Coding jobs | OpenCode over ACP, confined, git snapshot; Hermes' cron rules | Ask for one in a git project folder | Questions mid-job are asked only on the phone (buttons). For a job asked by voice, a command needing your OK is refused and listed in her report rather than interrupting you. Edits in the folder go ahead once you've said yes to the job, since the snapshot makes them undoable |
 
-Still to do: WhatsApp (later, as planned), trimming the prompt, and switching the decider on once its shadow log
-looks good. Interrupting her ("stop", her name or a request said over her) is done, with Nemotron and Parakeet: see
-the README, Talking over her.
+Still to do: WhatsApp (later, as planned) and trimming the prompt. Interrupting her ("stop", her name or a request
+said over her) is done, with Nemotron and Parakeet: see the README, Talking over her.
 
 ## In short
 

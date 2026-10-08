@@ -263,7 +263,9 @@ def route(text, kind, open_mic=None, strict=False):
 # a question, or an app or site. The rest of what's said in the room ("Okay, so it is gonna rain later", "pass the
 # salt", once plain() has taken "can you" off) is let go on this PC, and the model decides on the rest (COLD_NOTE).
 # The 7 October log let these go as room talk: "Shut down the computer", "Download and install VLC", "Okay, copy
-# that link", "Clear notification". The two lines from "shut ?down" are for those
+# that link", "Clear notification". The two lines from "shut ?down" are for those. The 8 October log let 5 more go,
+# among them "Select smile", "Nightlight" and "Opennoted", an "open ..." run together (OPEN_GLUED, not "opened")
+OPEN_GLUED = r"open(?!(?:ed|er|ers|ing|ings|ly|ness|s)\b)[a-z]{3,}"
 ASKING = (r"open|close|clone|quit|exit|play|pause|stop|resume|search|google|look up|find|check|scroll|turn|start|"
           r"launch|show|type|write|tell me|remind|remember|research|read|click|go to|go back|forward|refresh|reload|"
           r"run|do that|command|terminal|powershell|task|schedule|approve|cancel|every|daily|weekly|"
@@ -271,6 +273,7 @@ ASKING = (r"open|close|clone|quit|exit|play|pause|stop|resume|search|google|look
           r"watch|song|music|video|full ?screen|dark mode|light mode|minimi[sz]e|summari[sz]e|transcrib\w*|dictat\w*|"
           r"shut ?down|restart|reboot|install|uninstall|download|update|upgrade|copy|paste|undo|redo|maximi[sz]e|"
           r"screenshot|notifications?|clear (?:it|that|this|all|everything|the|my)|online|"
+          r"select|emoji|night ?light|bluetooth|brightness|" + OPEN_GLUED + "|"
           r"what|what's|whats|who|who's|how|where|when|why|which|weather|news|battery|ram|cpu|storage|drive|internet|"
           r"wi-?fi|screen|window|page")
 _asking = [None]
@@ -4590,6 +4593,20 @@ def heard_as(words):
 COMMAND = re.compile(r"\b(?:open|close|quit|play|pause|stop|resume|search|google|scroll|turn|make|set|start|launch|"
                      r"show|type|write|volume|louder|quieter|mute|full ?screen|next|skip|previous|remind|timer|lock)\b",
                      re.I)
+# and what the decider's "sure it isn't for her" never lets go before the model (act_on): those words, or an app or a
+# site named. Of the 18 times it was sure on 8 October, the 2 it got wrong were "A turn of nightlight" and "... check
+# for Realme P3 in stock"
+DOING = r"check|find|look up|tell me|night ?light|select|click|" + OPEN_GLUED
+_doing = [None]
+
+
+def asks_something(text):
+    """True if words said without her name ask her to do something, or name an app or a site."""
+    t = plain(str(text))
+    if _doing[0] is None:
+        names = sorted({*APP_LOOKUP, *SITES}, key=len, reverse=True)
+        _doing[0] = re.compile(rf"\b(?:{DOING}|{'|'.join(map(re.escape, names))})\b", re.I)
+    return bool(COMMAND.search(t) or _doing[0].search(t))
 
 
 # What you say while she talks, or as she ends, is heard (Recorder.keeps): Windows' speech mode takes all of her
@@ -5743,7 +5760,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             waiting = (PENDING["plan"] is not None and time.time() < PENDING["until"]) or asked_last()
             # said without her name: the decider's view, but never on what may be the answer to her own question
             judged = for_me(what[1], what[2]) if what[2] and not waiting else None
-            if judged and judged[1] == "no" and decider.mode() == "on":
+            if judged and judged[1] == "no" and decider.mode() == "on" and not asks_something(what[1]):
                 print(f"  (the decider is sure that wasn't for her, {judged[0]:.2f}: staying quiet)")
                 decider.log({"when": round(time.time()), "said": str(what[1]), "kind": str(what[2]),
                              "for_me": round(judged[0], 3), "verdict": "no", "mode": "on", "result": "let go"})

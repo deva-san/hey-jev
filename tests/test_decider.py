@@ -93,6 +93,17 @@ class InHerEars(unittest.TestCase):
         self.assertEqual(handled2, [])
         self.assertEqual(logged[0]["verdict"], "yes")  # sure it's for her: the model still decides
 
+    def test_on_by_default_it_never_lets_go_words_that_ask_for_something(self):
+        """Left in shadow mode, it changed nothing while she spoke or acted on 22 of 88 room-talk turns on 8 October,
+        and its "sure it isn't for her" was right 16 times in 18. The 2 it got wrong asked for something: let go,
+        the model would never have seen them. Words that ask for something, or name an app or a site, go on."""
+        with mock.patch.dict(siri.settings._load(), clear=True):
+            self.assertEqual(decider.mode(), "on")
+        a = self.assistant()
+        for words in ("A turn of nightlight", "check for Realme P3 in stock", "and Notepad, I said", "Click chat messages"):
+            handled, logged = self.run_cold(a, words, "on")
+            self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
+
     def test_in_shadow_it_only_writes_down_what_it_would_have_done(self):
         a = self.assistant()
         with mock.patch.object(siri, "could_be_request", lambda text: True):

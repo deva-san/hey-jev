@@ -20,7 +20,9 @@ DEFAULTS = {
     "welcome": True,  # hello when you sign in or come back to the laptop, and what she can do
     "met": False,  # she's introduced herself since her memory was last started fresh, see backup.py --fresh
     "voice_id": "off",  # only your voice: off, learning (scores, turns nobody away) or on, see voiceid.py
-    "decider": "shadow",  # quick decisions: off, shadow (logged only) or on (lets plain room talk go), see decider.py
+    # quick decisions: off, shadow (logged only) or on (lets plain room talk go), see decider.py. On since its "sure it
+    # isn't for her" was right 16 times in 18 on 8 October, while she spoke or acted on 22 of 88 room-talk turns
+    "decider": "on",
     "voice": "",  # her Fish Audio voice, an ID from VOICES or a pasted fish.audio link. Empty: the first in VOICES
     "vision": True,  # she may look at the screen when you ask about it, see siri.see()
     "heads_ups": True,  # she mentions what needs you: messages, a low battery, a nearly full drive, see watch.py
