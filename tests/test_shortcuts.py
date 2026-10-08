@@ -63,7 +63,19 @@ class Saying(unittest.TestCase):
                            ("make this bold", "ctrl+b")):
             self.assertEqual(keys(said, WORD), want, said)
         self.assertEqual(keys("paste as plain text", CHROME), "ctrl+shift+v")
-        self.assertEqual(keys("paste as plain text", WORD), "ctrl+alt+v")  # Word's Ctrl+Shift+V pastes formatting
+        self.assertEqual(keys("paste as plain text", WORD), "ctrl+shift+v")  # Microsoft 365 Word's too, since 2023
+
+    def test_more_from_the_research(self):
+        for said, exe, yt, want in (("snap this window to the top", WORD, False, "win+alt+up"),
+                                    ("open the third taskbar app", WORD, False, "win+3"),
+                                    ("go to the fifth tab", CHROME, False, "ctrl+5"),
+                                    ("jump to 50 percent", CHROME, True, "5"), ("next chapter", CHROME, True, "ctrl+right"),
+                                    ("make this a heading 2", WORD, False, "ctrl+alt+2"),
+                                    ("go to definition", CODE, False, "f12"), ("show as list", EXPLORER, False, "ctrl+shift+5"),
+                                    ("details view", EXPLORER, False, "ctrl+shift+6"),
+                                    ("turn on live captions", WORD, False, "win+ctrl+l"),
+                                    ("select the next word", WORD, False, "ctrl+shift+right")):
+            self.assertEqual(keys(said, exe, yt), want, said)
 
     def test_only_the_whole_phrase(self):
         for said in ("show the desktop to my friend", "can you tell me how to undo", "what is the start menu"):
