@@ -353,12 +353,13 @@ def window_of(app):
 
 def again(fn, tries=3, pause=0.4):
     """fn(), tried again a moment later on a COM error: WhatsApp's web view answers UI Automation with "An event
-    was unable to invoke any of the subscribers" now and then while it redraws. The last error if it never works."""
+    was unable to invoke any of the subscribers" now and then while it redraws, or "NULL COM pointer access": never
+    tried again, that left a message unchecked after Enter. The last error if it never works."""
     for i in range(tries):
         try:
             return fn()
         except Exception as exc:
-            if "COMError" not in type(exc).__name__ or i == tries - 1:
+            if not ("COMError" in type(exc).__name__ or "NULL COM pointer" in str(exc)) or i == tries - 1:
                 raise
             time.sleep(pause)
 
@@ -426,9 +427,11 @@ def box_value(box):
 
 def typed_text(app, hwnd):
     """What the app's message box holds, where Windows exposes it, else None (Telegram draws its own)."""
-    try:
-        box, _ = compose_box(app, hwnd)
+    def read():
+        box, _ = _compose_box(app, hwnd)
         return box_value(box) if box else None
+    try:
+        return again(read)
     except Exception as exc:
         print(f"  couldn't read the message box: {exc!r}")
         return None
@@ -1074,12 +1077,14 @@ def prepare(app, contact, text):
     if cold and not drawn(hwnd):
         raise RuntimeError(offline_reason(app, hwnd) or f"{APPS[app]['say']} is still starting, so I've not typed "
                            f"anything. Ask me again in a moment")
-    if APPS[app]["compose"] and box_shown(app, hwnd) is None:
+    # what the box holds, as box_shown read it: read a second time it could come back unreadable, and then the text
+    # the 2025 app's link leaves out was never typed
+    shown = box_shown(app, hwnd) if APPS[app]["compose"] else typed_text(app, hwnd)
+    if APPS[app]["compose"] and shown is None:
         # no message box: not linked to the phone (the Reconnect button: a 7 s look on the 2025 app's big page, so
         # only now), or the chat didn't open, as for a number not on WhatsApp. Never Enter into whatever that is
         why = offline_reason(app, hwnd)
         raise RuntimeError(why or f"{APPS[app]['say']} didn't open the chat with {name}, so I've not typed anything")
-    shown = typed_text(app, hwnd)
     if shown is not None and shown != text:  # the link left the text out (WhatsApp's 2025 app): she types it
         type_into(app, hwnd, text)
         shown = text
@@ -1120,10 +1125,19 @@ def send(ready):
     win.press("enter")
     time.sleep(1.0)
     left = typed_text(app, hwnd)
+    for _ in range(4 if box else 0):  # a box that was there a moment ago: read again, never guessed at
+        if left is not None:
+            break
+        time.sleep(0.5)
+        left = typed_text(app, hwnd)
     if left is not None:  # the box empties when WhatsApp takes the message
         if left == text:
             raise RuntimeError("it's still sitting in the message box, so it may not have sent")
         return True, f"Sent to {ready['contact']}."
+    if box:  # never "Sent" unchecked: after "Sent, as far as I can tell" you said it hadn't come, and asked again, and
+        # "Hi" went four times (8 October)
+        return False, (f"I pressed Enter, but couldn't read {APPS[app]['say']} back to check it went. Look at the "
+                       f"chat before asking me again.")
     return True, f"Sent to {ready['contact']}, as far as I can tell. {APPS[app]['say']} doesn't let me read it back."
 
 

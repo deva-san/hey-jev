@@ -47,6 +47,7 @@ class Messaging(unittest.TestCase):
             self.box.value += text
         for target, name, value in (
                 (m, "compose_box", lambda app, hwnd: (self.box, "Amma \U0001f496") if self.box else (None, "")),
+                (m, "_compose_box", lambda app, hwnd: (self.box, "Amma \U0001f496") if self.box else (None, "")),
                 (m, "window_of", lambda app: 99),  # open already, in the tray or not
                 (m, "box_value", lambda box: " ".join(box.value.split())),
                 (m, "in_front", lambda app, hwnd: True),
@@ -103,6 +104,31 @@ class Messaging(unittest.TestCase):
             with self.assertRaises(RuntimeError) as err:
                 self.m.send(ready)
         self.assertIn("still sitting", str(err.exception))
+
+    def test_a_send_she_couldnt_read_back_is_never_called_sent(self):
+        """8 October: after Enter the message box couldn't be read ("NULL COM pointer access"), and she said "Sent, as
+        far as I can tell" for a "Hi" that hadn't come; asked again and again, it went four times."""
+        ready = self.m.prepare("whatsapp", "amma", "Hi")
+
+        def unreadable(app, hwnd):  # fine until Enter, then never again
+            if ("enter",) in self.pressed:
+                raise ValueError("NULL COM pointer access")
+            return self.box, "Amma \U0001f496"
+        with mock.patch.object(self.m, "compose_box", unreadable), mock.patch.object(self.m, "_compose_box", unreadable):
+            ok, said = self.m.send(ready)
+        self.assertFalse(ok)
+        self.assertNotIn("Sent", said)
+        self.assertIn("Look at the chat before asking me again", said)
+
+    def test_a_null_com_pointer_now_and_then_is_read_again(self):
+        flaky, self.box.value = [ValueError("NULL COM pointer access")], "Hi"
+
+        def read(app, hwnd):
+            if flaky:
+                raise flaky.pop()
+            return self.box, "Amma \U0001f496"
+        with mock.patch.object(self.m, "compose_box", read), mock.patch.object(self.m, "_compose_box", read):
+            self.assertEqual(self.m.typed_text("whatsapp", 99), "Hi")
 
     def test_from_closed_its_page_is_waited_for_before_the_chat(self):
         """"Close WhatsApp" quits the 2025 app, whose page takes up to 25 s to draw: the chat was looked for 4 s, and a

@@ -4895,6 +4895,14 @@ PHONE_SHOT = re.compile(r"(?:(?:take|grab|get)(?: me)?(?: a)? )?screen ?shot|(?:
                         r"(?:as|in) a (?:picture|photo)", re.I)  # said on the phone, where a snipping tool is no use
 
 
+def bare_answer(text, words):
+    """True if a message's text is only a yes or a no that isn't in what was said: the model's, never yours. Not
+    "No, I can't make it", which is a message."""
+    t = plain(str(text or ""))
+    return bool(YES.fullmatch(t) or re.fullmatch(r"no|nope|nah", t)) and \
+        not re.search(rf"\b{re.escape(t)}\b", plain(str(words)))
+
+
 def phone_screenshot(words):
     """A screenshot for your phone, asked for in so many words, or just "screenshot" on the phone: no model needed."""
     t = plain(words)
@@ -5060,6 +5068,9 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
                 if messaging.app_key(first.get("app") or "whatsapp") != "whatsapp" else \
                 make_plan(say="I can send it to your phone, just ask for a screenshot.") if TO_ME.fullmatch(who) else \
                 share_files(who, first.get("caption") or first.get("text") or "")
+        elif first and bare_answer(first.get("text"), words or text):
+            # a yes or no you never said as the message: "You not sent the message" had "yes" ready to send
+            plan = make_plan(say="What should the message say?")
         elif first:  # the model planned a message: open the chat with it typed in and ask, never send
             plan = stage_message(first.get("app"), first.get("contact") or first.get("to"), first.get("text"))
         wanted = next((s for s in plan.get("steps") or [] if s.get("do") == "install"), None)

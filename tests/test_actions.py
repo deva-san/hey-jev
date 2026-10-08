@@ -283,6 +283,20 @@ class Readback(Turn):
             siri.handle("tell me a story")
         self.assertEqual(self.said, [LONG[:LONG.index(" Tell Appa")]])
 
+    def test_a_yes_or_no_you_never_said_isnt_the_message(self):
+        """"You not sent the message", and the model planned the message again with "yes" for its words: "yes" was
+        typed in Mum's chat, asked about as the message to send."""
+        typed = []
+        with self.model({"steps": [{"do": "message", "app": "whatsapp", "contact": "Mum", "text": "Yes."}],
+                         "say": ""}), \
+                mock.patch.object(siri.messaging, "prepare", lambda app, contact, text: typed.append(text) or
+                                  staged(app, contact, text)):
+            siri.handle("You not sent the message")
+        self.assertEqual(typed, [])
+        self.assertEqual(self.said, ["What should the message say?"])
+        self.assertFalse(siri.bare_answer("No, I can't make it", "let ravi know i'm busy"))  # a message, that one
+        self.assertFalse(siri.bare_answer("yes", "reply yes"))
+
 
 SEND = {"steps": [{"do": "message_send"}], "say": ""}
 SCREEN = {"steps": [{"do": "screen", "task": "open the Recycle Bin on the desktop"}], "say": ""}
