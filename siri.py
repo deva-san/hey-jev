@@ -4955,13 +4955,18 @@ DOING = (r"check|find|look up|tell me|night ?light|select|click|" + OPEN_GLUED +
          r"maximi[sz]e|minimi[sz]e|summari[sz]e|transcrib\w*|dictat\w*|notifications?|"
          r"clear (?:it|that|this|all|everything|the|my)|send|message|email|e-mail|call|reply|delete|remove|research|"
          r"alarm|exit|unmute|brightness|bluetooth|wi-?fi|dark mode|light mode|what time|weather|news|battery|cpu|ram|"
-         r"storage")
+         r"storage|"
+         # and ASKING's things to act on, with the date and calendar asked about: "put on some music", "song lagao",
+         # "take a note", "what's on my screen", "is the internet down" and "what's the date today" were let go
+         r"music|song|video|note|screen|page|window|internet|emoji|watch|bookmark|what'?s (?:the )?(?:date|day)|"
+         r"what (?:date|day) is|(?:date|day) is it|my (?:calendar|meetings?)|on (?:my|the) calendar|ip address")
 ASKS_ABOUT = re.compile(r"\b(?:what|what's|whats|who|who's|how|where|when|why|which)\b")
 # and the rest of ASKING's things to do when they start what's said, with "what's the time": on by default the decider
 # could let "Go back", "Refresh the page", "Read my messages" and "Cancel that" go with no model call. Only first,
 # where an order goes once plain() has taken "okay" and "hey" off: "we should go back home" stays for it to judge
 LEADS = re.compile(r"^(?:go (?:back|forward|to)|forward|refresh|reload|read|remember|run|cancel|approve|switch|clone|"
-                   r"schedule|softer|new (?:term|tap|tab)|do that)\b|\bwhat'?s the time\b")
+                   r"schedule|softer|new (?:term|tap|tab)|do that|like|mark|reopen|print|learn|teach)\b|"
+                   r"\bwhat'?s the time\b")
 # what's said before an order that plain() leaves on: "Actually, cancel that", "Wait, go back", "Accha, read my
 # messages" and "Bhai, refresh karo" kept LEADS from seeing their order first, and a sure decider let them go
 LEAD_IN = re.compile(r"^(?:(?:actually|wait|oh|ah|sorry|right|no|well|listen|instead|accha|achha|acha|arre|arey|"

@@ -207,6 +207,20 @@ class InHerEars(unittest.TestCase):
             self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
         self.assertEqual(self.run_cold(a, "what are you doing tonight, bhai", "on", SureNo)[0], [])
 
+    def test_nor_a_thing_to_act_on_or_the_date(self):
+        """Said cold these reach routing on ASKING's things to act on, or a question, and none was in DOING, COMMAND or
+        LEADS: a sure decider let "put on some music", "song lagao" and "what's the date today" go."""
+        a = self.assistant()
+        for words in ("put on some music", "song lagao", "what's the date today", "take a note buy milk", "new note",
+                      "look at my screen", "what's on my screen", "is the internet down", "print this page",
+                      "like this video", "mark it as read", "reopen the closed tab", "thumbs up emoji", "emoji bhejo",
+                      "music chala do", "add this to watch later", "what's on my calendar", "learn how to do this",
+                      "what day is it"):
+            handled, logged = self.run_cold(a, words, "on", SureNo)
+            self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
+        for words in ("pass the salt", "are you coming for dinner", "what are you doing tonight", "how was your day"):
+            self.assertEqual(self.run_cold(a, words, "on", SureNo)[0], [], words)  # room talk still goes
+
     def test_in_shadow_it_only_writes_down_what_it_would_have_done(self):
         a = self.assistant()
         with mock.patch.object(siri, "could_be_request", lambda text: True):
