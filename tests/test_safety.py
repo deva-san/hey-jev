@@ -534,7 +534,8 @@ class CommandPolicy(unittest.TestCase):
                         "git log --grep=rmtree", "npm install -D rimraf", "npm uninstall rimraf", "pnpm add -D rimraf",
                         "git commit -m \"drop rimraf\"", "git log --grep rimraf",
                         "git commit -m \"remove (old) recursive flag\"", "git commit -m \"use shutil.rmtree(x)\"",
-                        "node -e \"require('fs').mkdirSync('a/b',{recursive:true})\"", "npm x vitest", "pnpx prettier ."):
+                        "node -e \"require('fs').mkdirSync('a/b',{recursive:true})\"", "npm x vitest",
+                        "pnpx prettier ."):
             self.assertNotEqual(self.level(command), "block", command)  # one file asks; looking is fine
         self.assertEqual(self.level("git log --oneline -- rimraf.config.js"), "allow")  # read-only, as before
 
