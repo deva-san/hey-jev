@@ -2463,10 +2463,14 @@ CORRECTION = re.compile(r"(?:no|nope|not that|wrong|that's wrong|i said|i meant|
                         r"not this|that's not)\b")
 # A no that only turns her down ("Send it?" "No.", "No, not now", "No, don't send it") doesn't correct her: each one
 # started a review at once, one more model call, told "They just corrected her: "No". Fix the fact or the skill it's
-# about first", which could rewrite a routine you taught her. After plain(), which takes "thanks" and "now" off the end
+# about first", which could rewrite a routine you taught her. After plain(), which takes "thanks" and "now" off the end.
+# A "don't" only turns her down for what she was about to do ("don't send it"): "No, don't do that again" and "No,
+# don't call me sir" correct her, and any 3 words after it took those for a decline too
 DECLINE = re.compile(r"(?:no|nope|nah|not)(?: (?:no|nope|nah|not(?: now| yet)?|thanks|thank you|leave it|"
                      r"forget (?:it|about it)|never ?mind|cancel(?: it| that)?|stop|wait|hold on|it's (?:fine|ok|okay)|"
-                     r"that's (?:fine|ok|okay|all)|i'm (?:good|fine|ok|okay)|(?:don't|dont|do not)(?: [\w']+){0,3}))*")
+                     r"that's (?:fine|ok|okay|all)|i'm (?:good|fine|ok|okay)|(?:don't|dont|do not) "
+                     r"(?:bother|worry|(?:send|do|open|close|install|delete|buy|pay|run|play|type|save|post) "
+                     r"(?:it|that|this|them)(?: yet)?)))*")
 _learning = {"turns": 0, "last": 0.0, "lock": threading.Lock(), "overheard": collections.deque(maxlen=20)}
 
 

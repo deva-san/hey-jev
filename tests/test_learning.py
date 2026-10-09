@@ -252,10 +252,11 @@ class Corrections(unittest.TestCase):
                           "No, it's fine"):
                 siri.learn_later(words, [], [], gate=True)
             self.assertEqual(started, [])
-            for words in ("No, I said Zostel", "No, not that one", "Nope, wrong one", "No, open Spotify instead"):
+            fixes = ("No, I said Zostel", "No, not that one", "Nope, wrong one", "No, open Spotify instead",
+                     "No, don't do that again", "No, don't call me sir", "No, don't use Edge")
+            for words in fixes:
                 siri.learn_later(words, [], [], gate=True)
-        self.assertEqual([s["focus"] for s in started],
-                         ["No, I said Zostel", "No, not that one", "Nope, wrong one", "No, open Spotify instead"])
+        self.assertEqual([s["focus"] for s in started], list(fixes))
 
     def test_her_review_has_hermes_rules(self):
         self.assertIn("One fact goes to ONE store", siri.LEARN)
