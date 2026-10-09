@@ -4081,9 +4081,9 @@ TERMINAL_KEYS = {"esc", "f1", "up", "down", "left", "right", "page_up", "page_do
 
 def types_into(keys):
     """True if keys (names, pressed together; none for typing) could type, paste or press Enter where the keyboard is:
-    anything but TERMINAL_KEYS. In an editor's terminal only these run anything: Ctrl+` to hide it or Escape to leave it
-    were refused too, and "hide the terminal" and "open the command palette" stopped working in VS Code once its
-    terminal had the focus."""
+    anything but TERMINAL_KEYS. Only those are let through in an editor's terminal; everything else counts as typing.
+    Ctrl+` to hide it or Escape to leave it were refused too, and "hide the terminal" and "open the command palette"
+    stopped working in VS Code once its terminal had the focus."""
     keys = [KEY_NAMES.get(str(k).lower(), str(k).lower()) for k in keys]
     if not keys:
         return True
