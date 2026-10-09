@@ -1213,6 +1213,16 @@ class Safety(Live):
                 self.assertEqual(r.outcome, "refused", (exe, step))
                 self.assertIn("could start a program", line)
         self.assertEqual(self.app.done, [])
+        for keys in ("ctrl+v", "shift+insert", "ctrl+shift+v", "a", "shift+a", "space", "ctrl+enter"):
+            self.model({"steps": [{"do": "keys", "keys": keys}]})
+            self.assertEqual(self.run_task("paste it in the terminal in cursor")[1].outcome, "refused", keys)
+        self.assertEqual(self.app.done, [])
+        # what leaves the terminal or works VS Code itself goes: "open app.py in VS Code" was abandoned at Ctrl+P
+        for keys in ("ctrl+`", "escape", "ctrl+p", "ctrl+shift+p"):
+            self.model({"steps": [{"do": "keys", "keys": keys}], "done": True, "expect": {"has": "Search"}})
+            self.run_task("open app.py in cursor")
+        self.assertEqual(self.app.done, [("keys", k) for k in ("ctrl+`", "esc", "ctrl+p", "ctrl+shift+p")])
+        self.app.done.clear()
         self.app.focus = self.app.front.controls[0]  # the editor itself: typing goes, as anywhere
         self.model({"steps": [{"do": "type", "text": "# done"}], "done": True, "expect": {"has": "Search"}})
         self.run_task("add a comment in cursor")

@@ -312,8 +312,15 @@ class ChatApps(unittest.TestCase):
             self.assertEqual(done, [], exe)
             self.assertIn("command windows", said[0], exe)
             self.assertEqual(self.run_quick(exe, "press enter", focus=None)[1], [], exe)  # can't tell where it'd go
+            for keys in ("ctrl+v", "shift+insert", "ctrl+shift+v", "x", "shift+x", "space"):
+                self.assertEqual(self.run_quick(exe, f"press {keys}", focus=terminal)[1], [], (exe, keys))
+            # hiding the terminal or the command palette goes: once the terminal had the focus they were refused
+            for keys in ("ctrl+`", "ctrl+shift+p", "escape"):
+                self.assertEqual(self.run_quick(exe, f"press {keys}", focus=terminal)[1],
+                                 [tuple(siri.combo(keys).split("+"))], (exe, keys))
         for exe in (r"C:\x\alacritty.exe", r"C:\x\WezTerm\wezterm-gui.exe", r"C:\x\PuTTY\putty.exe"):
             self.assertEqual(self.run_quick(exe, "type dir and press enter")[1], [], exe)
+            self.assertEqual(self.run_quick(exe, "press escape")[1], [], exe)  # a command window takes no keys at all
         # the editor itself, a file called terminal.py too, is any window
         for name in ("app.py, Editor Group 1", "terminal.py, Editor Group 1"):
             self.assertEqual(self.run_quick(r"C:\x\Code.exe", "type hello and press enter",

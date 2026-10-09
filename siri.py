@@ -3801,6 +3801,19 @@ def in_terminal(exe, focus=False):
     return focus is None or bool(TERMINAL_BOX.match(str(focus.get("name") or "")))
 
 
+def types_into(keys):
+    """True if keys (names, pressed together; none for typing) would type, paste or press Enter where the keyboard is.
+    In an editor's terminal only these run anything: Ctrl+` to hide it or Escape to leave it were refused too, and
+    "hide the terminal" and "open the command palette" stopped working in VS Code once its terminal had the focus."""
+    keys = [str(k).lower() for k in keys]
+    if not keys or keys[-1] == "enter":
+        return True
+    mods, last = set(keys[:-1]), keys[-1]
+    if (last == "v" and "ctrl" in mods) or (last == "insert" and "shift" in mods):  # paste, Enter and all
+        return True
+    return mods <= {"shift"} and (len(last) == 1 or last == "space")  # a letter or a space, typed as it is
+
+
 def hosted_chat(hwnd):
     """True if window hwnd is a web view (msedgewebview2.exe) that a chat app (CHATS) started, or one it can't tell
     the app of. WhatsApp's 2025 app puts its web view in front once its message box has the keyboard, and "type see
@@ -3823,7 +3836,7 @@ def hosted_chat(hwnd):
 def not_into_shell(keys=()):
     """Raises if typing (no keys) or keys would go where they run a command or send a message with nobody asked."""
     front = os.path.basename(win.foreground_exe()).lower()
-    if in_terminal(front):
+    if front in SHELLS or (in_terminal(front) and types_into(keys)):
         raise RuntimeError("I don't type into command windows")
     # Start's search, where typing and Enter start any program: a plan once pressed Win+S, typed and pressed Enter
     if front in agent.LAUNCHERS and (not keys or keys[-1] == "enter"):
