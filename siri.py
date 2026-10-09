@@ -2211,15 +2211,22 @@ class LiveSay:
                                                                                                 line)):
             self.quiet = True
             return
-        if self.plain and self.count >= 3:  # past three, kept for the end: all of it, if it's short enough
-            self.rest.append(line)
-            self.chars += len(line) + 1
+        # counted as tidy splits them: "Sure. Yes. The Mughal empire ..." is one of the chunker's pieces, as it joins
+        # bits under 20 characters on, but three of tidy's sentences, and five were said where tidy keeps three
+        parts = re.split(r"(?<=[.!?])\s+", line) if self.plain else [line]
+        if self.plain and self.count + len(parts) > 3:  # past three, kept for the end: all of it, if it's short enough
+            keep = max(0, 3 - self.count)
+            over = " ".join(parts[keep:])
+            self.rest.append(over)
+            self.chars += len(over) + 1
             if self.chars > self.MOST:  # an 8-sentence answer about the Mughal empire was said in full: tidy keeps 3
                 self.quiet, self.rest = True, []
-            return
+            if not keep:
+                return
+            line, parts = " ".join(parts[:keep]), parts[:keep]
         if self.player is None and self._held():
             return
-        self.count, self.chars = self.count + 1, self.chars + len(line) + 1
+        self.count, self.chars = self.count + len(parts), self.chars + len(line) + 1
         if self.player is None:  # from the first sentence: the mic pauses while she talks
             self.player = threading.Thread(target=self._play, daemon=True)
             self.player.start()

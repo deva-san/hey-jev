@@ -200,6 +200,11 @@ class Unnamed(unittest.TestCase):
         short = "One. Two is here. Three is here too. Four is here as well. Five, and that is all of it."
         plan, _ = self.think("count to five", False, short)
         self.assertEqual(" ".join(FakeLine.said), siri.tidy(short))  # all of it, as tidy keeps a short one
+        FakeLine.said = []
+        # the chunker joins bits under 20 characters on, so "Sure. Yes. The Mughal ..." came as one piece: five said
+        opener = "Sure. Yes. " + reply
+        self.think("tell me about the mughal empire", False, opener)
+        self.assertEqual(" ".join(FakeLine.said), siri.tidy(opener))
 
     def test_a_model_that_runs_out_of_time_leaves_no_half_sentence(self):
         for gate, reply in ((False, "Tokyo is the cap"), ("cold", '{"to": "you", "steps": [], "say": "He is asking '
