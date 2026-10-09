@@ -5589,12 +5589,18 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             first, first_kind, first_ms, _ = held[0]
             held[0] = None
             at[0] = held_at[0]
-            voice = voiceid.joined(first, text)  # and its voice, checked as for any turn
             text = speech.heard(f"{first} {text}".strip(), min(getattr(first, "sure", 1.0), getattr(text, "sure", 1.0)))
-            text.voice, text.spoke = voice
+            # and its voice, checked as for any turn: one print of both parts' audio (kept whole if it's held again).
+            # Joined as new words it had none, and the parts' own prints averaged were each from under a second, which
+            # can't tell voices apart: "Hey Jev, open [pause] YouTube" in your voice could be let go
+            try:
+                audio = np.concatenate([held_audio[0], audio])
+                text.voice, text.spoke = voice_print(audio)
+            except Exception as exc:
+                print(f"  voice print failed: {exc!r}")
             ms, kind = first_ms + ms, kind if first_kind == "other" else first_kind
         if unfinished(text) and isinstance(route(text, kind), tuple):  # "... we need to": wait for the rest
-            held[0], held_at[0] = (text, kind, ms, time.time() + HOLD), at[0]
+            held[0], held_at[0], held_audio[0] = (text, kind, ms, time.time() + HOLD), at[0], audio
             print(f"\n  (waiting for the rest: {text!r})")
             emit(notify, "Listening", text + " \u2026")
             return
@@ -5791,6 +5797,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
 
     held = [None]  # (text, kind, ms, until): a phrase cut off mid-sentence, waiting for the rest
     at, held_at = [None], [None]  # where the phrase being acted on began, and the held one (Listener.pos)
+    held_audio = [None]  # the held one's audio, for one voice print of it and the rest
     placed_as = [None]  # (where, her last word, strict) of a phrase begun over her, placed once her turn was over
     # her last turn in the audio, in Listener.pos: when you finished asking, her first word, the end of her last line,
     # and where her turn was over; strict: the window it asked for is (route). Only while the mic keeps listening

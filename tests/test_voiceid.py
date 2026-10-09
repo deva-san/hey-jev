@@ -372,29 +372,25 @@ class InHerEars(unittest.TestCase):
     def test_a_phrase_held_for_the_rest_keeps_its_voice(self):
         """"Hey Jev, open [pause] YouTube" in someone else's voice was joined as new words with no voice print, so it
         passed as too short to check, her name being in it; and yours, "open [pause] recycle bin" without her name,
-        was let go as too short however long it was."""
+        was let go as too short however long it was. Then the parts' own prints were averaged, each from under a
+        second of speech, which can't tell voices apart (voiceid.py): yours, split, could be let go. So the joined
+        audio gets one print of its own."""
         a = self.assistant()
         handled = []
-        audio = np.zeros(16000, np.float32)
+        voices = {1.0: YOU, 2.0: SOMEONE}
+        # a print of the audio as heard: whose by what it's filled with, as long as it is
+        a.var("speaker")[0] = mock.Mock(print=lambda audio: (voices[float(np.max(audio))], len(audio) / 16000))
+        said = lambda words, who, secs: a.listener.on_phrase(  # noqa: E731
+            np.full(int(secs * 16000), 1.0 if who is YOU else 2.0, np.float32), "other",
+            turn(words, unit(0.3, 1), spoke=secs), 100)  # under a second the print can be far off yours, 0.38 here
         with mock.patch.object(siri, "handle", lambda text, *args, **kw: handled.append(str(text))), \
                 mock.patch.dict(siri.settings._load(), {"voice_id": "on", "no_name": True}):
-            for voice in (SOMEONE, YOU):
-                a.listener.on_phrase(audio, "other", turn("Hey Jev, open", voice, spoke=0.8), 100)
-                a.listener.on_phrase(audio, "other", turn("YouTube", voice, spoke=0.7), 100)
-            a.listener.on_phrase(audio, "other", turn("open", YOU, spoke=0.5), 100)
-            a.listener.on_phrase(audio, "other", turn("recycle bin", YOU, spoke=0.7), 100)
+            for who in (SOMEONE, YOU):
+                said("Hey Jev, open", who, 0.7)
+                said("YouTube", who, 0.5)
+            said("open", YOU, 0.5)
+            said("recycle bin", YOU, 0.7)
         self.assertEqual(handled, ["Hey Jev, open YouTube", "open recycle bin"])
-
-    def test_a_joined_phrase_has_its_parts_voices_by_how_long_each_spoke(self):
-        """Only the parts with a print count: one too short for a print (under 0.3 s) adds no seconds."""
-        held, rest = turn("open", None, spoke=0.2), turn("the downloads folder", YOU, spoke=1.3)
-        voice, spoke = voiceid.joined(held, rest)
-        self.assertAlmostEqual(float(voice @ YOU), 1.0, places=5)
-        self.assertEqual(spoke, 1.3)
-        voice, spoke = voiceid.joined(turn("open the", SOMEONE, spoke=0.5), rest)
-        self.assertGreater(float(voice @ YOU), float(voice @ SOMEONE))
-        self.assertEqual(spoke, 1.8)
-        self.assertEqual(voiceid.joined(held, turn("bin", None, spoke=0.1)), (None, 0.0))
 
     def test_saying_stop_stops_learning_your_voice(self):
         a = self.assistant()
