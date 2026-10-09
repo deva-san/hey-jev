@@ -24,7 +24,7 @@ pass.
 | 5 Telegram | Bot, pairing, buttons, voice notes, owner-only, "send me a screenshot" | Paired (done) | Listens whenever a token is saved, so `/start` always gets an answer. Before this, it stayed off until Pair was pressed, and a `/start` sent first got nothing. It keeps trying when Telegram can't be reached, and says so on the PC if the token stops working |
 | 6 Coding jobs | OpenCode over ACP, confined, git snapshot; Hermes' cron rules | Ask for one in a git project folder | Questions mid-job are asked only on the phone (buttons). For a job asked by voice, a command needing your OK is refused and listed in her report rather than interrupting you. Edits in the folder go ahead once you've said yes to the job, since the snapshot makes them undoable |
 
-Still to do: WhatsApp (later, as planned) and trimming the prompt. Interrupting her ("stop", her name or a request
+Still to do: WhatsApp (later, as planned) and re-running the 34-request test on the trimmed prompt. Interrupting her ("stop", her name or a request
 said over her) is done, with Nemotron and Parakeet: see the README, Talking over her.
 
 ## In short

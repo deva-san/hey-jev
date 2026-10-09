@@ -1163,9 +1163,9 @@ def prepare(app, contact, text):
         why = offline_reason(app, hwnd)
         raise RuntimeError(why or f"{APPS[app]['say']} didn't open the chat with {name}, so I've not typed anything")
     _opened(app, hwnd, before, name, handle)
-    if APPS[app]["compose"]:  # the chat may have switched while _opened waited: read its box again, if it reads
-        again = box_shown(app, hwnd)
-        shown = shown if again is None else again
+    if APPS[app]["compose"]:  # the chat may have switched while _opened waited: one more read of its box, if it
+        reread = typed_text(app, hwnd)  # reads, never box_shown's 4 s of tries again
+        shown = shown if reread is None else reread
     if shown is not None and shown != text:  # the link left the text out (WhatsApp's 2025 app): she types it
         type_into(app, hwnd, text)
         shown = text
