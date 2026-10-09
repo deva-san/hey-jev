@@ -1753,8 +1753,9 @@ def as_said(lowered, words):
 
 # A search or video for the words heard goes to the model, which puts misheard words right, when speech-to-text was
 # less sure of them than QUERY_SURE, or they spell letters out: "play avengers doomshare tyler" played the misheard
-# words, and "search career eye dee on you tube" googled the letters. Clear speech comes out above 0.9 (speech.Heard).
-# Apps and sites are matched against names she knows, so those stay on the PC
+# words, and "search career eye dee on you tube" googled the letters. Clear speech comes out above 0.9 (speech.Heard)
+# on Parakeet and Nemotron, but about 0.75-0.88 on Whisper, so with Whisper only spelled letters count: else every
+# clear "play lofi music" waited for the model. Apps and sites are matched against names she knows, so stay on the PC
 QUERY_SURE = 0.9
 # letters spelled out: two letters' names in a row, one of them no everyday word ("eye dee" is ID, "see you" is words)
 LETTER_NAMES = set("ay bee cee see dee ee eff ef gee aitch eye jay kay el em en oh pee cue ar ess es tee you vee ex "
@@ -1770,7 +1771,8 @@ def misheard_query(plan, words, sure=1.0):
         if s.get("do") not in ("youtube", "google") or s.get("rank") or not q or q not in said:
             continue  # "play the second video" plays the last search
         pairs = zip(q.split(), q.split()[1:])
-        if sure < QUERY_SURE or any({a, b} <= LETTER_NAMES and {a, b} & ONLY_LETTERS for a, b in pairs):
+        unsure = sure < QUERY_SURE and settings.get("stt_engine") != "whisper"
+        if unsure or any({a, b} <= LETTER_NAMES and {a, b} & ONLY_LETTERS for a, b in pairs):
             return not any(said == phrase for phrase, _ in routines())  # a routine's own words were heard right
     return False
 

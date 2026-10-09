@@ -112,6 +112,16 @@ class MisheardQueries(Routing):
                 self.assertTrue(asked)
                 self.assertIsNone(ran)
 
+    def test_whispers_own_sure_is_not_held_to_the_bar(self):
+        """QUERY_SURE was worked out on Parakeet. Whisper's sure comes out about 0.75-0.88 for clear speech, so with it
+        every play or search said clearly waited for the model. Spelled-out letters still go to it."""
+        get = siri.settings.get
+        with mock.patch.object(siri.settings, "get", lambda name: "whisper" if name == "stt_engine" else get(name)):
+            asked, ran, _ = self.handle(speech.heard("play lofi music", 0.8), False)
+            self.assertFalse(asked)
+            self.assertEqual(ran["steps"], [{"do": "youtube", "query": "lofi music", "play": True}])
+            self.assertTrue(self.handle(speech.heard("search career eye dee on you tube", 0.8), False)[0])
+
     def test_letters_spelled_out_go_to_the_model(self):
         for words in ("search career eye dee on you tube", "search for career eye dee", "play pee dee eff tutorial"):
             with self.subTest(words=words):
