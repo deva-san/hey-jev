@@ -112,6 +112,65 @@ def pick(rows, window, phrases, heard):
 
 
 # --------------------------------------------------------------------------- each place a test run wrote to
+# Every change is worked out here, before anything is changed, and files are read and written as bytes: what isn't
+# taken out goes back byte for byte, even a line that isn't UTF-8, and nothing read can stop it half way.
+SUMMARY = re.compile(rb"\n## Summary\r?\n")  # history.mark_summarized's, at the end of a day file
+ENTRY = re.compile(rb"(?m)^(?=- \*\*)")  # each turn in a day file starts a line with its time in bold
+
+
+def _day_entry(ts, said):
+    """The first line history.add writes for a turn in its day file."""
+    t = time.localtime(ts)
+    return f"- **{t.tm_hour % 12 or 12}:{t.tm_min:02d} {'AM' if t.tm_hour < 12 else 'PM'}** You: {said}".split("\n")[0]
+
+
+def _head(part):
+    return part.split(b"\n", 1)[0].rstrip(b"\r").decode("utf-8", "replace")
+
+
+def day_edits(folder, rows, take):
+    """The day files (<day>.md in folder) without the entries of the turns taken out, as [(path, new bytes)], and
+    what was left in, with why. history.add wrote each turn into history.db and its day file in the same order, so the
+    k-th entry with a time and words is the k-th turn of that day with them: a turn of yours with the same minute and
+    words as a test's keeps its own entry. Where a file has a different number of them than history.db, none of them
+    goes. The summary at the end stays as it is, though one written on a day of test turns may mention them."""
+    taken = {r[0] for r in take}
+    days = collections.defaultdict(list)
+    for rowid, said, ts, day in sorted(rows):  # by rowid: the order history.add wrote them in
+        days[day].append((rowid, _day_entry(float(ts or 0), str(said or ""))))
+    writes, left = [], []
+    for day, turns in sorted(days.items(), key=lambda d: str(d[0])):
+        path = os.path.join(folder, f"{day}.md")
+        if not day or not any(rowid in taken for rowid, _ in turns) or not os.path.isfile(path):
+            continue
+        with open(path, "rb") as f:
+            raw = f.read()
+        m = SUMMARY.search(raw)
+        parts = ENTRY.split(raw[:m.start()] if m else raw)
+        have = collections.Counter(_head(part) for part in parts)
+        want = collections.Counter(head for _, head in turns)
+        drop, seen, unsure = set(), collections.Counter(), 0
+        for rowid, head in turns:
+            seen[head] += 1
+            if rowid in taken:
+                if have[head] == want[head]:
+                    drop.add((head, seen[head]))
+                else:
+                    unsure += 1
+        if unsure:
+            left.append(f"{path}: {unsure} entries don't line up with history.db, left in")
+        seen.clear()
+        kept = []
+        for part in parts:
+            head = _head(part)
+            seen[head] += 1
+            if (head, seen[head]) not in drop:
+                kept.append(part)
+        if drop:
+            writes.append((path, b"".join(kept) + (raw[m.start():] if m else b"")))
+    return writes, left
+
+
 def history_plan(db, window, phrases, heard):
     if not os.path.isfile(db):
         return None
@@ -120,10 +179,10 @@ def history_plan(db, window, phrases, heard):
         rows = con.execute("SELECT rowid, said, ts, day FROM turns").fetchall()
     finally:
         con.close()
-    days = {r[0]: r[3] for r in rows}
     take, look, kept = pick([(r[0], r[1], float(r[2] or 0)) for r in rows], window, phrases, heard)
+    writes, left = day_edits(os.path.join(os.path.dirname(db), "memories", "days"), rows, take)
     return {"name": "history.db", "path": db, "rows": len(rows), "take": take, "look": look, "kept": kept,
-            "days": days}
+            "writes": writes, "left": left}
 
 
 def tasks_plan(db, window, phrases):
@@ -135,7 +194,8 @@ def tasks_plan(db, window, phrases):
     finally:
         con.close()
     take, look, kept = pick([(r[0], r[1], float(r[2] or 0)) for r in rows], window, phrases, {})
-    return {"name": "tasks.db", "path": db, "rows": len(rows), "take": take, "look": look, "kept": kept}
+    return {"name": "tasks.db", "path": db, "rows": len(rows), "take": take, "look": look, "kept": kept,
+            "writes": [], "left": []}
 
 
 def _when(value):
@@ -151,19 +211,22 @@ def jsonl_plan(path, when_key, text_key, window, phrases, heard):
     """A log of one JSON object a line: the tests' lines by their time and text. A line that isn't JSON is kept."""
     if not os.path.isfile(path):
         return None
-    with open(path, encoding="utf-8", errors="replace") as f:
-        lines = f.readlines()
+    with open(path, "rb") as f:
+        lines = f.read().split(b"\n")
+    lines = [line + b"\n" for line in lines[:-1]] + ([lines[-1]] if lines[-1] else [])  # each with its own end
     rows = []
     for i, line in enumerate(lines):
         try:
-            entry = json.loads(line)
+            entry = json.loads(line.decode("utf-8", "replace"))
         except ValueError:
             continue
         if isinstance(entry, dict):
             rows.append((i, str(entry.get(text_key) or ""), _when(entry.get(when_key))))
     take, look, kept = pick(rows, window, phrases, heard)
+    drop = {r[0] for r in take}
+    writes = [(path, b"".join(line for i, line in enumerate(lines) if i not in drop))] if drop else []
     return {"name": os.path.basename(path), "path": path, "rows": len(lines), "take": take, "look": look,
-            "kept": len(lines) - len(take), "lines": lines}
+            "kept": len(lines) - len(take), "writes": writes, "left": []}
 
 
 def plans(window, appdata=None, local=None, tests=None):
@@ -180,43 +243,33 @@ def plans(window, appdata=None, local=None, tests=None):
 
 
 # --------------------------------------------------------------------------- taking them out
-def _day_entry(ts, said):
-    t = time.localtime(ts)
-    return f"- **{t.tm_hour % 12 or 12}:{t.tm_min:02d} {'AM' if t.tm_hour < 12 else 'PM'}** You: {said}"
-
-
-def _clean_days(appdata, plan):
-    """The same turns out of the day files (memories\\days\\<day>.md), one entry for each turn taken out."""
-    gone = collections.defaultdict(collections.Counter)
-    for rowid, said, ts in plan["take"]:
-        gone[plan["days"].get(rowid)][_day_entry(ts, said)] += 1
-    for day, entries in gone.items():
-        path = os.path.join(appdata, "memories", "days", f"{day}.md")
-        if not day or not os.path.isfile(path):
-            continue
-        with open(path, encoding="utf-8") as f:
-            text = f.read()
-        parts = re.split(r"(?m)^(?=- \*\*)", text)
-        kept = []
-        for part in parts:
-            head = part.split("\n", 1)[0]
-            if entries[head] > 0:
-                entries[head] -= 1
-                continue
-            kept.append(part)
-        _write(path, "".join(kept))
-
-
-def _write(path, text):
+def _write(path, data):
     tmp = path + ".clean-tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
-def apply(found, appdata=None, local=None):
-    """Back up her data and the logs about to change, then take the tests' rows out. Returns the backups' paths."""
-    appdata, local = appdata or backup.appdata(), local or backup.localdata()
+def _delete(db, sql, keys, also=None):
+    con = sqlite3.connect(db, timeout=10)
+    try:
+        with con:
+            con.executemany(sql, [(k,) for k in keys])
+            if also and con.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (also[0],)).fetchone():
+                con.executemany(also[1], [(k,) for k in keys])
+    finally:
+        con.close()
+
+
+def apply(found, local=None):
+    """Back up her data and the logs about to change, then take the tests' rows out, as planned by plans(). Once
+    history.db has changed nothing stops it half way: a change that fails is said and the rest still go ahead.
+    Returns (the backups' paths, what couldn't be done)."""
+    local = local or backup.localdata()
     made = [backup.backup()]
     logs = [p["path"] for p in found if not p["path"].endswith(".db")]
     if logs:  # the backup zip has her data, not her logs: these go in one of their own
@@ -225,31 +278,26 @@ def apply(found, appdata=None, local=None):
             for log in logs:
                 z.write(log, os.path.relpath(log, local))
         made.append(path)
+    problems = []
     for p in found:
         if not p["take"]:
             continue
         keys = [r[0] for r in p["take"]]
-        if p["name"] == "history.db":
-            con = sqlite3.connect(p["path"], timeout=10)
+        try:
+            if p["name"] == "history.db":  # and its search index; the day files are among its writes
+                _delete(p["path"], "DELETE FROM turns WHERE rowid = ?", keys,
+                        ("turns_tri", "DELETE FROM turns_tri WHERE rowid = ?"))
+            elif p["name"] == "tasks.db":
+                _delete(p["path"], "DELETE FROM tasks WHERE id = ?", keys)
+        except sqlite3.Error as exc:
+            problems.append(f"{p['path']}: {exc}, nothing taken out of it")
+            continue  # and its day files stay as they are, with the turns still in history.db
+        for path, data in p["writes"]:
             try:
-                with con:
-                    con.executemany("DELETE FROM turns WHERE rowid = ?", [(k,) for k in keys])
-                    if con.execute("SELECT 1 FROM sqlite_master WHERE name = 'turns_tri'").fetchone():
-                        con.executemany("DELETE FROM turns_tri WHERE rowid = ?", [(k,) for k in keys])
-            finally:
-                con.close()
-            _clean_days(appdata, p)
-        elif p["name"] == "tasks.db":
-            con = sqlite3.connect(p["path"], timeout=10)
-            try:
-                with con:
-                    con.executemany("DELETE FROM tasks WHERE id = ?", [(k,) for k in keys])
-            finally:
-                con.close()
-        else:
-            drop = set(keys)
-            _write(p["path"], "".join(line for i, line in enumerate(p["lines"]) if i not in drop))
-    return made
+                _write(path, data)
+            except OSError as exc:
+                problems.append(f"{path}: {exc}, left as it was")
+    return made, problems
 
 
 def write_list(found, path):
@@ -275,6 +323,8 @@ def report(found):
                   "phrase. Have a look:")
             for _, text, ts in p["look"][:5]:
                 print(f"  look {time.strftime('%H:%M:%S', time.localtime(ts))}  {text[:70]!r}")
+        for why in p["left"]:
+            print(f"  {why}")
 
 
 def leftovers(window, appdata=None, local=None):
@@ -326,9 +376,12 @@ def main(argv=None):
     if not total:
         print("\nNothing to take out.")
         return 0
-    made = apply(found)
+    made, problems = apply(found)
     print(f"\nTook out {total} rows. Backed up first to:\n  " + "\n  ".join(made)
           + f"\nTo undo: python backup.py --restore \"{made[0]}\", and put the logs back from the other zip.")
+    if problems:
+        print("\nThese couldn't be done:\n  " + "\n  ".join(problems))
+        return 1
     return 0
 
 

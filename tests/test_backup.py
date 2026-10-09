@@ -168,7 +168,8 @@ class CleanTestData(unittest.TestCase):
 
     def test_only_the_tests_rows_go(self):
         found = clean_test_data.plans(self.window, tests=self.tests)
-        made = clean_test_data.apply(found)
+        made, problems = clean_test_data.apply(found)
+        self.assertEqual(problems, [])
         said = self.said()
         self.assertEqual(said.count("what's the weather"), 1)
         self.assertEqual(sum(clean_test_data.plain(s) == "open notepad" for s in said), 1)  # the one you said
@@ -226,6 +227,41 @@ class CleanTestData(unittest.TestCase):
         looks = [r[1] for p in found for r in p["look"]]
         self.assertIn("set a timer", looks)
         self.assertIn("Set a timer.", looks)
+
+    def day_file(self):
+        return os.path.join(self.data, "memories", "days",
+                            time.strftime("%Y-%m-%d", time.localtime(self.T0 + 600)) + ".md")
+
+    def test_the_days_summary_and_your_own_entry_stay_in_her_day_file(self):
+        """history.mark_summarized puts the day's summary at the end of its file, after the last entry, which here is a
+        test's; and a turn of yours can have the same minute and words as a test's right after it."""
+        turns = [(self.T0 + 1580, "set a timer", "Timer set for you")]  # yours, on its own
+        turns += [(self.T0 + 1590 + i / 50, "set a timer", "ok") for i in range(2)]  # a test's, in the same minute
+        turns += [(self.T0 + 1600 + i / 50, "Open Notepad.", "ok") for i in range(2)]  # a test's, the day's last
+        for ts, said, reply in turns:
+            with mock.patch("time.time", return_value=ts):
+                history.add(said, reply=reply)
+        day = os.path.basename(self.day_file())[:-3]
+        history.mark_summarized(day, "You asked for a timer and Notepad.")
+        clean_test_data.apply(clean_test_data.plans(self.window, tests=self.tests))
+        text = read(self.day_file())
+        self.assertEqual(history.summary(day), "You asked for a timer and Notepad.")
+        self.assertEqual(text.count("You: set a timer"), 1)
+        self.assertIn("You: set a timer\n  Jev: Timer set for you", text)
+        self.assertEqual(text.count("You: "), len([s for s in self.said() if s != "what's the weather"]))
+
+    def test_a_day_file_it_cant_read_stops_nothing_and_loses_nothing(self):
+        """A byte in the day file that isn't UTF-8: history.db has changed by the time the day file is read, so a
+        crash there left the logs as they were, and writing it back read as text would have changed that byte."""
+        with open(self.day_file(), "ab") as f:
+            f.write(b"- **11:59 PM** You: caf\xe9\n  Jev: (nothing said)\n")
+        _, problems = clean_test_data.apply(clean_test_data.plans(self.window, tests=self.tests))
+        self.assertEqual(problems, [])
+        with open(self.day_file(), "rb") as f:
+            raw = f.read()
+        self.assertIn(b"You: caf\xe9\n", raw)
+        self.assertNotIn(b"You: set a timer", raw)
+        self.assertNotIn("set a timer", read(os.path.join(self.local, "Logs", "agent.jsonl")))
 
     def test_what_she_heard_counts_the_way_her_history_keeps_it(self):
         """Her log has what she heard, her name and all; her history keeps the words without it."""
