@@ -249,11 +249,13 @@ class Corrections(unittest.TestCase):
                 mock.patch.dict(siri.settings._load(), {"learning": True}), \
                 mock.patch.dict(siri._learning, turns=0, last=time.time()):  # a review a moment ago
             for words in ("No.", "Nope", "No thanks", "No, not now", "Nah, leave it", "No, don't send it", "No, wait",
-                          "No, it's fine"):
+                          "No, it's fine", "No, don't send the message", "No, don't send the email",
+                          "No, don't delete the file", "No, do not send", "No, don't", "No, don't worry about it"):
                 siri.learn_later(words, [], [], gate=True)
             self.assertEqual(started, [])
             fixes = ("No, I said Zostel", "No, not that one", "Nope, wrong one", "No, open Spotify instead",
-                     "No, don't do that again", "No, don't call me sir", "No, don't use Edge")
+                     "No, don't do that again", "No, don't call me sir", "No, don't use Edge",
+                     "No, don't do it like that", "No, don't open the file again")
             for words in fixes:
                 siri.learn_later(words, [], [], gate=True)
         self.assertEqual([s["focus"] for s in started], list(fixes))

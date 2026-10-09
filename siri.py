@@ -2468,13 +2468,15 @@ CORRECTION = re.compile(r"(?:no|nope|not that|wrong|that's wrong|i said|i meant|
 # A no that only turns her down ("Send it?" "No.", "No, not now", "No, don't send it") doesn't correct her: each one
 # started a review at once, one more model call, told "They just corrected her: "No". Fix the fact or the skill it's
 # about first", which could rewrite a routine you taught her. After plain(), which takes "thanks" and "now" off the end.
-# A "don't" only turns her down for what she was about to do ("don't send it"): "No, don't do that again" and "No,
-# don't call me sir" correct her, and any 3 words after it took those for a decline too
+# A "don't" only turns her down for what she was about to do ("don't send it", "don't send the message", a bare
+# "don't"): "No, don't do that again" and "No, don't call me sir" correct her, and any 3 words after it took those for
+# a decline too. Only "it" or one thing ("the email") may follow her action, so "don't do it like that" corrects too
 DECLINE = re.compile(r"(?:no|nope|nah|not)(?: (?:no|nope|nah|not(?: now| yet)?|thanks|thank you|leave it|"
                      r"forget (?:it|about it)|never ?mind|cancel(?: it| that)?|stop|wait|hold on|it's (?:fine|ok|okay)|"
-                     r"that's (?:fine|ok|okay|all)|i'm (?:good|fine|ok|okay)|(?:don't|dont|do not) "
-                     r"(?:bother|worry|(?:send|do|open|close|install|delete|buy|pay|run|play|type|save|post) "
-                     r"(?:it|that|this|them)(?: yet)?)))*")
+                     r"that's (?:fine|ok|okay|all)|i'm (?:good|fine|ok|okay)|(?:don't|dont|do not)(?: (?:bother|worry)"
+                     r"(?: about it)?| (?:send|do|open|close|install|delete|buy|pay|run|play|type|save|post|reply|"
+                     r"call|text|email|share|download|remove|shut ?down|restart)(?: (?:it|that|this|them|anything)|"
+                     r" (?:the|a|an|my|any) [\w'.-]+)?(?: yet)?)?))*")
 _learning = {"turns": 0, "last": 0.0, "lock": threading.Lock(), "overheard": collections.deque(maxlen=20)}
 
 
