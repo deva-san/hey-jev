@@ -66,6 +66,23 @@ class RealData(unittest.TestCase):
             for real in real_folders():
                 self.assertFalse(target == real or target.startswith(real + os.sep), path)
 
+    def test_the_dictionary_and_app_list_a_test_writes_are_temp_files(self):
+        """vocabulary.json and apps.json are hers too, but next to the code, where own_data can't see them: a test
+        that learns a word (siri.learn_words) or puts a backup back writes temp ones."""
+        self.assertTrue(dictation.USER_VOCAB.startswith(DATA), dictation.USER_VOCAB)  # before anything is written
+        self.assertEqual(siri.USER_VOCAB, dictation.USER_VOCAB)
+        self.assertTrue(backup.HERE.startswith(DATA), backup.HERE)
+        real = os.path.join(ROOT, "vocabulary.json")
+        before = os.path.exists(real) and os.stat(real)
+        try:
+            dictation.save_vocab({"Zostel": ["so steel"]})
+            self.assertEqual(dictation.fix_vocab("book a so steel"), "book a Zostel")
+        finally:
+            os.remove(dictation.USER_VOCAB)
+            dictation.load_vocab()
+        self.assertEqual(os.path.exists(real) and os.stat(real), before)
+        self.assertEqual(dictation.fix_vocab("book a so steel"), "book a so steel")
+
     def test_her_real_folders_are_refused_in_a_test_run(self):
         for real in real_folders():
             with self.assertRaisesRegex(RuntimeError, "real data"):

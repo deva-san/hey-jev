@@ -40,11 +40,20 @@ def tripwire(name):
 
 requests.sessions.Session.request = tripwire("network")  # web, Fish, the model and YouTube all go through requests
 
+import backup  # noqa: E402
+import dictation  # noqa: E402
 import installer  # noqa: E402
 import messaging  # noqa: E402
 import opencode  # noqa: E402
 import siri  # noqa: E402
 import winplatform  # noqa: E402
+
+# Her Dictionary (vocabulary.json) and app list (apps.json) live next to the code, where own_data can't see them: a
+# word a test learns (siri.learn_words) and a backup a test puts back go to temp ones. The Dictionary is read again
+# from there, so a test sees the example words, not hers.
+dictation.USER_VOCAB = siri.USER_VOCAB = os.path.join(DATA, "vocabulary.json")
+dictation.load_vocab()
+backup.HERE = os.path.join(DATA, "repo")
 
 # what acts on the PC: windows, keys, mouse, clipboard, sound, power, browser launches, chat apps and installs
 WIN_ACTIONS = (
