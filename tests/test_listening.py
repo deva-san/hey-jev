@@ -568,10 +568,11 @@ class TalkOver(Case):
     FIRST = "Hey Jev, what's the weather?"
     REPLY = "It's sunny and thirty one degrees in Chennai today."
 
-    def turns(self, over=(), after=(), words="", result="chat", speech_mode=True, no_name=True, before=()):
+    def turns(self, over=(), after=(), words="", result="chat", speech_mode=True, no_name=True, before=(), cut=False):
         """'Hey Jev, what's the weather?', and she answers REPLY: the mic hears over while she says it (after
         before, while she thinks), then after once her turn is over. The second phrase (0.8 in its audio) is written
-        as words, if at least 1.2 s of it was heard, else only its end, "pad". What reached handle(), as (text, gate)."""
+        as words, if at least 1.2 s of it was heard, else only its end, "pad". cut: those words stopped her as she
+        talked (overhear). What reached handle(), as (text, gate)."""
         def write(audio):
             said = np.sum(np.isclose(audio, 0.8))
             return self.FIRST if not said else words if said >= 1.2 * RATE else "pad"
@@ -582,6 +583,10 @@ class TalkOver(Case):
         def speak(line):  # what the mic hears while she says it: kept in speech mode, dropped on a raw mic
             for block in over:
                 a.rec._cb(block.reshape(-1, 1))
+            if cut:
+                siri.HER.cut("test", siri.HER.turn, words)
+                self.addCleanup(siri.agent.STOP.clear)
+                self.addCleanup(siri.voice_bits.take_speech_interrupted)
             return 0
 
         def handle(text, w, stt_ms=None, notify=None, gate=False):
@@ -612,6 +617,17 @@ class TalkOver(Case):
 
     def test_a_plain_request_over_her_still_gets_is_it_for_her(self):
         self.assertEqual(self.turns(self.OVER_END, self.AFTER, "open notepad"), [("open notepad", "cold")])
+
+    def test_a_request_that_stopped_her_is_done_once_she_has_stopped(self):
+        """"Open Notepad" said over her stopped her mid-sentence, then once her turn was over the same words, placed
+        over her, were held to the strict rule as if a TV had said them: nothing happened, or with Answer without her
+        name on they went to the model as overheard. What stopped her was said to her, as a follow-up."""
+        for no_name in (False, True):
+            with self.subTest(no_name=no_name):
+                self.assertEqual(self.turns(self.OVER_END, self.AFTER, "open notepad", no_name=no_name, cut=True),
+                                 [("open notepad", True)])
+                self.assertEqual(siri.HER.cut_by, "")  # once only
+        self.assertEqual(self.turns(self.OVER_END, self.AFTER, "open notepad", no_name=False), [])  # not stopped for
 
     def test_a_tv_talking_over_her_isnt_a_request(self):
         self.assertEqual(self.turns(self.OVER_END, self.AFTER, "and then we went to the market together"), [])
@@ -705,6 +721,33 @@ class TalkOver(Case):
         items = [a.rec.blocks.get_nowait()[1] for _ in range(a.rec.blocks.qsize())]
         self.assertEqual([getattr(b, "kind", "audio") for b in items], ["on", "audio", "off"])
         self.assertEqual(a.rec.gen, gen)
+
+
+class Overhearing(Case):
+    """What the mic hears while she talks or does a task in an app goes to a second listener (overhear), so "stop"
+    stops her there and then, not once her turn is over."""
+
+    def test_stop_stops_her_with_parakeet_too(self):
+        """Parakeet is the default, and overhearing only started for Nemotron: "stop" said while she did a task in
+        an app, or read a long answer, wasn't heard until it was all over, the listening loop being inside the
+        turn. Parakeet writes a short phrase in about 0.3 s once you stop."""
+        for live in (False, True):
+            with self.subTest(live=live):
+                a = self.assistant(ears=FakeEars(live, write=lambda audio: "Stop." if len(audio) else ""))
+                self.assertIn("overhear", a.threads)
+                siri.HER.begin()
+                self.addCleanup(siri.HER.begin)
+                self.addCleanup(siri.agent.STOP.clear)
+                self.addCleanup(siri.voice_bits.take_speech_interrupted)
+                said = blocks(0.3, 0.0) + blocks(0.6, 1.0) + blocks(1.5, 0.0)  # "Stop." over her
+                side = types.SimpleNamespace(get=lambda: said.pop(0) if said else Controls().get())
+                with mock.patch.object(siri.queue, "Queue", lambda: side), \
+                        mock.patch.object(speech, "end_of_speech", lambda notify=None: FakeVAD()), \
+                        contextlib.redirect_stdout(a.out):
+                    with self.assertRaises(Stop):
+                        a.threads["overhear"]()
+                self.assertTrue(siri.HER.stop.is_set())
+                self.assertTrue(siri.agent.STOP.is_set())  # and a task she's doing with her
 
 
 # --------------------------------------------------------------------------- A7: the rest of a held phrase

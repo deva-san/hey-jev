@@ -183,6 +183,29 @@ class Curator(Home):
             run.assert_called_once()
 
 
+class YourSkills(Home):
+    def test_her_review_cant_delete_or_rewrite_a_skill_you_taught_her(self):
+        """A review may write skills, and only her procedures were kept from it: one told to fix "the skill it's
+        about" after a plain "No" could archive or write over a routine you taught her. A fix to a line of yours
+        still goes in, a skill she wrote herself she may still change, and you can still delete yours."""
+        skills.create_skill("work-mode", skills.build_content("work-mode", "Work setup", "Open Gmail."))
+        skills.create_skill("tea", skills.build_content("tea", "Tea timer", "3 min."), agent_created=True)
+        for step in ({"action": "delete", "name": "work-mode"},
+                     {"action": "create", "name": "work-mode", "description": "Work setup", "notes": "Open Slack."}):
+            with self.assertRaises(RuntimeError, msg=step):
+                siri.learn_skill(step, agent=True)
+        self.assertIn("Open Gmail.", skills.find_skill("work-mode").read_text(encoding="utf-8"))
+        siri.learn_skill({"action": "patch", "name": "work-mode", "old": "Open Gmail.", "new": "Open Gmail, Work."},
+                         agent=True)
+        self.assertIn("Open Gmail, Work.", skills.find_skill("work-mode").read_text(encoding="utf-8"))
+        siri.learn_skill({"action": "create", "name": "tea", "description": "Tea timer", "notes": "4 min."}, agent=True)
+        self.assertIn("4 min.", skills.find_skill("tea").read_text(encoding="utf-8"))
+        siri.learn_skill({"action": "delete", "name": "tea"}, agent=True)
+        self.assertIsNone(skills.find_skill("tea"))
+        siri.learn_skill({"action": "delete", "name": "work-mode"})  # you asked
+        self.assertIsNone(skills.find_skill("work-mode"))
+
+
 class Undo(Home):
     def test_forget_what_you_just_learned_puts_back_memory_and_skills(self):
         store = hermes_memory.MemoryStore()
@@ -242,6 +265,33 @@ class Corrections(unittest.TestCase):
             siri.learn_later("no, I said Zostel", [], [], gate=False)
             siri.learn_later("open notepad", [{"do": "open"}], [], gate=False)
         self.assertEqual(started, [{"wait": 0, "focus": "no, I said Zostel"}])
+
+    def test_a_no_that_only_turns_her_down_isnt_a_correction(self):
+        """"Send it?" "No.": every no, nope and no thanks started a review at once, past the 90 s wait, told "They
+        just corrected her: "No". Fix the fact or the skill it's about first": a model call each time, pushing it to
+        change her memory or a skill. A no that says what was wrong still goes straight away."""
+        started = []
+
+        class Thread:
+            def __init__(self, target=None, kwargs=None, daemon=None):
+                started.append(kwargs)
+
+            def start(self):
+                pass
+        with mock.patch.object(siri.threading, "Thread", Thread), \
+                mock.patch.dict(siri.settings._load(), {"learning": True}), \
+                mock.patch.dict(siri._learning, turns=0, last=time.time()):  # a review a moment ago
+            for words in ("No.", "Nope", "No thanks", "No, not now", "Nah, leave it", "No, don't send it", "No, wait",
+                          "No, it's fine", "No, don't send the message", "No, don't send the email",
+                          "No, don't delete the file", "No, do not send", "No, don't", "No, don't worry about it"):
+                siri.learn_later(words, [], [], gate=True)
+            self.assertEqual(started, [])
+            fixes = ("No, I said Zostel", "No, not that one", "Nope, wrong one", "No, open Spotify instead",
+                     "No, don't do that again", "No, don't call me sir", "No, don't use Edge",
+                     "No, don't do it like that", "No, don't open the file again")
+            for words in fixes:
+                siri.learn_later(words, [], [], gate=True)
+        self.assertEqual([s["focus"] for s in started], list(fixes))
 
     def test_her_review_has_hermes_rules(self):
         self.assertIn("One fact goes to ONE store", siri.LEARN)

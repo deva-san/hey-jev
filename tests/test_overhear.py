@@ -36,6 +36,18 @@ class Verdicts(unittest.TestCase):
                       "Wait, someone's at the door"):
             self.assertIsNone(siri.barge(words, True), words)
 
+    def test_only_the_words_that_stopped_her_are_taken_as_said_to_her(self):
+        """She asked "Should I turn on night light?", a TV's "play the next episode" didn't stop her (she was asking),
+        your "stop" did. Any phrase that would stop her counted as the one that had: the TV's, heard first once she was
+        done, was taken as said to her, and your "stop" as overheard."""
+        self.addCleanup(setattr, siri.HER, "cut_by", "")
+        siri.HER.cut_by = "stop"
+        self.assertFalse(siri.said_to_her("play the next episode"))
+        self.assertEqual(siri.HER.cut_by, "stop")  # still there for the stop itself
+        self.assertTrue(siri.said_to_her("Stop."))
+        siri.HER.cut_by = "okay now open note pad"  # written a little differently over her
+        self.assertTrue(siri.said_to_her("open notepad"))
+
     def test_unsure_words_dont(self):
         self.assertIsNone(siri.barge("open notepad", True, sure=0.5))
 
@@ -215,7 +227,8 @@ class Stopping(unittest.TestCase):
         self.addCleanup(siri.PENDING.update, plan=None, until=0.0, origin="voice")
         with mock.patch.object(siri, "run_plan", run_plan), mock.patch.object(siri, "quick", lambda *a: plan), \
                 mock.patch.object(siri, "learn_later", lambda *a, **k: None), \
-                mock.patch.object(siri, "drop_staged", lambda: None):
+                mock.patch.object(siri, "drop_staged", lambda: None), \
+                mock.patch.object(siri.history, "add", lambda *a, **k: None):  # her "...?" would be asked_last() after
             siri.handle("send hi to mum on whatsapp", "send hi to mum on whatsapp")
         self.assertIsNone(siri.PENDING["plan"])
 

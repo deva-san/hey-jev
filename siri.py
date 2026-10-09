@@ -263,7 +263,9 @@ def route(text, kind, open_mic=None, strict=False):
 # a question, or an app or site. The rest of what's said in the room ("Okay, so it is gonna rain later", "pass the
 # salt", once plain() has taken "can you" off) is let go on this PC, and the model decides on the rest (COLD_NOTE).
 # The 7 October log let these go as room talk: "Shut down the computer", "Download and install VLC", "Okay, copy
-# that link", "Clear notification". The two lines from "shut ?down" are for those
+# that link", "Clear notification". The two lines from "shut ?down" are for those. The 8 October log let 5 more go,
+# among them "Select smile", "Nightlight" and "Opennoted", an "open ..." run together (OPEN_GLUED, not "opened")
+OPEN_GLUED = r"open(?!(?:ed|er|ers|ing|ings|ly|ness|s)\b)[a-z]{3,}"
 ASKING = (r"open|close|clone|quit|exit|play|pause|stop|resume|search|google|look up|find|check|scroll|turn|start|"
           r"launch|show|type|write|tell me|remind|remember|research|read|click|go to|go back|forward|refresh|reload|"
           r"run|do that|command|terminal|powershell|task|schedule|approve|cancel|every|daily|weekly|"
@@ -271,6 +273,7 @@ ASKING = (r"open|close|clone|quit|exit|play|pause|stop|resume|search|google|look
           r"watch|song|music|video|full ?screen|dark mode|light mode|minimi[sz]e|summari[sz]e|transcrib\w*|dictat\w*|"
           r"shut ?down|restart|reboot|install|uninstall|download|update|upgrade|copy|paste|undo|redo|maximi[sz]e|"
           r"screenshot|notifications?|clear (?:it|that|this|all|everything|the|my)|online|"
+          r"select|emoji|night ?light|bluetooth|brightness|" + OPEN_GLUED + "|"
           r"what|what's|whats|who|who's|how|where|when|why|which|weather|news|battery|ram|cpu|storage|drive|internet|"
           r"wi-?fi|screen|window|page")
 _asking = [None]
@@ -2018,6 +2021,15 @@ ASKS_FOR = {"type": EDIT_WORDS, "keys": EDIT_WORDS, "close": re.compile(r"\b(?:c
             "minimise": re.compile(r"\b(?:minimi[sz]e|hide)", re.I), "lock": re.compile(r"\block", re.I),
             "sleep": re.compile(r"\bsleep", re.I),
             "send_screenshot": re.compile(r"\b(?:screen ?shot|screen|snap|picture|photo)", re.I)}
+# A task in an app the words ask for in so many words, after plain(): "Turn on night light", "Click chat messages",
+# "Select smile emoji". On 8 October 7 of the 17 "Should I look at your screen?" or "Should I ...?" asks were for
+# requests as plain as these. Room talk the model took for a task doesn't start like this, so it's still asked about.
+# Only a control's name after it, up to 4 words, not two things ("select all and delete it") nor what a video on the
+# speakers says ("click the link in the description", "click the subscribe button"): that's still asked about
+ASKED_TASK = re.compile(r"(?:click|double click|right click|tap|select|choose|toggle|tick|untick|uncheck|"
+                        r"turn (?:on|off)|switch (?:on|off)) "
+                        r"(?!.*\b(?:and|then|subscribe|like|bell|link|description|below|comments?|channel)\b)"
+                        r"[\w'.-]+(?: [\w'.-]+){0,3}|(?:turn|switch) (?:[\w'-]+ ){1,3}(?:on|off)")
 # After reading the web or messages, only these go ahead without a yes, whatever the words: they show, play or look
 # things up, or ask for themselves later (a message, an install, a command's approval). Words can't count there:
 # "look up how to make biryani" would let a page's typing through, "make" being an edit word, and nothing would stop
@@ -2502,6 +2514,11 @@ def learn_skill(step, agent=False):
     procs = procedure_skills()
     if name in procs and (action != "delete" or agent):
         raise RuntimeError("I learned that one by doing it, so I don't change it that way")
+    # nor does the review delete or write over a skill it didn't write itself (Hermes' created_by "agent"): one you
+    # taught her is yours, and a review told to fix "the skill it's about" after a plain "No" could have archived it.
+    # A fix to a line of it (patch) still goes in, and "forget what you just learned" undoes that
+    if agent and action != "patch" and skills.find_skill(name) and not skills.skill_usage.is_curator_managed(name):
+        raise RuntimeError("You taught me that one, so I don't change it on my own")
     taken, said = {t for words in procs.values() for t in words}, step.get("triggers") or []
     if action not in ("delete", "patch") and taken & {plain(str(t)) for t in (said if isinstance(said, list) else [said])}:
         raise RuntimeError("Those words already start something I learned by doing it")
@@ -2605,6 +2622,18 @@ Memory has """ + hermes_bits._MEMORY_ROUTING_BLOCK + hermes_bits._LESSON_LAYER_B
     "Do NOT capture, as a skill or as a fact" + hermes_bits._DO_NOT_CAPTURE_BLOCK
 CORRECTION = re.compile(r"(?:no|nope|not that|wrong|that's wrong|i said|i meant|actually|i told you|you got it wrong|"
                         r"not this|that's not)\b")
+# A no that only turns her down ("Send it?" "No.", "No, not now", "No, don't send it") doesn't correct her: each one
+# started a review at once, one more model call, told "They just corrected her: "No". Fix the fact or the skill it's
+# about first", which could rewrite a routine you taught her. After plain(), which takes "thanks" and "now" off the end.
+# A "don't" only turns her down for what she was about to do ("don't send it", "don't send the message", a bare
+# "don't"): "No, don't do that again" and "No, don't call me sir" correct her, and any 3 words after it took those for
+# a decline too. Only "it" or one thing ("the email") may follow her action, so "don't do it like that" corrects too
+DECLINE = re.compile(r"(?:no|nope|nah|not)(?: (?:no|nope|nah|not(?: now| yet)?|thanks|thank you|leave it|"
+                     r"forget (?:it|about it)|never ?mind|cancel(?: it| that)?|stop|wait|hold on|it's (?:fine|ok|okay)|"
+                     r"that's (?:fine|ok|okay|all)|i'm (?:good|fine|ok|okay)|(?:don't|dont|do not)(?: (?:bother|worry)"
+                     r"(?: about it)?| (?:send|do|open|close|install|delete|buy|pay|run|play|type|save|post|reply|"
+                     r"call|text|email|share|download|remove|shut ?down|restart)(?: (?:it|that|this|them|anything)|"
+                     r" (?:the|a|an|my|any) [\w'.-]+)?(?: yet)?)?))*")
 _learning = {"turns": 0, "last": 0.0, "lock": threading.Lock(), "overheard": collections.deque(maxlen=20)}
 
 
@@ -2622,7 +2651,7 @@ def learn_later(words, steps, failed, gate=False):
     if any(s.get("do") in ("procedure", "agent_resume") or s.get("learned") for s in steps):
         return
     _learning["turns"] += 1
-    corrected = bool(CORRECTION.match(plain(words))) and gate != "cold"
+    corrected = bool(CORRECTION.match(plain(words))) and not DECLINE.fullmatch(plain(words)) and gate != "cold"
     worth = corrected or failed or len(steps) >= 3 or \
         any(s.get("do") == "skill" for s in steps) or _learning["turns"] >= 6
     # a correction is looked at straight away, so she has it right the next time you ask, a minute later or not
@@ -3190,7 +3219,8 @@ def needs_asking(steps, text, read=False):
     messages, every step outside READ_SAFE asks, whatever the words. A yes runs the whole plan, so with a shutdown or
     restart in it that's the one asked about, or a yes to "Should I type that?" would let it through unasked.
     read comes before the look in the last minute: a screen step a page or a message could have steered always asks.
-    A procedure always asks without her name: it's a whole task in an app."""
+    A procedure, a whole task in an app, asks without her name too. Neither does for words that ask for the task in
+    so many words (ASKED_TASK): "Turn on night light", "Select smile emoji"."""
     t = plain(text)
     for s in steps:
         do = s["do"]
@@ -3198,6 +3228,8 @@ def needs_asking(steps, text, read=False):
             ask = False
         elif read:
             ask = do not in READ_SAFE
+        elif do in ("screen", "procedure") and ASKED_TASK.fullmatch(t):
+            ask = False
         elif do == "screen":
             ask = time.time() - LAST_SCREEN[0] > 60
         elif do == "procedure":
@@ -4828,9 +4860,8 @@ CHECK_BELOW = 0.7  # with her name, below this the model is told the words may b
 # Below CHECK_BELOW, said to her (her name, right Alt, or a follow-up that sounds like a request), she asks "Did you
 # say: ...?" before doing anything, and a yes does what she heard: speech-to-text gets words wrong (asked for on 8
 # October: say the message back first). Talk around the room she lets go quietly, as before; and the words she acts
-# on show above the popup every time ("Heard", see assistant_ui). named: whether they were said to her by name
-# (agent.NAMED), which the yes often isn't, as for PENDING: a task asked about that way was never learned
-HEARD = {"words": None, "until": 0.0, "named": False}
+# on show above the popup every time ("Heard", see assistant_ui)
+HEARD = {"words": None, "until": 0.0}
 SLIPS = re.compile(r"\b(" + "|".join(sorted((re.escape(k) for k in fast_intent.COMMON_SLIPS), key=len, reverse=True))
                    + r")\b", re.I)
 
@@ -4843,6 +4874,36 @@ def heard_as(words):
 COMMAND = re.compile(r"\b(?:open|close|quit|play|pause|stop|resume|search|google|scroll|turn|make|set|start|launch|"
                      r"show|type|write|volume|louder|quieter|mute|full ?screen|next|skip|previous|remind|timer|lock)\b",
                      re.I)
+# and what the decider's "sure it isn't for her" never lets go before the model (act_on): those words, or an app or a
+# site named. Of the 18 times it was sure on 8 October, the 2 it got wrong were "A turn of nightlight" and "... check
+# for Realme P3 in stock". The rest of ASKING's things to do count too, and sending ("Shut down the computer", "Okay,
+# copy that link", "Send a message to Bunty"), with what she's asked about ("what's the weather tomorrow", "what time
+# is it"): the decider being on by default would have let those go with no model call. Its question words only count
+# right after her answer (ASKS_ABOUT), where "how about tomorrow" is to her: said cold, most are room talk
+DOING = (r"check|find|look up|tell me|night ?light|select|click|" + OPEN_GLUED + "|"
+         r"shut ?down|restart|reboot|install|uninstall|download|update|upgrade|copy|paste|undo|redo|screenshot|"
+         r"maximi[sz]e|minimi[sz]e|summari[sz]e|transcrib\w*|dictat\w*|notifications?|"
+         r"clear (?:it|that|this|all|everything|the|my)|send|message|email|e-mail|call|reply|delete|remove|research|"
+         r"alarm|exit|unmute|brightness|bluetooth|wi-?fi|dark mode|light mode|what time|weather|news|battery|cpu|ram|"
+         r"storage")
+ASKS_ABOUT = re.compile(r"\b(?:what|what's|whats|who|who's|how|where|when|why|which)\b")
+# and the rest of ASKING's things to do when they start what's said, with "what's the time": on by default the decider
+# could let "Go back", "Refresh the page", "Read my messages" and "Cancel that" go with no model call. Only first,
+# where an order goes once plain() has taken "okay" and "hey" off: "we should go back home" stays for it to judge
+LEADS = re.compile(r"^(?:go (?:back|forward|to)|forward|refresh|reload|read|remember|run|cancel|approve|switch|clone|"
+                   r"schedule|softer|new (?:term|tap|tab)|do that)\b|\bwhat'?s the time\b")
+_doing = [None]
+
+
+def asks_something(text, gate=None):
+    """True if words said without her name ask her to do something or about something she knows, or name an app or a
+    site; with gate True (right after her answer) any question too."""
+    t = plain(str(text))
+    if _doing[0] is None:
+        names = sorted({*APP_LOOKUP, *SITES}, key=len, reverse=True)
+        _doing[0] = re.compile(rf"\b(?:{DOING}|{'|'.join(map(re.escape, names))})\b", re.I)
+    return bool(COMMAND.search(t) or _doing[0].search(t) or LEADS.search(t) or
+                (gate is True and ASKS_ABOUT.search(t)))
 
 
 # What you say while she talks, or as she ends, is heard (Recorder.keeps): Windows' speech mode takes all of her
@@ -4859,8 +4920,9 @@ STOPS = ("stop", "stop it", "stop talking", "ok stop", "okay stop", "wait", "hol
 CARRY_ON = re.compile(r"(?:ok|okay|yeah|yes|no|now|also|actually|instead|what about|how about|hey|jev) \w")
 NODS = {"ok", "okay", "mm", "mhm", "hmm", "right", "uh huh", "alright", "all right"}  # said along as she talks
 # Talking over her: a request, her name or "stop" stops her there and then, and the rest of her turn isn't said; it's
-# then done as soon as her turn is over (act_on). Other words over her turn her down while they last (LiveKit pauses
-# for its 2 s false-interruption timeout; turned down she still finishes if it was the TV)
+# then done as soon as her turn is over (act_on), as said to her (said_to_her). Other words over her turn her down
+# while they last (LiveKit pauses for its 2 s false-interruption timeout; turned down she still finishes if it was the
+# TV)
 DUCK, DUCK_FOR = 0.3, 2.0  # her volume while you talk over her, and for how long after your last words
 CUT_SURE = 0.7  # speech-to-text at least this sure of a request over her, to stop her for it
 BARGE_WORDS = 2  # words a request over her needs (Pipecat's MinWords while the bot speaks)
@@ -4899,14 +4961,21 @@ class Her:
         self.stop = threading.Event()  # she stops: every player looks between SLICE pieces
         self.turn, self.until, self.level, self.asking = 0, 0.0, 1.0, False
         self.cut_upto = -1  # the last turn she was stopped in, see stopper
+        # the words that stopped her, kept past the end of her turn: that phrase was said to her, and is done once her
+        # turn is over. Placed over her it was held to the strict rule as if a TV had said it, so "open Chrome"
+        # stopped her mid-sentence and then nothing happened (said_to_her)
+        self.cut_by = ""
 
     def begin(self):
         """A turn of hers starts: she may talk again, at full volume."""
+        self.end()
+        self.cut_by = ""
+
+    def end(self):
+        """And once it's over: a verdict that comes late stops nothing, a voice preview included."""
         self.turn += 1
         self.stop.clear()
         self.until, self.asking = 0.0, False
-
-    end = begin  # and once it's over: a verdict that comes late stops nothing, a voice preview included
 
     def gain(self):
         return DUCK if time.time() < self.until else 1.0
@@ -4924,12 +4993,14 @@ class Her:
         turn = self.turn
         return lambda: self.stop.is_set() or turn <= self.cut_upto
 
-    def cut(self, why, turn=None):
-        """Stops her, if this is still the turn it was meant for. True if she was stopped."""
+    def cut(self, why, turn=None, words=""):
+        """Stops her, if this is still the turn it was meant for. True if she was stopped. words: what was said over
+        her that stopped her (overhear)."""
         if (turn is not None and turn != self.turn) or self.stop.is_set():
             return False
         self.cut_upto = self.turn
         self.stop.set()
+        self.cut_by = words_of(words)
         agent.STOP.set()  # a task she's doing in an app stops too, and doesn't act again (agent.stopped)
         voice_bits.mark_speech_interrupted()  # the model is told, next turn (think)
         print(f"\n  (stopped her: {why})")
@@ -5013,6 +5084,20 @@ def stop_said(t):
     return voice_bits.is_voice_stop_phrase(words_of(found[1] if found else t), STOPS)
 
 
+def said_to_her(text):
+    """True if words said over her stopped her this turn (Her.cut_by) and text, heard whole once she's done, is a
+    request that would: one that stops her is one to do. Once only. Her verdict on it is compared, and the words
+    nearly, as the listener over her may have split or written them a little differently: any phrase that would stop
+    her let a TV's "play the next episode", held back while she asked, go first and take the place of your "stop"."""
+    if not HER.cut_by or barge(text, True, getattr(text, "sure", 1.0)) != "cut":
+        return False
+    said, cut = LEAD.sub("", words_of(text)), LEAD.sub("", HER.cut_by)
+    if not (said.startswith(cut) or cut.startswith(said) or difflib.SequenceMatcher(None, said, cut).ratio() >= 0.8):
+        return False
+    HER.cut_by = ""
+    return True
+
+
 def answering():
     """True if she's waiting on an answer from you: a question asked out loud a moment ago."""
     return (PENDING["plan"] is not None and time.time() < PENDING["until"] and PENDING["origin"] == "voice") \
@@ -5080,11 +5165,10 @@ def tab_not_browser(plan, words):
     return {**plan, "say": confirm_question(risky), "confirm": mended} if risky else mended
 
 
-PENDING = {"plan": None, "until": 0.0, "soon": 0.0, "origin": "voice", "id": "", "words": "", "named": False}  # a
-# plan waiting on a yes or no, see think. soon: see handle. origin: where it was asked, voice or phone: a yes at the PC
-# can't answer a question asked on the phone, or the other way round. id: which question, for the phone's buttons.
-# words: what you said that it's for, so the yes turn's agent.SAID is still that and not "yes"; named: and whether
-# that was said to her by name (agent.NAMED), as a yes without it often is
+PENDING = {"plan": None, "until": 0.0, "soon": 0.0, "origin": "voice", "id": "", "words": ""}  # a plan waiting on a
+# yes or no, see think. soon: see handle. origin: where it was asked, voice or phone: a yes at the PC can't answer a
+# question asked on the phone, or the other way round. id: which question, for the phone's buttons. words: what you
+# said that it's for, so the yes turn's agent.SAID is still that and not "yes"
 REPLY_TO = contextvars.ContextVar("reply_to", default=None)  # a turn from your phone: her lines go here, not out loud
 PHONE_CHAT = contextvars.ContextVar("phone_chat", default=None)  # and the chat it came from, for a task's result
 PHONE = {"send": None, "ask": None, "photo": None}  # set by run_voice_assistant once Telegram is there: send(chat,
@@ -5210,20 +5294,22 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     text, words = fix_names(text), fix_names(text if words is None else words)
     text, words = fix_vocab(text), fix_vocab(words)  # their dictionary, as for dictation
     MEMORY.reset_consolidation_failures()
-    asked, was_named = (HEARD["words"], HEARD.get("named", False)) \
-        if time.time() < HEARD["until"] and origin() == "voice" else (None, False)
-    HEARD.update(words=None, until=0.0, named=False)
+    asked = HEARD["words"] if time.time() < HEARD["until"] and origin() == "voice" else None
+    HEARD.update(words=None, until=0.0)
     named = not gate
     if asked and YES.fullmatch(plain(words)):  # "Did you say: open Notepad?" "Yes": what she heard, as sure as can be
         print(f"  (yes, they said {asked!r})")
         text = words = speech.heard(str(asked), 1.0)
         sure = 1.0
-        named = named or was_named  # said to her by name when she asked; the yes often isn't
+        named = True  # a yes to "Did you say ...?": asked of her as plainly as with her name
     elif asked and NO.fullmatch(plain(words)):
         say("Okay, say it again.", notify)
         return True
     agent.SAID.set(str(words or text))  # the words a task in an app may take an address or a site from, never "yes"
-    agent.NAMED.set(named)  # and whether they were said to her by name, which learning a task from them needs
+    # and whether they were plainly asked of her, which learning a task from them needs: by name, or a task asked for in
+    # so many words (ASKED_TASK), which is done without "Should I ...?" first. Only her name counted, and on this PC
+    # she's rarely called by it: night light, turned on and off on 8 October, was never learned
+    agent.NAMED.set(named or bool(ASKED_TASK.fullmatch(plain(words))))
     note = None  # shown in the window instead of her line, when something needs fixing
     # kept through talk she lets go ("Hmm", a mumble, someone else), so the yes can still follow; gone once she acts
     pending = PENDING["plan"] if time.time() < PENDING["until"] and PENDING["origin"] == origin() and \
@@ -5245,7 +5331,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         print("  (yes, doing what she asked about)")
         plan = pending
         agent.SAID.set(str(PENDING.get("words") or words))  # what you asked for, which "yes" is the answer about
-        agent.NAMED.set(bool(PENDING.get("named")) or not gate)
+        agent.NAMED.set(True)  # her question, answered yes: asked of her as plainly as with her name
         if any(s.get("do") in POWER_STEPS for s in plan.get("steps") or []):
             POWER_OK["until"] = time.time() + 20  # this yes, and only this one, lets the shutdown or restart run
         if any(s.get("do") in ASKS_YES for s in plan.get("steps") or []):
@@ -5277,7 +5363,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     elif sure < CHECK_BELOW and origin() == "voice" and not TAPPED.get() and \
             (not gate or (gate is True and could_be_request(words))) and not YES.fullmatch(plain(words)):
         # unsure of the words, and said to her: what she heard, back to you before she does anything
-        HEARD.update(words=str(words), until=time.time() + FOLLOW_UP + 8, named=not gate)
+        HEARD.update(words=str(words), until=time.time() + FOLLOW_UP + 8)
         print(f"  (only {sure:.0%} sure of the words: asking)")
         emit(notify, "Heard", heard_as(words))
         plan = make_plan(say=f"Did you say: {heard_as(words)}?")
@@ -5398,14 +5484,13 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
                  for s in plan["confirm"].get("steps") or [] if s.get("do") in ("message_send", "install_run",
                                                                                 "contact_found", "agent_resume")]
         soon = time.time() + (PHONE_WAITS if origin() == "phone" else FOLLOW_UP + 8)
-        # the words and name a yes is for: a held step's from its run (agent.take_ask, built by code), any other plan's
-        # this turn's. Never a model's plan's own "words" or "named", which parse_plan leaves in (a review's "words" is
-        # its dictionary): a page that steered the model made its own address "your words", and an unnamed turn named
+        # the words a yes is for: a held step's from its run (agent.take_ask, built by code), any other plan's this
+        # turn's. Never a model's plan's own "words", which parse_plan leaves in (a review's "words" is its dictionary):
+        # a page that steered the model made its own address "your words"
         own = any(s.get("do") == "agent_resume" for s in plan["confirm"].get("steps") or [])
         PENDING.update(plan=plan["confirm"], soon=soon, until=max([soon] + waits), origin=origin(),
                        id=hashlib.sha1(os.urandom(16)).hexdigest()[:12],  # an old button can't match a new question
-                       words=str((own and plan["confirm"].get("words")) or agent.SAID.get() or words or text),
-                       named=bool(plan["confirm"].get("named")) if own else agent.NAMED.get())
+                       words=str((own and plan["confirm"].get("words")) or agent.SAID.get() or words or text))
     # what she said, also when it came from the screen: the next turn's "play the third one" needs what she saw.
     # What a procedure writes is kept as its length only (agent.redact). With a task in an app, the planner's line
     # was never said (agent.intro), so it isn't kept as hers either
@@ -6034,7 +6119,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         if zone == "thinking" and kind == "follow_up":
             kind = "other"  # said while she thought: not carrying on from her answer, which hadn't come
         elif zone in ("over", "gap") and kind != "armed":
-            kind, strict = "follow_up", zone == "over" or her_strict
+            # what stopped her was said to her: not held to the strict rule, which let it go (said_to_her)
+            kind, strict = "follow_up", (zone == "over" or her_strict) and not said_to_her(text)
         elif zone in ("after", "before") and kind == "follow_up" and begun is not None and window_from[0] is not None \
                 and begun >= window_from[0]:
             strict = window_strict[0]
@@ -6095,7 +6181,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             # written down as the decider was asked: str(gate) wrote "True" for a follow-up, which training read as
             # no kind at all
             asked_as = "follow_up" if what[2] is True else "cold"
-            if judged and judged[1] == "no" and decider.mode() == "on":
+            if judged and judged[1] == "no" and decider.mode() == "on" and not asks_something(what[1], what[2]):
                 print(f"  (the decider is sure that wasn't for her, {judged[0]:.2f}: staying quiet)")
                 decider.log({"when": round(time.time()), "said": str(what[1]), "kind": asked_as,
                              "for_me": round(judged[0], 3), "verdict": "no", "mode": "on", "result": "let go"})
@@ -6201,7 +6287,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         or "stop" stops her (HER.cut), other words turn her down a moment. It never acts on them: her turn ends,
         and the listening loop hears them whole, as said over her (act_on). Speech-to-text runs only while someone
         talks over her. And while she does a task in an app (agent.RUNNING), when only "stop" or her name stop her,
-        and the task with her: a TV's "open the door" doesn't."""
+        and the task with her: a TV's "open the door" doesn't. With Parakeet, which writes once you stop, only what's
+        finished is judged: no turning her down meanwhile."""
         turn = [None]  # her turn when the phrase over her began
 
         def judge(words, final, sure=1.0):
@@ -6209,7 +6296,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 return
             verdict = barge(words, final, sure, HER.asking or (agent.RUNNING.is_set() and not rec._soft))
             if verdict == "cut":
-                HER.cut(repr(str(words)), turn[0])
+                HER.cut(repr(str(words)), turn[0], words)
             elif verdict == "duck" and turn[0] == HER.turn:
                 HER.duck()
             elif final:
@@ -6759,7 +6846,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     threading.Thread(target=keep_warm, daemon=True).start()
     watch_return(lambda since: welcome(True, since))
     threading.Thread(target=listen_loop, daemon=True).start()
-    if ears.live:  # words as you talk, to judge them while she's still talking, or doing a task in an app
+    # what you say over her, judged while she's still talking or doing a task in an app: as you talk with Nemotron,
+    # once you stop with Parakeet (about 0.3 s a phrase). Started for Nemotron only, "stop" said to a task in an app
+    # went unheard with Parakeet until the task was over. Not Whisper, a second or two a phrase on this CPU
+    if ears.engine in ("nemotron", "parakeet"):
         threading.Thread(target=overhear, daemon=True).start()
     set_mode(mode)
     if not settings.get("met"):  # new, or her memory was just started fresh: she introduces herself instead

@@ -144,7 +144,9 @@ STOP = threading.Event()  # set by HER.cut and a phone "stop", kept till the nex
 RUNNING = threading.Event()  # set while a task in an app runs, so what the mic hears is listened to for "stop"
 _running = [0, threading.Lock()]  # how many runs are going (one late from the last turn, one now), for RUNNING
 SAID = contextvars.ContextVar("said", default="")  # this turn's words as you said them, set by siri.handle
-NAMED = contextvars.ContextVar("named", default=False)  # her name was said for them, or right Alt or the phone
+# and whether they were plainly asked of her: her name, right Alt or the phone, a yes to her question, or a task asked
+# for in so many words (siri.handle)
+NAMED = contextvars.ContextVar("named", default=False)
 RUN = contextvars.ContextVar("run", default=None)  # the run this thread's steps belong to, for see() and act()
 TURN = contextvars.ContextVar("turn", default=None)  # the Turn of the plan that's running, set by siri.run_plan
 HELD, ASK, CURRENT = {}, [None], [None]  # the step waiting on your yes; her question about it; the latest run
@@ -175,9 +177,9 @@ class Turn:
 
 class Run:
     """One go at a task, bound to its turn. over: the turn's over, it can't act any more. approved: the one step your
-    yes was for. read: the turn read web pages, messages or pictures, which might be steering it. named: her name
-    was said for it, which learning from it needs. alone: the plan was just it and the steps that opened its app, so
-    your words asked for nothing else, which starting what's learned from them needs (match).
+    yes was for. read: the turn read web pages, messages or pictures, which might be steering it. named: it was
+    plainly asked of her (NAMED), which learning from it needs. alone: the plan was just it and the steps that opened
+    its app, so your words asked for nothing else, which starting what's learned from them needs (match).
     A live run (run) also has the steps of the plan that opened its app (before), the procedure it's mending from
     step base_i on (base), what she did as a procedure keeps it (rec) and in a few words for the model (notes)."""
 
@@ -294,7 +296,7 @@ def hold(r, i, question, verb, target=None, step=None, no="", focus=False, sendi
                     until=time.time() + (host.PHONE_WAITS if host.origin() == "phone" else HOLD_FOR))
         short = f"Should I {verb.split('|')[0]} it?"  # kept in her history in place of the read-back
         ASK[0] = {"steps": [{"do": "agent_resume", "hold": HELD["id"], "verb": verb}], "say": "", "words": r.words,
-                  "named": r.named, "run": r.id, "question": question, "short": short}
+                  "run": r.id, "question": question, "short": short}
     r.outcome = "held"
     return question
 
@@ -1328,6 +1330,31 @@ def _find_step(s):
     return None, "it isn't on screen", False
 
 
+# A button named for what it does next: pressed, it's named the other way ("Turn on now", then "Turn off now")
+OPPOSITE = {"on": "off", "off": "on", "show": "hide", "hide": "show", "start": "stop", "stop": "start",
+            "enable": "disable", "disable": "enable", "connect": "disconnect", "disconnect": "connect",
+            "mute": "unmute", "unmute": "mute", "lock": "unlock", "unlock": "lock", "pause": "play", "play": "pause"}
+
+
+def done_already(r, i):
+    """What she says if the control step i of r's procedure presses isn't there because it was pressed already, or
+    None: the procedure's last step checks for the same control named the other way (OPPOSITE), and that's on screen
+    now. "Turn on now" in Settings is "Turn off now" once night light's on, so "turn on night light" said again
+    stopped there, counted as a failure and called the model with a screenshot to mend it, and after 3 such the
+    procedure was put away. Only that control: a check for any other ("Compose" in Gmail, always there) says nothing
+    about why the one to press is gone. Not for one with slots, whose check is about what it wrote this time."""
+    steps = r.proc["steps"]
+    last, s = steps[-1], steps[i]
+    pressed, shown = (re.findall(r"[a-z]+", win.clean_name(x).lower()) for x in (s.get("name"), last.get("has")))
+    flipped = [(a, b) for a, b in zip(pressed, shown) if a != b]
+    if r.proc.get("slots") or last.get("do") != "expect" or last.get("gone") or i >= len(steps) - 1 or \
+            len(pressed) != len(shown) or len(flipped) != 1 or OPPOSITE.get(flipped[0][0]) != flipped[0][1] or \
+            expect(last, r, wait=0) is not True:
+        return None
+    print(f"  {label(s)} isn't there, it says {last['has']!r}: done already")
+    return f"It's already {flipped[0][0]}." if flipped[0][0] in ("on", "off") else "That's done already."
+
+
 def replay(r, start=0, notify=None):
     """r's procedure from step start: each step's place checked first (not_in_place, expect), its control found again
     by name and role, passed through the gate on what's live, done holding ACT, and what it typed read back from the
@@ -1388,7 +1415,8 @@ def replay(r, start=0, notify=None):
         if do == "ui":
             el, why, two = _find_step(s)
             if el is None:
-                return failed(r, i, s, why, env=two, notify=notify)
+                line = None if two else done_already(r, i)
+                return finish(r, "done", line) if line else failed(r, i, s, why, env=two, notify=notify)
             try:
                 live = win.ui_info(el)
             except Exception as exc:  # gone, or not answering, since it was found: a page that drew itself again
@@ -2119,16 +2147,17 @@ KIND_SAY = {"email": "the address they say", "said": "their own words", "write":
 
 
 def unlearnable(r):
-    """Why run r isn't one to learn from, or "": the screen tried to give her orders (tainted); learning is off; her
-    name wasn't said; it was mostly done by sight, too short to be worth it, or too long to keep; your words were a
-    yes or a no, not the task; or it was about what's on the screen ("the second video"), which changes."""
+    """Why run r isn't one to learn from, or "": the screen tried to give her orders (tainted); learning is off; it
+    wasn't plainly asked of her (named); it was mostly done by sight, too short to be worth it, or too long to keep;
+    your words were a yes or a no, not the task; or it was about what's on the screen ("the second video"), which
+    changes."""
     steps = list((r.base or {}).get("steps", [])[:r.base_i]) + r.before + r.rec
     if r.tainted:
         return "something on the screen tried to give her orders"
     if not host.settings.get("learning"):
         return "learning is off in Settings"
     if not r.named:
-        return "her name wasn't said for it"
+        return "it wasn't plainly asked of her, by name, with a yes or in so many words"
     if sum(s.get("do") == "look" for s in steps) > 2:
         return "too much of it was done by sight"
     if sum(s.get("do") in ("ui", "keys", "open", "website") for s in steps) < 2:

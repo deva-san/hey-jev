@@ -121,12 +121,12 @@ class InHerEars(unittest.TestCase):
         self.addCleanup(a.close)
         return a
 
-    def run_cold(self, a, words, setting, kind="other"):
+    def run_cold(self, a, words, setting, head=trained, kind="other"):
         handled, logged = [], []
         text = speech.heard(words)
         with mock.patch.object(siri, "handle", lambda text, *args, **kw: handled.append(str(text)) or False), \
                 mock.patch.dict(siri.settings._load(), {"decider": setting, "no_name": True, "voice_id": "off"}), \
-                mock.patch.object(decider, "get", lambda: trained()), \
+                mock.patch.object(decider, "get", head), \
                 mock.patch.object(decider, "available", lambda: True), \
                 mock.patch.object(decider, "log", logged.append):
             a.var("act_on")(text, kind, 100)
@@ -139,6 +139,38 @@ class InHerEars(unittest.TestCase):
         self.assertEqual(handled, ["what time does the match start, pass the salt"])  # not sure: the model decides
         self.assertEqual(handled2, [])
         self.assertEqual(logged[0]["verdict"], "yes")  # sure it's for her: the model still decides
+
+    def test_on_by_default_it_never_lets_go_words_that_ask_for_something(self):
+        """Left in shadow mode, it changed nothing while she spoke or acted on 22 of 88 room-talk turns on 8 October,
+        and its "sure it isn't for her" was right 16 times in 18. The 2 it got wrong asked for something: let go,
+        the model would never have seen them. Words that ask for something, or name an app or a site, go on."""
+        with mock.patch.dict(siri.settings._load(), clear=True):
+            self.assertEqual(decider.mode(), "on")
+        a = self.assistant()
+        for words in ("A turn of nightlight", "check for Realme P3 in stock", "and Notepad, I said", "Click chat messages"):
+            handled, logged = self.run_cold(a, words, "on")
+            self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
+
+    def test_nor_commands_or_questions_it_is_sure_of(self):
+        """On by default, its "sure it isn't for her" was only kept from the two kinds of words it got wrong on 8
+        October: "Shut down the computer", "what time is it", or "how about tomorrow" right after her answer, would
+        have been let go with no model call."""
+        class SureNo:
+            def for_me(self, words, kind):
+                return 0.01, "no"
+        a = self.assistant()
+        for words in ("Shut down the computer", "Okay, copy that link", "Take a screenshot", "what time is it",
+                      "What's the weather tomorrow", "Go back", "Refresh the page", "Read my messages", "Cancel that",
+                      "Hey, what's the time", "Run it", "Approve it", "Switch to the other window"):
+            handled, logged = self.run_cold(a, words, "on", SureNo)
+            self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
+        self.assertEqual(self.run_cold(a, "pass the salt please", "on", SureNo)[0], [])  # room talk still goes
+        self.assertTrue(siri.asks_something("how about tomorrow", True))  # right after her answer: to her
+        self.assertTrue(siri.asks_something("Send a message to Bunty saying I'm late", True))
+        self.assertFalse(siri.asks_something("what are you doing tonight", "cold"))  # said cold: room talk
+        # her things to do only count first: said in the middle they're as often room talk, for it to judge
+        for words in ("we should go back home", "I read that in the paper", "they cancelled it, run along"):
+            self.assertFalse(siri.asks_something(words, "cold"), words)
 
     def test_in_shadow_it_only_writes_down_what_it_would_have_done(self):
         a = self.assistant()

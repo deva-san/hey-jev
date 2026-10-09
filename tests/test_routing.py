@@ -264,9 +264,17 @@ class Asking(Routing):
 
     def test_room_talk_still_isnt(self):
         for words in ("Are you coming for dinner?", "pass me the water", "Okay, so it is gonna rain later",
-                      "Is that clear?", "Thank you very much.", "It installs everything and gets it running for you."):
+                      "Is that clear?", "Thank you very much.", "It installs everything and gets it running for you.",
+                      "I opened the door for him", "The shop's opening late", "Openly, I don't mind"):
             with self.subTest(words=words):
                 self.assertFalse(siri.could_be_request(words))
+
+    def test_commands_let_go_on_8_october(self):
+        """5 clear commands were let go as room talk on 8 October, the model never seeing them: among them "Select
+        smile", "Opennoted" (an "open ..." run together) and "Nightlight"."""
+        for words in ("Select smile.", "Opennoted.", "Nightlight.", "Night light off", "Bluetooth", "Opennotepad"):
+            with self.subTest(words=words):
+                self.assertTrue(siri.could_be_request(words))
 
 
 class Power(Routing):
