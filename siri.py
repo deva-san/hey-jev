@@ -4763,9 +4763,13 @@ def stop_said(t):
 
 def said_to_her(text):
     """True if words said over her stopped her this turn (Her.cut_by) and text, heard whole once she's done, is a
-    request that would: one that stops her is one to do. Her verdict on it is what's compared, not the words, which
-    the listener over her may have split or written a little differently. Once only."""
+    request that would: one that stops her is one to do. Once only. Her verdict on it is compared, and the words
+    nearly, as the listener over her may have split or written them a little differently: any phrase that would stop
+    her let a TV's "play the next episode", held back while she asked, go first and take the place of your "stop"."""
     if not HER.cut_by or barge(text, True, getattr(text, "sure", 1.0)) != "cut":
+        return False
+    said, cut = LEAD.sub("", words_of(text)), LEAD.sub("", HER.cut_by)
+    if not (said.startswith(cut) or cut.startswith(said) or difflib.SequenceMatcher(None, said, cut).ratio() >= 0.8):
         return False
     HER.cut_by = ""
     return True

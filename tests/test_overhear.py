@@ -32,6 +32,18 @@ class Verdicts(unittest.TestCase):
                       "Wait, someone's at the door"):
             self.assertIsNone(siri.barge(words, True), words)
 
+    def test_only_the_words_that_stopped_her_are_taken_as_said_to_her(self):
+        """She asked "Should I turn on night light?", a TV's "play the next episode" didn't stop her (she was asking),
+        your "stop" did. Any phrase that would stop her counted as the one that had: the TV's, heard first once she was
+        done, was taken as said to her, and your "stop" as overheard."""
+        self.addCleanup(setattr, siri.HER, "cut_by", "")
+        siri.HER.cut_by = "stop"
+        self.assertFalse(siri.said_to_her("play the next episode"))
+        self.assertEqual(siri.HER.cut_by, "stop")  # still there for the stop itself
+        self.assertTrue(siri.said_to_her("Stop."))
+        siri.HER.cut_by = "okay now open note pad"  # written a little differently over her
+        self.assertTrue(siri.said_to_her("open notepad"))
+
     def test_unsure_words_dont(self):
         self.assertIsNone(siri.barge("open notepad", True, sure=0.5))
 
