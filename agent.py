@@ -1849,9 +1849,10 @@ def do_one(r, s, obs, shot, finishing=None, at=-1):
             return False
         if os.path.basename(win.window_at(*point)).lower() in host.SHELLS:
             raise Refused("I don't click in command windows.")
-        # the screenshot is the whole screen: a window beside the one in front (a chat, your bank) or the taskbar is
-        # in it too, and the gate judged only the one in front. Its own menus, lists and dialogs are owned by it, so
-        # they pass; WhatsApp's Voice call beside Paint didn't
+        # the screenshot is cut to the window in front and what's open from it (vision.capture), but that box can
+        # still take in a window on top of it or between it and its dialog (a chat, your bank), and the gate judged
+        # only the one in front. Its own menus, lists and dialogs are owned by it, so they pass; WhatsApp's Voice call
+        # beside Paint didn't
         if win.owner_of(win.root_at(*point)) != win.owner_of(obs["hwnd"]):
             r.notes.append(f"didn't click {s.get('what') or 'there'}: that's outside the window in front")
             return False
