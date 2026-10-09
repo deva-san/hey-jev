@@ -1245,7 +1245,16 @@ def discard(ready):
         return False
     try:
         app, hwnd = ready.get("app"), ready.get("hwnd")
-        if ready.get("files"):
+        if ready.get("files"):  # only these files, in their chat: a send to Amma that ran out took out the photo
+            # you had attached to Ravi meanwhile, as every Remove attachment in the window was clicked
+            if not hwnd or not user32.IsWindow(hwnd):
+                return False
+            names = waiting(hwnd)[0]
+            if not names:
+                return True
+            to = compose_box(app, hwnd)[1] if APPS[app]["compose"] else ""
+            if (ready.get("to") and to != ready["to"]) or names != sorted(os.path.basename(p) for p in ready["files"]):
+                return False
             return discard_preview(app, hwnd)
         if not (in_front_of(ready["obj"]) if ready.get("other") else (hwnd and in_front(app, hwnd))):
             return False

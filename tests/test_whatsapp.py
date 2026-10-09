@@ -252,6 +252,23 @@ class Files(unittest.TestCase):
         self.assertTrue(self.m.discard(ready))
         self.assertEqual((self.waiting, self.sent), ([], []))
 
+    def test_a_no_or_running_out_takes_out_only_these_files_in_their_chat(self):
+        """'Send report.pdf to Amma' ran out while you attached holiday.jpg to Ravi: every Remove attachment in the
+        window was clicked, and your photo to Ravi went with it."""
+        ready = self.m.prepare_files("whatsapp", "amma", self.paths[:1])
+        self.assertEqual(ready["to"], "Amma")
+        self.waiting[:] = ["C:/x/holiday.jpg"]  # Ravi's chat now, your own photo waiting
+        with mock.patch.object(self.m, "compose_box", lambda app, hwnd: (None, "Ravi")):
+            self.assertFalse(self.m.discard(ready))
+        self.assertFalse(self.m.discard(ready))  # Amma's chat, but not what she put there
+        self.assertEqual(self.waiting, ["C:/x/holiday.jpg"])
+        self.waiting[:] = self.paths[:1]
+        with mock.patch.object(self.m, "compose_box", lambda app, hwnd: (None, "Ravi")):
+            self.assertFalse(self.m.discard(ready))
+        self.assertEqual(self.waiting, self.paths[:1])
+        self.waiting.clear()
+        self.assertTrue(self.m.discard(ready))  # nothing waiting: nothing to take out
+
     def test_if_whatsapp_took_other_files_nothing_is_sent_and_none_are_left(self):
         with mock.patch.object(self.m.win, "set_clipboard_files",
                                lambda paths: (self.clipboard.__setitem__(0, "files"),
