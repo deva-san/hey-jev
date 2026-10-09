@@ -16,10 +16,10 @@ import time
 
 # In checks\ since 8 Oct, see checks/listen.py: under a test runner, winplatform.own_data refuses her real folders,
 # and run by hand it works on a copy of her data unless it's given --real-data
-import sandbox  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from checks import sandbox  # noqa: E402
 
 sandbox.use()
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import history  # noqa: E402
 import siri  # noqa: E402
 import speech  # noqa: E402

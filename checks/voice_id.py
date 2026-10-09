@@ -16,11 +16,11 @@ import soundfile as sf
 
 # In checks\ since 8 Oct, see checks/listen.py: under a test runner, winplatform.own_data refuses her real folders,
 # and run by hand it works on a copy of her data unless it's given --real-data. sandbox.use() reads .env first.
-import sandbox  # noqa: E402
-
-sandbox.use()
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
+from checks import sandbox  # noqa: E402
+
+sandbox.use()
 import speech  # noqa: E402
 import voiceid  # noqa: E402
 

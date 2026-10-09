@@ -22,11 +22,11 @@ import soundfile as sf
 # before tests/support.py had moved %APPDATA%, and the test run wrote into her real data. Under a test runner without
 # support.py, winplatform.own_data now refuses her real folders on the first import below. Run by hand, a check works
 # on a copy of her data, unless it's given --real-data: sandbox.use() comes before anything of hers is imported.
-import sandbox  # noqa: E402
-
-sandbox.use()
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+from checks import sandbox  # noqa: E402
+
+sandbox.use()
 import settings  # noqa: E402
 import siri  # noqa: E402
 import speech  # noqa: E402

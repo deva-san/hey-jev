@@ -218,6 +218,16 @@ class HandChecks(unittest.TestCase):
                 self.assertEqual(saw["models"], models or os.path.join(real, "Local", "Hey Jev", "models"))  # real ones
                 self.assertFalse(os.path.exists(os.path.dirname(saw["data"])), "the copy is gone when it ends")
 
+    def test_a_check_imported_by_a_test_leaves_the_harness_as_it_is(self):
+        """tests/test_listening.py imports checks/listen.py for its pair(): its sandbox must not move this run's temp
+        folders, nor put a temp folder in place of her real ones in HEYJEV_TESTING."""
+        from checks import listen  # noqa: F401
+        from checks import sandbox
+        before = {k: os.environ.get(k) for k in ("HEYJEV_TESTING", "APPDATA", "LOCALAPPDATA", "HEYJEV_MODELS")}
+        self.assertIsNone(sandbox.use(["listen.py"]))
+        self.assertEqual({k: os.environ.get(k) for k in before}, before)
+        self.assertEqual(os.environ["HEYJEV_TESTING"], REAL)
+
     def test_only_real_data_lets_a_check_write_to_her_data(self):
         real, saw, _ = self.run_check("listen.py", "--real-data", "parakeet")
         self.assertEqual(saw["argv"], ["parakeet"])

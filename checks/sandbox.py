@@ -1,6 +1,7 @@
 """Where a hand check keeps what it writes. Each check calls this before it imports anything of hers:
 
-    import sandbox  # noqa: E402  (checks\\ is first on sys.path when a check is run)
+    sys.path.insert(0, ROOT)
+    from checks import sandbox  # noqa: E402  (checks\\ isn't a package, so unittest discovery never loads it)
     sandbox.use()
 
 A check runs her real code with the real models, and that code writes as it goes: a turn into her history, a line
@@ -26,13 +27,18 @@ DATABASES = ("history.db", "tasks.db")  # with SQLite's own side files
 
 def use(argv=None):
     """Point %APPDATA% and %LOCALAPPDATA% at a copy of her data, unless --real-data is in argv (sys.argv). The flag
-    is taken out of it either way, so the check's own arguments are as they were. Returns the copy, or None."""
+    is taken out of it either way, so the check's own arguments are as they were. Returns the copy, or None. With
+    HEYJEV_TESTING set her real folders are refused already: a unit test imported the check (tests/test_listening.py
+    does, for its pair()), and its harness's temp folders, and its guard, stay as they are."""
+    argv = sys.argv if argv is None else argv
+    real = FLAG in argv
+    while FLAG in argv:
+        argv.remove(FLAG)
+    if os.environ.get("HEYJEV_TESTING") is not None:
+        return None
     from dotenv import load_dotenv
     load_dotenv(os.path.join(ROOT, ".env"))  # first, so HEYJEV_MODELS there still wins over the default below
-    argv = sys.argv if argv is None else argv
-    if FLAG in argv:
-        while FLAG in argv:
-            argv.remove(FLAG)
+    if real:
         return None
     home = os.path.expanduser("~")
     roaming, local = os.environ.get("APPDATA") or home, os.environ.get("LOCALAPPDATA") or home
