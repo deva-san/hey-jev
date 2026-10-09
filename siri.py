@@ -2108,24 +2108,40 @@ class LiveSay:
     {"steps": [], "say": " there's nothing to do, so nothing to check before she talks, and "say" goes out a
     sentence at a time (SentenceChunker) as it comes, each sentence's voice made while the one before plays (Line).
     A reply in plain words is a plain answer too, up to any JSON or tag in it: Ling answered 18 of 89 questions that
-    way, and they waited for the whole reply. Without her name (gate), only a reply that is to her, {"to": "you", ...
-    or {"steps": [], ... or plain words, and never a sentence let_go would keep quiet about ("Say that again?").
+    way, and they waited for the whole reply. Each of its sentences waits for more words after it, so "Sure, I'll
+    send that to Mum now." isn't said when a plan follows it. Without her name (gate), only a reply that is to her,
+    {"to": "you", ... (COLD_NOTE asks for it first) or, for a follow-up (GATE_NOTE), {"steps": [], ..., never plain
+    words: "He is asking someone in the room why they are late." came before {"to": "others"} and was said over the
+    room. Nor a sentence let_go would keep quiet about ("Say that again?"). hold: True if she must stay quiet after all
+    (something plays that the mic hears), asked only once a reply looks like hers, so it isn't in the request's way.
     Of several tries streaming at once (ask_model), the first to get that far is the one she says."""
     START = re.compile(r'\s*(?:```(?:json)?\s*)?\{\s*(?:"to"\s*:\s*"(?i:you|jev|me|assistant)"\s*,\s*)?'
                        r'"steps"\s*:\s*\[\s*\]\s*,\s*"say"\s*:\s*"')
+    START_TO = re.compile(r'\s*(?:```(?:json)?\s*)?\{\s*"to"\s*:\s*"(?i:you|jev|me|assistant)"\s*,\s*'
+                          r'"steps"\s*:\s*\[\s*\]\s*,\s*"say"\s*:\s*"')  # without her name, "to" said first
     PLAIN = re.compile(r'\s*[^\s{\[<`"]')  # not JSON, a tool call or a thinking tag
     # a reply that starts like this is to her: what to do, or "to": "you" (COLD_NOTE), never {"to": "others"} or
     # {"ignore": true}. Words said without her name get a "One moment" only then (FOR_HER)
     MINE = re.compile(r'\s*(?:```(?:json)?\s*)?\{\s*(?:"(?:steps|say|do)"|"to"\s*:\s*"(?i:you|jev|me|assistant)")')
+    MINE_TO = re.compile(r'\s*(?:```(?:json)?\s*)?\{\s*"to"\s*:\s*"(?i:you|jev|me|assistant)"')
+    MOST = 400  # characters of a plain answer past which only three sentences are said, as tidy cuts one
 
-    def __init__(self, notify, make=None, gate=False):
-        self.notify, self.make, self.gate = notify, make or Line, gate
+    def __init__(self, notify, make=None, gate=False, hold=None):
+        self.notify, self.make, self.gate, self.hold = notify, make or Line, gate, hold
         self.owner, self.player, self.used, self.said, self.error, self.started = None, None, 0, [], None, None
         self.chunker, self.lines, self.lock = SentenceChunker(), queue.Queue(), threading.Lock()
         self.first_text = None  # when the first words came, from any try
         self.not_plain = set()  # tries whose plain words turned into JSON or a tag before a sentence was said
         self.cut = False  # the one she's saying did, after: the rest of it isn't said as it's written
         self.quiet = False  # without her name, a sentence let_go would keep quiet about: none of it is said
+        self.plain = False  # the one she's saying is in plain words, so tidy's cut is kept as it's said
+        self.count, self.chars, self.rest = 0, 0, []  # sentences of it to be said, their characters, past three
+
+    def _held(self):
+        """True, and quiet from now on, if she mustn't talk this turn after all (hold)."""
+        if self.hold is not None and not self.quiet and self.hold():
+            self.quiet = True
+        return self.quiet
 
     def feed(self, key, text):
         """Try key's reply so far."""
@@ -2133,13 +2149,13 @@ class LiveSay:
             self.first_text = self.first_text or time.time()
             if self.owner not in (None, key) or key in self.not_plain or self.cut or self.quiet:
                 return
-            if self.gate and self.MINE.match(text):
+            if self.gate and (self.MINE_TO if self.gate == "cold" else self.MINE).match(text) and not self._held():
                 FOR_HER.set()
-            m = self.START.match(text)
+            m = (self.START_TO if self.gate == "cold" else self.START).match(text)
             if m:
                 words = json_string_so_far(text[m.end():])
                 TURN_SPOKE.set()  # an answer's on its way: no "One moment" just ahead of it
-            elif self.PLAIN.match(text):
+            elif not self.gate and self.PLAIN.match(text):
                 words = re.split(r"[{<`]", text, maxsplit=1)[0]
                 if len(words) < len(text):  # "Sure. {"steps": ...": the whole reply decides, as before
                     if self.player is None:
@@ -2148,6 +2164,8 @@ class LiveSay:
                     else:
                         self.cut = True
                     return
+                words = words.rstrip()  # a sentence waits for the next words: a plan may follow it
+                self.plain = True
             else:
                 return
             self.owner = key
@@ -2179,9 +2197,20 @@ class LiveSay:
         line = tidy(sentence)
         if not line or self.quiet:
             return
-        if self.gate and (REPEAT_ASK.search(line) or NOT_FOR_ME.search(line)):
+        # as let_go has it, but not "I thought you were talking to someone else at first. What do you need?"
+        if self.gate and (REPEAT_ASK.search(line) or NOT_FOR_ME.search(line) and not re.search(r"\?|\byou were\b",
+                                                                                                line)):
             self.quiet = True
             return
+        if self.plain and self.count >= 3:  # past three, kept for the end: all of it, if it's short enough
+            self.rest.append(line)
+            self.chars += len(line) + 1
+            if self.chars > self.MOST:  # an 8-sentence answer about the Mughal empire was said in full: tidy keeps 3
+                self.quiet, self.rest = True, []
+            return
+        if self.player is None and self._held():
+            return
+        self.count, self.chars = self.count + 1, self.chars + len(line) + 1
         if self.player is None:  # from the first sentence: the mic pauses while she talks
             self.player = threading.Thread(target=self._play, daemon=True)
             self.player.start()
@@ -2219,12 +2248,15 @@ class LiveSay:
                 rec.tail()  # the last of her voice from the speakers
                 rec.paused = False
 
-    def finish(self):
-        """Once the whole reply is in: the rest of it said, back when she's done. What she said, None if nothing."""
+    def finish(self, whole=True):
+        """Once the reply is in: the rest of it said, back when she's done. What she said, None if nothing. Not whole
+        (the model timed out): what's queued is said, not the half sentence after it ("Tokyo is the cap")."""
         with self.lock:
-            if self.owner is not None and not self.cut:
+            if self.owner is not None and not self.cut and whole:
                 for sentence in self.chunker.flush():  # a short answer can be all tail: "Tokyo."
                     self._queue(sentence)
+                for line in self.rest:
+                    self.lines.put((line, self.make(line)))
             if self.player is None:
                 return None
             self.lines.put(None)
@@ -3164,17 +3196,25 @@ def think(text, gate, notify=None, sure=1.0):
     # a plain answer is said as it's written (LiveSay), without her name once the reply shows it's for her, and not
     # while something plays that the mic hears, as let_go would keep quiet then. 0 of 113 turns were streamed when it
     # took her name. A task's claim is checked before she says it's done
-    stream = STREAM_SAY and not needs_task and origin() == "voice" and \
-        (not gate or not media_playing() or (MIC[0] is not None and MIC[0].echo_cancelled))
+    stream = STREAM_SAY and not needs_task and origin() == "voice"
+    hold = None
+    if stream and gate and not (MIC[0] is not None and MIC[0].echo_cancelled):
+        # Windows' media controls are asked alongside the request, not ahead of it: 149 of 150 turns had no name
+        playing = [None]
+        asked = threading.Thread(target=lambda: playing.__setitem__(0, media_playing()), daemon=True)
+        asked.start()
+        hold = lambda: asked.join() or playing[0]
     for round_ in range(ROUNDS + 1):
         t = time.time()
-        live = LiveSay(notify, gate=gate) if stream else None
+        live = LiveSay(notify, gate=gate, hold=hold) if stream else None
+        whole = False
         try:
             raw, plan, usage, model = ask_plan(messages, again=not gate, live=live, **slow,
                                                deadline=(45 if round_ == 0 else 30) if pictures else
                                                DEADLINE if round_ == 0 else 14.0)
+            whole = True
         finally:
-            spoken_live = live.finish() if live is not None else None
+            spoken_live = live.finish(whole) if live is not None else None
         if spoken_live is not None and live.cut:  # plain words, then a plan: its own line is said after them
             print(f"  (plain words, then a plan: {' '.join(spoken_live)[:80]!r} said first)")
         elif spoken_live is not None:

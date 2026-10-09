@@ -153,8 +153,17 @@ class Unnamed(unittest.TestCase):
         for gate, reply in (("cold", '{"to": "others"}'), (True, '{"ignore": true}'),
                             ("cold", "Sorry, I didn't catch that. Could you say it again for me?"),
                             ("cold", '{"to": "you", "steps": [], "say": "That sounded like it was meant for someone '
-                                     'else in the room. Carry on."}')):
+                                     'else in the room. Carry on."}'),
+                            # words before the JSON, or "to" put last: said over the room before the reply was in
+                            ("cold", 'He is asking someone in the room why they are late today.\n{"to": "others"}'),
+                            ("cold", 'This sounds like a chat between people in the room, not a request. I will stay '
+                                     'out of it. {"to": "others"}'),
+                            (True, 'This sounds like part of a conversation in the room, so I will ignore it.\n'
+                                   '{"ignore": true}'),
+                            ("cold", '{"steps": [], "say": "Traffic was bad, sorry about that. It took an hour.", '
+                                     '"to": "others"}')):
             with self.subTest(gate=gate, reply=reply):
+                siri.FOR_HER.clear()
                 self.think("why are you so late today", gate, reply)
                 self.assertEqual(FakeLine.said, [])
                 self.assertEqual(siri.FOR_HER.is_set(), reply.startswith('{"to": "you"'))  # else no "One moment"
@@ -167,11 +176,72 @@ class Unnamed(unittest.TestCase):
         self.assertNotIn("said", plan)
 
     def test_plain_words_then_a_plan_still_say_the_plans_line(self):
-        plan, _ = self.think("open notepad", False, 'Here is what I will do for you right now. {"steps": [], '
-                                                    '"say": "Notepad is open."}')
-        self.assertEqual(FakeLine.said, ["Here is what I will do for you right now."])
+        plan, _ = self.think("open notepad", False, 'Here is what I will do now. I will open it for you right now. '
+                                                    '{"steps": [], "say": "Notepad is open."}')
+        self.assertEqual(FakeLine.said, ["Here is what I will do now."])
         self.assertNotIn("said", plan)  # so run_plan says "Notepad is open." too
         self.assertEqual(plan["say"], "Notepad is open.")
+
+    def test_a_promise_just_ahead_of_its_plan_is_not_said(self):
+        """Said before the message was staged and read back for a yes: what the plan does is said once it's done."""
+        plan, _ = self.think("message mum on whatsapp i'm late", False,
+                             'Sure, I will send that message to Mum right now.\n{"steps": [{"do": "message", "app": '
+                             '"whatsapp", "contact": "Mum", "text": "I\'m late"}], "say": ""}')
+        self.assertEqual(FakeLine.said, [])
+        self.assertEqual(plan["steps"][0]["do"], "message")
+
+    def test_a_long_plain_answer_is_cut_as_tidy_cuts_it(self):
+        reply = " ".join(f"The Mughal empire did a notable thing number {n} in its long history." for n in range(8))
+        plan, _ = self.think("tell me about the mughal empire", False, reply)
+        self.assertEqual(" ".join(FakeLine.said), siri.tidy(reply))
+        self.assertEqual(len(plan["said"]), 3)
+        FakeLine.said = []
+        short = "One. Two is here. Three is here too. Four is here as well. Five, and that is all of it."
+        plan, _ = self.think("count to five", False, short)
+        self.assertEqual(" ".join(FakeLine.said), siri.tidy(short))  # all of it, as tidy keeps a short one
+
+    def test_a_model_that_runs_out_of_time_leaves_no_half_sentence(self):
+        for gate, reply in ((False, "Tokyo is the cap"), ("cold", '{"to": "you", "steps": [], "say": "He is asking '
+                                                                   'his fri'),
+                            (False, '{"steps": [], "say": "Tokyo is the capital of Japan. It is also the bigg')):
+            with self.subTest(reply=reply):
+                FakeLine.said = []
+
+                def ask_plan(messages, live=None, **kw):
+                    for so_far in stream_of(reply):
+                        live.feed(0, so_far)
+                    raise TimeoutError("the model took too long")
+                with mock.patch.object(siri, "ask_plan", ask_plan), contextlib.redirect_stdout(io.StringIO()), \
+                        self.assertRaises(TimeoutError):
+                    siri.think("what's the capital of Japan", gate)
+                self.assertEqual(FakeLine.said, ["Tokyo is the capital of Japan."] if "bigg" in reply else [])
+
+    def test_a_question_back_after_not_for_me_is_said_in_full(self):
+        """As let_go has it: "I thought you were talking to someone else" with a question is to you."""
+        plan, _ = self.think("can you help", "cold", '{"to": "you", "steps": [], "say": "Sure, I can help with that '
+                                                     'one. I thought you were talking to someone else at first. What '
+                                                     'do you need?"}')
+        self.assertEqual(len(plan["said"]), 3)
+
+    def test_what_plays_is_asked_about_alongside_the_request_not_ahead_of_it(self):
+        sent = threading.Event()
+        before = []
+
+        def playing():
+            before.append(sent.wait(1))  # Windows' media controls, slow to answer
+            return False
+
+        def chat(key, messages, model=None, on_text=None, stop=None, **kw):
+            sent.set()
+            reply = '{"to": "you", "steps": [], "say": "Tokyo is the capital of Japan. It is big."}'
+            for so_far in stream_of(reply):
+                on_text(so_far)
+            return reply, {}, model
+        with mock.patch.object(siri, "media_playing", playing), mock.patch.object(siri.opencode, "chat", chat), \
+                contextlib.redirect_stdout(io.StringIO()):
+            plan = siri.think("what's the capital of Japan", "cold")
+        self.assertEqual(before, [True])  # the request had gone out
+        self.assertEqual(len(plan["said"]), 2)
 
     def test_one_moment_without_her_name_only_once_the_reply_shows_its_for_her(self):
         said = []
