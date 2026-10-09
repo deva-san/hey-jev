@@ -298,8 +298,8 @@ Hermes' cron rules: a command, install or coding job that comes due more than 2 
 **Coding jobs.** "Add a dark mode toggle to the settings page in `C:\path\to\project`." She asks first, and on a yes the OpenCode CLI already on this PC does it in the background, driven over ACP the way Hermes drives a coding agent (`coder.py`), and she tells you when it's done. It's kept on a short leash, because OpenCode lets an agent edit and run commands without asking:
 
 - A setting that outranks the project's own turns every edit and command into a request to her, and turns off web fetching and other folders.
-- Only a git project folder, never a system or app-data one, snapshotted first so it can be undone (she says how).
-- Edits in the folder go ahead. Commands follow the rules above: blocked ones refused, read-only ones run, anything else asked on your phone with buttons when the job came from there, else refused and listed in her report.
+- Only a git project folder, never a system or app-data one, snapshotted first so it can be undone (she says how). New files over 50 MB in all, or 5,000 of them, aren't copied: add their folder to `.gitignore` or commit them first.
+- Edits in the folder go ahead. Commands follow the rules above: blocked ones refused, read-only ones run, anything else asked on your phone with buttons when the job came from there, else refused and listed in her report. Once the job has edited a file, the project's own tests and build are asked about too, as they'd run what it wrote.
 - Only a free model, or it doesn't start.
 
 ### Your phone (Telegram)
