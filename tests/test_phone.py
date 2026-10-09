@@ -403,6 +403,69 @@ class Pictures(unittest.TestCase):
         siri.PENDING.update(plan=None, until=0.0, origin="voice")
 
 
+class Forwarded(unittest.TestCase):
+    """What you forward her is someone else's words, and a song or a recording is a file, never your voice."""
+
+    def send_in(self, upd, heard="close all the windows"):
+        seen, downloads = [], []
+
+        async def download():
+            downloads.append(1)
+            return bytearray(b"ogg")
+
+        async def get_file():
+            return SimpleNamespace(download_as_bytearray=download)
+        msg = upd.effective_message
+        for item in (msg.voice, msg.audio):
+            if item is not None:
+                item.get_file = get_file
+        bot = telegram_bot.Bot(on_message=lambda *a: seen.append(a), on_tap=None, transcribe=lambda audio: [heard])
+        with mock.patch.dict(siri.settings._load(), {"telegram_owner": 7}), \
+                mock.patch("soundfile.read", lambda *a, **k: (__import__("numpy").zeros((16000, 1), "float32"), 16000)):
+            asyncio.run(bot._message(upd, Context()))
+        return seen, downloads
+
+    @staticmethod
+    def voice(seconds=5):
+        return SimpleNamespace(duration=seconds, file_size=seconds * 2000)
+
+    def test_a_forwarded_voice_note_or_text_is_never_run_as_yours(self):
+        """You forward a friend's voice note to read it, or a line from a group: their words were run as your own
+        command, with no rule for what's read, and "close all the windows" closed them."""
+        upd, replies = update(None, voice=self.voice())
+        upd.effective_message.forward_origin = SimpleNamespace(type="user")
+        seen, _ = self.send_in(upd)
+        self.assertEqual(seen, [])
+        self.assertTrue(replies[0].startswith("\U0001f3a4 close all the windows"))  # written out for you to read
+        self.assertIn("forwarded", replies[0])
+        upd, replies = update("close all the windows")
+        upd.effective_message.forward_origin = SimpleNamespace(type="hidden_user")
+        seen, _ = self.send_in(upd)
+        self.assertEqual(seen, [])
+        self.assertIn("forwarded", replies[0])
+        upd, _ = update(None, voice=self.voice())  # your own voice note is still you
+        self.assertEqual(self.send_in(upd)[0], [("close all the windows", 7)])
+
+    def test_a_song_sent_with_send_this_to_amma_is_kept_to_send_on(self):
+        """An MP3 with the caption "send this to Amma": the caption was replaced by the song's words, run as a
+        command, and the song was never kept, so it couldn't be sent on."""
+        upd, _ = update(None)
+        upd.effective_message.caption = "send this to Amma"
+        upd.effective_message.audio = SimpleNamespace(file_name="song.mp3", mime_type="audio/mpeg", file_size=4000000,
+                                                      duration=200)
+        seen, _ = self.send_in(upd, heard="la la la")
+        (text, chat, pictures, files), = seen
+        self.assertEqual((text, chat, pictures, os.path.basename(files[0])), ("send this to Amma", 7, [], "song.mp3"))
+
+    def test_a_long_voice_note_isnt_written_out(self):
+        """A 20 MB clip was decoded whole, about 1 GB, and held speech-to-text, and so her ears at the PC, as long as
+        it took."""
+        upd, replies = update(None, voice=self.voice(30 * 60))
+        seen, downloads = self.send_in(upd)
+        self.assertEqual((seen, downloads), ([], []))
+        self.assertIn("too long", replies[0])
+
+
 class Answers(unittest.TestCase):
     """A question that needs looking up gets an answer, never "say that again"; typed, nothing was misheard."""
 

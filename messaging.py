@@ -691,6 +691,21 @@ def _read_person(uia, root, hwnd, i, label):
         return None  # the results changed under her
     if not _open_row(hwnd, rows[i][1], label):
         return None
+    person = _panel_person(uia, root, hwnd)
+    if person is None:
+        return None
+    name, shown = person
+    # the panel names the chat she clicked: by its name, or by its number for one not saved (the result then starts
+    # with the number). Never the result's own label for a name: it ends with their last message
+    if not _same_chat(label, name or shown):
+        return None  # another chat's panel: the one she clicked hadn't come up
+    return {"name": name or shown, "number": clean_number(shown), "shown": shown}
+
+
+def _panel_person(uia, root, hwnd):
+    """The open chat's contact panel, opened with its Profile details button, read and closed again: (the name it
+    shows, or "" for a number not saved, and the number as shown). None for a group, a panel with no number, or one
+    that didn't open."""
     details = _find_button(hwnd, "Profile details")
     if details is None:
         return None
@@ -711,12 +726,7 @@ def _read_person(uia, root, hwnd, i, label):
         at = next((j for j, s in enumerate(said) if SHOWN_NUMBER.fullmatch(s)), None)
         if at is None:
             return None
-        name, shown = (said[at - 1] if at and said[at - 1] not in PANELS else ""), said[at]
-        # the panel names the chat she clicked: by its name, or by its number for one not saved (the result then
-        # starts with the number). Never the result's own label for a name: it ends with their last message
-        if not _same_chat(label, name or shown):
-            return None  # another chat's panel: the one she clicked hadn't come up
-        return {"name": name or shown, "number": clean_number(shown), "shown": shown}
+        return (said[at - 1] if at and said[at - 1] not in PANELS else ""), said[at]
     finally:
         try:
             close = panel.FindFirst(4, uia.CreateAndCondition(uia.CreatePropertyCondition(30003, 50000),
@@ -920,10 +930,12 @@ def prepare_files(app, contact, paths, caption=""):
     paths = check_files(paths)
     caption = " ".join(str(caption or "").split())[:MAX_TEXT]
     name, handle = find_contact(contact, app)
+    before = chat_open(app)
     hwnd = open_chat(app, handle, "")
     if box_shown(app, hwnd) is None:  # as in prepare: not linked, or the chat didn't open
         why = offline_reason(app, hwnd)
         raise RuntimeError(why or f"{APPS[app]['say']} didn't open the chat with {name}, so I've not sent anything")
+    _opened(app, hwnd, before, name, handle)
     if waiting(hwnd)[1] and not discard_preview(app, hwnd):  # files left waiting from before would go too
         raise RuntimeError(f"something's already waiting to go in {APPS[app]['say']}, so I've not added anything")
     box = _focus_box(app, hwnd)
@@ -1052,6 +1064,54 @@ def send_files(ready):
     raise RuntimeError("WhatsApp still shows it waiting to go, so it may not have sent")
 
 
+def chat_open(app):
+    """The name of the chat open in the app now, as its message box says ("Type a message to Ravi"), or ""."""
+    hwnd = window_of(app) if APPS[app]["compose"] else None
+    try:
+        return compose_box(app, hwnd)[1] if hwnd else ""
+    except Exception:
+        return ""
+
+
+def _theirs(app, to, name, handle):
+    """True if the chat called to is that person's: by what you call them, emoji aside ("Amma 💖" for Amma, never
+    "Mumbai Office" for Mum), the chat she followed for them, or their number."""
+    entry = read_follows().get(f"{other_key(APPS[app]['say'])}:{alias_key(name)}") or {}
+    digits = re.sub(r"\D", "", str(to))
+    return bool(_letters(to)) and _letters(to) == _letters(name) or \
+        any(_chat_key(n) == _chat_key(to) for n in entry.get("names") or []) or \
+        (len(digits) >= 7 and digits == re.sub(r"\D", "", str(handle)))
+
+
+def _number_open(hwnd):
+    """The number of the chat open in WhatsApp, digits only, off its contact panel (_panel_person), or ""."""
+    try:
+        uia = _uia()
+        person = _panel_person(uia, uia.ElementFromHandle(hwnd), hwnd)
+        return re.sub(r"\D", "", person[1]) if person else ""
+    except Exception as exc:
+        print(f"  couldn't read the chat's number: {type(exc).__name__}")
+        return ""
+
+
+def _opened(app, hwnd, before, name, handle, wait=2.0):
+    """Raises unless the chat open is that person's. The link doesn't always switch chats: for a number not on
+    WhatsApp it stays on the chat that was open, and she'd type into Ravi's chat, send it there after a yes, say
+    "Sent to Mum." and take Ravi's replies for Mum's. So it's theirs by its name (_theirs), or it changed, given a
+    moment, from the chat open before (before), as only the link changes it; or else the number on its contact panel
+    is theirs, as for Mum's chat already open, named Amma. A box that names no chat (the app before 2025) can't be
+    checked, as before."""
+    end, to = time.time() + wait, compose_box(app, hwnd)[1]
+    while to and not (_theirs(app, to, name, handle) or (before and _chat_key(to) != _chat_key(before))):
+        if time.time() > end:
+            if APPS[app]["needs"] == "number" and _number_open(hwnd) == re.sub(r"\D", "", str(handle)):
+                return
+            raise RuntimeError(f"{APPS[app]['say']} has {to}'s chat open, not {name}'s. Is the number I have for "
+                               f"them right? I've not typed anything")
+        time.sleep(0.4)
+        to = compose_box(app, hwnd)[1] or to
+
+
 def prepare(app, contact, text):
     """Open the chat with the message typed in, ready for a yes. Returns what she should read back."""
     app = app_key(app)
@@ -1059,12 +1119,14 @@ def prepare(app, contact, text):
         raise RuntimeError("I can only message on WhatsApp or Telegram so far")
     text = clean_text(text)
     name, handle = find_contact(contact, app)
+    before = chat_open(app)
     hwnd = open_chat(app, handle, text)
     if APPS[app]["compose"] and box_shown(app, hwnd) is None:
         # no message box: not linked to the phone (the Reconnect button: a 7 s look on the 2025 app's big page, so
         # only now), or the chat didn't open, as for a number not on WhatsApp. Never Enter into whatever that is
         why = offline_reason(app, hwnd)
         raise RuntimeError(why or f"{APPS[app]['say']} didn't open the chat with {name}, so I've not typed anything")
+    _opened(app, hwnd, before, name, handle)
     shown = typed_text(app, hwnd)
     if shown is not None and shown != text:  # the link left the text out (WhatsApp's 2025 app): she types it
         type_into(app, hwnd, text)
@@ -1190,14 +1252,36 @@ def _send_other(ready):
 
 
 def discard(ready):
-    """Clear a message you said no to, so it isn't left sitting in someone's chat. Only if the app is in front."""
+    """Clear a message you said no to, so it isn't left sitting in someone's chat. Only if the app is in front, and
+    where she can read the box, only the message she typed, still in the chat she typed it in, with the keyboard in
+    its box: a no once wiped the draft you'd started to Ravi meanwhile, and left Mum's "hi" in her box."""
     if not ready:
         return False
     try:
         app, hwnd = ready.get("app"), ready.get("hwnd")
-        if ready.get("files"):
+        if ready.get("files"):  # only these files, in their chat: a send to Amma that ran out took out the photo
+            # you had attached to Ravi meanwhile, as every Remove attachment in the window was clicked
+            if not hwnd or not user32.IsWindow(hwnd):
+                return False
+            names = waiting(hwnd)[0]
+            if not names:
+                return True
+            to = compose_box(app, hwnd)[1] if APPS[app]["compose"] else ""
+            if (ready.get("to") and to != ready["to"]) or names != sorted(os.path.basename(p) for p in ready["files"]):
+                return False
             return discard_preview(app, hwnd)
         if not (in_front_of(ready["obj"]) if ready.get("other") else (hwnd and in_front(app, hwnd))):
+            return False
+        box, to = (None, "") if ready.get("other") or not APPS[app]["compose"] else compose_box(app, hwnd)
+        if box:
+            if (ready.get("to") and to != ready["to"]) or box_value(box) != ready["text"]:
+                return False
+            if not box.CurrentHasKeyboardFocus:
+                box.SetFocus()
+                time.sleep(0.15)
+            if not box.CurrentHasKeyboardFocus or not in_front(app, hwnd):
+                return False
+        elif ready.get("checked"):  # it was read before: not now, so it isn't the box she typed in
             return False
         win.press("ctrl", "a")
         time.sleep(0.15)

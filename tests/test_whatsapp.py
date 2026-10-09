@@ -103,6 +103,54 @@ class Messaging(unittest.TestCase):
                 self.m.send(ready)
         self.assertIn("still sitting", str(err.exception))
 
+    def stays_on(self, chat, number, before=None):
+        """WhatsApp shows chat's box, before the link and after it (or before, then chat), its contact panel
+        number: (what prepare raised or "", what was typed, the panels read), on a clock the waits move on."""
+        shown, panels, clock = [before or chat], [], [0.0]
+        self.box.value, self.typed[:] = "", []
+        with mock.patch.object(self.m.time, "time", lambda: clock[0]), \
+                mock.patch.object(self.m.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s)), \
+                mock.patch.object(self.m, "compose_box", lambda app, hwnd: (self.box, shown[0])), \
+                mock.patch.object(self.m, "read_follows", lambda: {}), \
+                mock.patch.object(self.m, "window_of", lambda app: 99), \
+                mock.patch.object(self.m, "open_chat", lambda app, handle, text: shown.__setitem__(0, chat) or 99), \
+                mock.patch.object(self.m, "find_contact", lambda contact, app: ("Mum", "919999999999")), \
+                mock.patch.object(self.m, "_uia", lambda: SimpleNamespace(ElementFromHandle=lambda h: None)), \
+                mock.patch.object(self.m, "_panel_person", lambda *a: panels.append(chat) or ("", number), create=True):
+            try:
+                self.m.prepare("whatsapp", "mum", "I love you")
+                return "", self.typed, panels
+            except RuntimeError as exc:
+                return str(exc), self.typed, panels
+
+    def test_a_link_that_didnt_switch_chats_types_nothing(self):
+        """Mum's number isn't on WhatsApp (a digit misheard when it was saved): its link stays on Ravi's chat, and
+        she typed into Ravi's box, asked, sent it to Ravi on a yes, said "Sent to Mum." and took Ravi's replies for
+        Mum's."""
+        said, typed, panels = self.stays_on("Ravi", "+91 98765 43210")
+        self.assertIn("Ravi's chat open, not Mum's", said)
+        self.assertEqual((typed, panels), ([], ["Ravi"]))  # its number checked, nothing typed
+
+    def test_mums_chat_already_open_or_opened_is_still_hers(self):
+        self.assertEqual(self.stays_on("Amma", "+91 99999 99999"), ("", ["I love you"], ["Amma"]))  # by its number
+        self.assertEqual(self.stays_on("Amma", "", before="Ravi"), ("", ["I love you"], []))  # the link switched
+        self.assertEqual(self.stays_on("Mum \U0001f496", ""), ("", ["I love you"], []))  # her name, no look needed
+        self.assertIn("not Mum's", self.stays_on("Mumbai Office", "")[0])  # a name that starts the same isn't hers
+
+    def test_a_no_clears_only_what_she_typed_where_she_typed_it(self):
+        """"Message Mum: hi" waited for its yes while you opened Ravi's chat and started a draft: a no pressed Ctrl+A
+        and Backspace in whatever had the keyboard, wiping your draft, and left "hi" in Mum's box."""
+        ready = self.m.prepare("whatsapp", "amma", "Hi")
+        self.box.value = "my long draft to Ravi"
+        with mock.patch.object(self.m, "compose_box", lambda app, hwnd: (self.box, "Ravi")):
+            self.assertFalse(self.m.discard(ready))
+        self.box.value = "Hi, and more"  # you went on typing in her box
+        self.assertFalse(self.m.discard(ready))
+        self.assertEqual(self.pressed, [])
+        self.box.value, self.box.CurrentHasKeyboardFocus = "Hi", False  # as she left it: cleared
+        self.assertTrue(self.m.discard(ready))
+        self.assertEqual((self.box.value, self.pressed), ("", [("ctrl", "a"), ("backspace",)]))
+
     def test_the_new_name_of_the_box_is_read(self):
         m = real_messaging()
         box = SimpleNamespace(CurrentName="Type a message to Amma \U0001f496")
@@ -204,6 +252,23 @@ class Files(unittest.TestCase):
         self.assertTrue(self.m.discard(ready))
         self.assertEqual((self.waiting, self.sent), ([], []))
 
+    def test_a_no_or_running_out_takes_out_only_these_files_in_their_chat(self):
+        """'Send report.pdf to Amma' ran out while you attached holiday.jpg to Ravi: every Remove attachment in the
+        window was clicked, and your photo to Ravi went with it."""
+        ready = self.m.prepare_files("whatsapp", "amma", self.paths[:1])
+        self.assertEqual(ready["to"], "Amma")
+        self.waiting[:] = ["C:/x/holiday.jpg"]  # Ravi's chat now, your own photo waiting
+        with mock.patch.object(self.m, "compose_box", lambda app, hwnd: (None, "Ravi")):
+            self.assertFalse(self.m.discard(ready))
+        self.assertFalse(self.m.discard(ready))  # Amma's chat, but not what she put there
+        self.assertEqual(self.waiting, ["C:/x/holiday.jpg"])
+        self.waiting[:] = self.paths[:1]
+        with mock.patch.object(self.m, "compose_box", lambda app, hwnd: (None, "Ravi")):
+            self.assertFalse(self.m.discard(ready))
+        self.assertEqual(self.waiting, self.paths[:1])
+        self.waiting.clear()
+        self.assertTrue(self.m.discard(ready))  # nothing waiting: nothing to take out
+
     def test_if_whatsapp_took_other_files_nothing_is_sent_and_none_are_left(self):
         with mock.patch.object(self.m.win, "set_clipboard_files",
                                lambda paths: (self.clipboard.__setitem__(0, "files"),
@@ -218,6 +283,18 @@ class Files(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.m.send(ready)
         self.assertEqual(self.sent, [])
+
+    def test_they_go_only_into_their_chat(self):
+        """The link left Ravi's chat open, Amma's number not being on WhatsApp: the files went into his preview."""
+        clock = [0.0]
+        with mock.patch.object(self.m, "compose_box", lambda app, hwnd: (Box(), "Ravi")), \
+                mock.patch.object(self.m, "_number_open", lambda hwnd: "919876543210", create=True), \
+                mock.patch.object(self.m.time, "time", lambda: clock[0]), \
+                mock.patch.object(self.m.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s)):
+            with self.assertRaises(RuntimeError) as err:
+                self.m.prepare_files("whatsapp", "amma", self.paths[:1])
+        self.assertIn("Ravi's chat open", str(err.exception))
+        self.assertEqual((self.waiting, self.copies), ([], 0))
 
     def test_only_real_files_not_too_many_or_too_big(self):
         with self.assertRaises(RuntimeError):

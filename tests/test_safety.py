@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from tests.support import DATA, ROOT, messaging, siri
@@ -264,6 +265,98 @@ class ChatApps(unittest.TestCase):
         self.assertFalse(pressed)
         self.assertIn("command windows", said)
 
+    def run_quick(self, exe, words, parents=(), focus=None):
+        """words through the quick path and do_step (keys on their own, as a model plans them: {"do": "keys"}), with
+        exe in front, its process started by parents (names, the nearest first), and focus the control with the
+        keyboard: (what she said, [what was pressed or pasted])."""
+        steps = [{"do": "keys", "keys": words[6:]}] if words.startswith("press ") else siri.quick(words)["steps"]
+        import psutil
+        chain = [SimpleNamespace(name=lambda n=n: n, parent=None) for n in parents] + [None]
+        for proc, up in zip(chain, chain[1:]):
+            proc.parent = lambda up=up: up
+        done, said = [], []
+        with mock.patch.object(siri.win, "foreground_exe", return_value=exe), \
+                mock.patch.object(siri.win, "_pid", lambda hwnd: 2), \
+                mock.patch.object(psutil, "Process", lambda pid: SimpleNamespace(parent=lambda: chain[0])), \
+                mock.patch.object(siri.win, "ui_focused", lambda: focus), \
+                mock.patch.object(siri.win, "paste", lambda text: done.append(("paste", text))), \
+                mock.patch.object(siri.win, "press", lambda *keys: done.append(keys)):
+            for step in steps:
+                try:
+                    siri.do_step(step)
+                except RuntimeError as exc:
+                    said.append(str(exc))
+        return said, done
+
+    def test_enter_isnt_pressed_in_whatsapps_web_view(self):
+        """WhatsApp's 2025 app puts its web view, msedgewebview2.exe, in front once its message box has the keyboard.
+        "Type see you soon and press enter" then sent it to whichever chat was open, with no read-back and no yes."""
+        view = r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\141.0\msedgewebview2.exe"
+        said, done = self.run_quick(view, "type see you soon and press enter",
+                                    parents=("msedgewebview2.exe", "WhatsApp.Root.exe"))
+        self.assertEqual(done, [("paste", "see you soon")])
+        self.assertIn("message", said[0])
+        for keys in ("ctrl+enter", "shift+enter"):
+            self.assertFalse(self.run_quick(view, f"press {keys}", ("msedgewebview2.exe", "WhatsApp.Root.exe"))[1])
+        # another app's web view is any window: Enter goes
+        self.assertEqual(self.run_quick(view, "type see you soon and press enter", parents=("olk.exe",)),
+                         ([], [("paste", "see you soon"), ("enter",)]))
+
+    def test_an_editors_terminal_is_a_command_window(self):
+        """"Build my project in VS Code" could type npm run build into Kiro's or VS Code's own terminal and press Enter:
+        the command ran with no yes and none of the command runner's rules."""
+        terminal = {"name": "Terminal 1, powershell", "role": "edit"}
+        for exe in (r"C:\Users\x\AppData\Local\Programs\Microsoft VS Code\Code.exe", r"C:\x\Kiro\Kiro.exe",
+                    r"C:\x\cursor.exe"):
+            said, done = self.run_quick(exe, "type npm run build and press enter", focus=terminal)
+            self.assertEqual(done, [], exe)
+            self.assertIn("command windows", said[0], exe)
+            self.assertEqual(self.run_quick(exe, "press enter", focus=None)[1], [], exe)  # can't tell where it'd go
+            for keys in ("ctrl+v", "shift+insert", "ctrl+shift+v", "x", "shift+x", "space",
+                         "ctrl+m", "ctrl+j", "ctrl+o", "ctrl+alt+q"):
+                self.assertEqual(self.run_quick(exe, f"press {keys}", focus=terminal)[1], [], (exe, keys))
+            # hiding the terminal or the command palette goes: once the terminal had the focus they were refused
+            for keys in ("ctrl+`", "ctrl+shift+p", "escape"):
+                self.assertEqual(self.run_quick(exe, f"press {keys}", focus=terminal)[1],
+                                 [tuple(siri.combo(keys).split("+"))], (exe, keys))
+        for exe in (r"C:\x\alacritty.exe", r"C:\x\WezTerm\wezterm-gui.exe", r"C:\x\PuTTY\putty.exe"):
+            self.assertEqual(self.run_quick(exe, "type dir and press enter")[1], [], exe)
+            self.assertEqual(self.run_quick(exe, "press escape")[1], [], exe)  # a command window takes no keys at all
+        # the editor itself, a file called terminal.py too, is any window
+        for name in ("app.py, Editor Group 1", "terminal.py, Editor Group 1"):
+            self.assertEqual(self.run_quick(r"C:\x\Code.exe", "type hello and press enter",
+                                            focus={"name": name, "role": "edit"}),
+                             ([], [("paste", "hello"), ("enter",)]), name)
+
+    def test_start_search_is_never_typed_into(self):
+        """A plan pressed Win+S, typed a command into Start's search and pressed Enter, which runs it."""
+        search = r"C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\SearchHost.exe"
+        said, done = self.run_quick(search, "type cmd /c calc and press enter")
+        self.assertEqual(done, [])
+        self.assertIn("Start's search", said[0])
+        self.assertEqual(self.run_quick(search, "press escape")[1], [("esc",)])  # only what can't start anything
+
+
+class PlannedShortcuts(unittest.TestCase):
+    """README: the Windows key is only ever pressed for one of shortcuts.py's, never for a plan the model made."""
+
+    def test_a_plan_cant_press_the_windows_key_by_a_shortcut_id(self):
+        """Her history shows the model plans like {"do": "shortcut", "id": "windows:win+d"}. Copying the format, a
+        plan pressed Win+S as vetted, pasted a command into Start's search and pressed Enter."""
+        raw = json.dumps({"steps": [{"do": "shortcut", "id": "windows:win+s"}, {"do": "type", "text": "cmd /c calc"},
+                                    {"do": "keys", "keys": "enter"}], "say": ""})
+        self.assertEqual([s["do"] for s in siri.parse_plan(raw)["steps"]], ["type", "keys"])
+        tool = '<tool_call>shortcut<arg_key>id</arg_key><arg_value>windows:win+r</arg_value></tool_call>'
+        self.assertEqual(siri.parse_plan(tool)["steps"], [])
+
+    def test_her_own_shortcuts_still_go(self):
+        with mock.patch.object(siri.win, "foreground_exe", return_value=r"C:\Windows\explorer.exe"), \
+                mock.patch.object(siri, "focused_on", lambda site: False), \
+                mock.patch.object(siri.win, "press") as press:
+            for step in siri.quick("open clipboard history")["steps"]:
+                siri.do_step(step)
+        press.assert_called_once_with("cmd", "v")
+
 
 def untripped_winplatform():
     """A second copy of winplatform, without the harness's tripwires, for a test that stubs what it calls itself."""
@@ -381,6 +474,32 @@ class CommandPolicy(unittest.TestCase):
         self.assertEqual(self.level("git log --pretty=format:%h"), "allow")
         self.assertEqual(self.level("Get-Process | Format-Table"), "confirm")
         self.assertEqual(self.level("node -e console.log(1)"), "confirm")
+
+    def test_a_folder_deleted_by_node_or_python_code_is_blocked(self):
+        """node -e "require('fs').rmSync('C:/x',{recursive:true,force:true})" only waited for approval: the deletion
+        rule looks for a delete command, and this one is inside the code node runs."""
+        for command in ("node -e \"require('fs').rmSync('C:/x',{recursive:true,force:true})\"",
+                        "node -e \"require('fs').rmdirSync('C:/x', { recursive: true })\"",
+                        "node -e \"require('fs/promises').rm('x', {recursive: true})\"",
+                        "node -e \"require('fs-extra').removeSync('C:/x')\"", "npx rimraf C:/x",
+                        "python -c \"import shutil; shutil.rmtree('C:/x')\"",
+                        "py -c \"__import__('shutil').rmtree(r'C:\\x', ignore_errors=True)\"",
+                        "python -c \"import os; os.removedirs('C:/x/y')\"", "rimraf C:/x", "pnpm dlx rimraf x",
+                        "npm exec rimraf x", "npx --yes rimraf x", "node -e \"require('rimraf').sync('x')\"",
+                        "C:\\Python312\\python.exe -c \"import shutil; shutil.rmtree('x')\"",
+                        # run by path or by pnpm, or code given to node -p or python -Ic: these only asked
+                        "pnpm rimraf dist", "./node_modules/.bin/rimraf x", "node_modules\\.bin\\rimraf C:/x",
+                        "node -p \"require('fs').rmSync('x',{recursive:true})\"",
+                        "python -Ic \"import shutil;shutil.rmtree('x')\""):
+            self.assertEqual(tasks.command_policy(command, self.folder), ("block", "recursive deletion is blocked"),
+                             command)
+        for command in ("node -e \"require('fs').unlinkSync('x.txt')\"", "python -c \"import os; os.remove('x.txt')\"",
+                        "python -c \"print(42)\"", "node -e \"console.log(require('os').cpus().length)\"",
+                        "git log --grep=rmtree", "npm install -D rimraf", "npm uninstall rimraf", "pnpm add -D rimraf",
+                        "git commit -m \"drop rimraf\"", "git log --grep rimraf",
+                        "git commit -m \"remove (old) recursive flag\"", "git commit -m \"use shutil.rmtree(x)\""):
+            self.assertNotEqual(self.level(command), "block", command)  # one file asks; looking is fine
+        self.assertEqual(self.level("git log --oneline -- rimraf.config.js"), "allow")  # read-only, as before
 
     def test_the_real_blocks_stay(self):
         for command in ("format C: /q", "Format-Volume -DriveLetter D", "powershell -enc abc", "pwsh -e abc",

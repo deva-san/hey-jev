@@ -1073,15 +1073,31 @@ def sent_to(ready):
 
 def drop_staged():
     """A no to a message: forget it, and clear what she typed so it isn't left sitting in someone's chat, however
-    long it's been waiting."""
+    long it's been waiting. Returns what to say if the message still waiting for its yes is left there: the chat or
+    the box had changed, and only what she typed, where she typed it, is ever cleared."""
     agent.drop()  # a step of a task in an app held for the yes: forgotten, what it typed stays as a draft would
     STAGED_INSTALL.update(ready=None, until=0.0)  # a no to an install: nothing was downloaded, so just forget it
-    ready = STAGED["ready"]
+    ready, live = STAGED["ready"], time.time() < STAGED["until"]
     STAGED.update(ready=None, until=0.0)
     if ready and messaging.discard(ready):
         print(f"  cleared the unsent message to {ready['contact']}")
     elif ready and ready.get("files"):
         print(f"  couldn't take the files out of WhatsApp's preview for {ready['contact']}")
+    elif ready and live:
+        where = ready.get("say") or messaging.say_of(ready["app"])
+        return f"Okay, I won't send it. It's still typed in {where}, so clear it there."
+    return ""
+
+
+def drop_expired():
+    """Files staged in WhatsApp's preview whose question has run out, taken out: nothing did, and they waited there,
+    the keyboard in the caption box, for the next Enter to send them. A message's words stay, as a draft would, and
+    nothing else waiting for a yes is touched."""
+    ready = STAGED["ready"]
+    if (ready or {}).get("files") and time.time() >= STAGED["until"]:
+        STAGED.update(ready=None, until=0.0)
+        if not messaging.discard(ready):
+            print(f"  couldn't take the files out of WhatsApp's preview for {ready['contact']}")
 
 
 def staged_for():
@@ -2774,8 +2790,11 @@ def _attr(value):
 
 def _known(steps):
     """The well-formed steps, mended (see _mend), without names there are no steps for. A screen or procedure step
-    without "read", "exact" or "learned", which only she sets (think, _quick, run_plan)."""
+    without "read", "exact" or "learned", which only she sets (think, _quick, run_plan). Never a shortcut, which
+    only shortcut_plan makes: one presses the Windows key, and a model copying one from her history could plan
+    Win+S, typing a command and Enter."""
     steps = [_mend(s) for s in steps if isinstance(s, dict) and isinstance(s.get("do"), str) and s["do"]]
+    steps = [s for s in steps if s["do"] != "shortcut"]
     unknown = [s["do"] for s in steps if s["do"] not in KNOWN_STEPS]
     if unknown:
         print(f"  no such steps, left out: {', '.join(unknown)}")
@@ -3386,7 +3405,21 @@ def task_worker():
                 chat = (payload.get("origin") or {}).get("phone")
                 ask = (lambda q: PHONE["ask"](chat, q)) if chat is not None and PHONE["ask"] else None
                 job = coder.Job(folder, payload["task"], ask=ask, cancelled=lambda: TASK_STORE.is_cancelled(task["id"]))
-                ok, said = job.run()
+                try:
+                    ok, said = job.run()
+                except Exception as exc:  # out of time, OpenCode stopped, or you cancelled it: what it changed stays,
+                    # so the way back is kept and said as well. Only a job that finished said it: one that hit the
+                    # 30 minutes said "Open Tasks for the details", its snapshot a loose commit only git fsck found
+                    kept = {"edited": job.edited, "ran": job.ran, "refused": job.refused, "snapshot": snap}
+                    TASK_STORE.finish(task["id"], json.dumps(kept), tasking.redact(str(exc)) or "it stopped")
+                    changed = f"It changed {len(job.edited)} file{'' if len(job.edited) == 1 else 's'} first. " \
+                              f"{coder.undo_line(snap)}" if job.edited else ""
+                    if TASK_STORE.is_cancelled(task["id"]):
+                        if changed:
+                            tell_task(task, f"Task {task['id']} was cancelled: {task['description']}. {changed}")
+                    else:
+                        tell_task(task, _task_result_line(task, changed or "Open Tasks for the details.", False))
+                    return
                 done = said or (f"It changed {len(job.edited)} file{'' if len(job.edited) == 1 else 's'}."
                                 if job.edited else "It didn't change anything.")
                 if job.refused:
@@ -3442,7 +3475,8 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
                     "Chrome/141.0 Safari/537.36", "Accept-Language": "en-US,en;q=0.9"}
 # keys and typing never go to these, so nothing she hears, a video included, can run commands on the PC
 SHELLS = {"cmd.exe", "powershell.exe", "pwsh.exe", "windowsterminal.exe", "wt.exe", "openconsole.exe", "conhost.exe",
-          "wsl.exe", "bash.exe", "mintty.exe"}
+          "wsl.exe", "bash.exe", "mintty.exe", "alacritty.exe", "wezterm-gui.exe", "tabby.exe", "putty.exe",
+          "powershell_ise.exe"}
 KEY_NAMES = {"control": "ctrl", "escape": "esc", "return": "enter", "pgup": "page_up", "pageup": "page_up",
              "pgdn": "page_down", "pagedown": "page_down", "del": "delete", "arrowleft": "left", "arrowright": "right",
              "arrowup": "up", "arrowdown": "down", "spacebar": "space",
@@ -3749,11 +3783,74 @@ CHATS = {"whatsapp.exe", "whatsapp.root.exe", "telegram.exe", "signal.exe", "sla
          "mattermost.exe"}
 
 
+# Code editors with a terminal of their own: typing and Enter in it run a command as in a command window, so their
+# terminal counts as one. It's the box with the focus named "Terminal 1, powershell" (VS Code's and its forks'), not
+# a file called terminal.py
+IDES = {"code.exe", "code - insiders.exe", "cursor.exe", "kiro.exe", "windsurf.exe", "vscodium.exe", "trae.exe"}
+TERMINAL_BOX = re.compile(r"\s*terminal\b(?!\.)", re.I)
+
+
+def in_terminal(exe, focus=False):
+    """True if the window in front, of program exe, is a command window, or a code editor with its terminal focused
+    or with nothing it can tell has the focus. focus: the control with the focus (winplatform.ui_focused), if known."""
+    if exe in SHELLS:
+        return True
+    if exe not in IDES:
+        return False
+    focus = win.ui_focused() if focus is False else focus
+    return focus is None or bool(TERMINAL_BOX.match(str(focus.get("name") or "")))
+
+
+# The keys an editor's terminal takes: ones that leave it or work the editor (Ctrl+` hides it, Ctrl+P and the command
+# palette, Escape), move about, or stop what's running. Only these, as listing the ones to refuse let others through:
+# Ctrl+M and Ctrl+J are Enter to a shell, Ctrl+O runs a line in bash, and Up then Ctrl+M re-ran the last command
+TERMINAL_KEYS = {"esc", "f1", "up", "down", "left", "right", "page_up", "page_down", "ctrl+`", "ctrl+shift+`", "ctrl+p",
+                 "ctrl+shift+p", "ctrl+c"}
+
+
+def types_into(keys):
+    """True if keys (names, pressed together; none for typing) could type, paste or press Enter where the keyboard is:
+    anything but TERMINAL_KEYS. In an editor's terminal only these run anything: Ctrl+` to hide it or Escape to leave it
+    were refused too, and "hide the terminal" and "open the command palette" stopped working in VS Code once its
+    terminal had the focus."""
+    keys = [KEY_NAMES.get(str(k).lower(), str(k).lower()) for k in keys]
+    if not keys:
+        return True
+    mods, last = set(keys[:-1]), keys[-1]
+    if not mods <= {"ctrl", "shift"}:  # Ctrl+Alt+a letter types one on an AltGr keyboard
+        return True
+    return "+".join([m for m in ("ctrl", "shift") if m in mods] + [last]) not in TERMINAL_KEYS
+
+
+def hosted_chat(hwnd):
+    """True if window hwnd is a web view (msedgewebview2.exe) that a chat app (CHATS) started, or one it can't tell
+    the app of. WhatsApp's 2025 app puts its web view in front once its message box has the keyboard, and "type see
+    you soon and press enter" pressed Enter there, sending it to whichever chat was open, as msedgewebview2.exe isn't
+    a chat app's own program."""
+    import psutil
+    try:
+        proc = psutil.Process(win._pid(hwnd))
+        for _ in range(4):  # the view's own process, the web view's main one, then the app
+            proc = proc.parent()
+            if proc is None:
+                return False
+            if proc.name().lower() in CHATS:
+                return True
+    except (psutil.Error, OSError):
+        return True
+    return False
+
+
 def not_into_shell(keys=()):
+    """Raises if typing (no keys) or keys would go where they run a command or send a message with nobody asked."""
     front = os.path.basename(win.foreground_exe()).lower()
-    if front in SHELLS:
+    if front in SHELLS or (in_terminal(front) and types_into(keys)):
         raise RuntimeError("I don't type into command windows")
-    if keys and keys[-1] == "enter" and front in CHATS:
+    # Start's search, where typing and Enter start any program: a plan once pressed Win+S, typed and pressed Enter
+    if front in agent.LAUNCHERS and (not keys or keys[-1] == "enter"):
+        raise RuntimeError("I don't type into Start's search, as that could start any program")
+    if keys and keys[-1] == "enter" and (front in CHATS or (front == "msedgewebview2.exe" and
+                                                            hosted_chat(win.front_window()))):
         raise RuntimeError("I only send a message after reading it back to you, so say message and who it's to")
 
 
@@ -4929,8 +5026,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
             if found:
                 forget_found()
             no = agent.drop()  # a step she held: what she says about leaving it, "Okay, it's left in your drafts."
-            drop_staged()
-            plan = make_plan(say=no or say_line("confirm_no"))
+            plan = make_plan(say=drop_staged() or no or say_line("confirm_no"))
     elif gate and sure < UNSURE:  # mumbling, another language or talk across the room, and no name
         print(f"  (no name and only {sure:.0%} sure of the words, staying quiet)")
         emit(notify, "Ready", None)
@@ -6176,6 +6272,12 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         night = []  # replies in the quiet hours that didn't reach your phone
         while True:
             time.sleep(2)
+            if (STAGED["ready"] or {}).get("files") and time.time() >= STAGED["until"] and \
+                    busy.acquire(blocking=False):  # not during a turn, which may be the yes to them
+                try:
+                    drop_expired()
+                finally:
+                    busy.release()
             lines = []
             while not ANNOUNCE.empty():
                 lines.append(ANNOUNCE.get())
@@ -6269,6 +6371,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                         PENDING["plan"] is not None and time.time() < PENDING["until"]
                     phone.settle(chat, message, ("Yes." if yes else "No.") if live else "Expired, not run.")
                     if not live:
+                        drop_expired()  # files left in WhatsApp's preview by the question that ran out go now
                         return
                     handle("yes" if yes else "no", None, None, notify)
                 else:

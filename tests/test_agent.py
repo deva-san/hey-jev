@@ -5,6 +5,7 @@ working, and put away when it keeps failing; and every step of it through the sa
 the real screen: FakeApp stands in for the PC, a script for the model, and a counter for screenshots."""
 import contextlib
 import json
+import tempfile
 import threading
 import time
 import unittest
@@ -25,10 +26,12 @@ SEND = "Send \u202a(Ctrl-Enter)\u202c"  # Gmail's Send button, as UI Automation 
 
 
 class Control:
-    """A control in a FakeApp window. on: what pressing it does."""
+    """A control in a FakeApp window. on: what pressing it does. kind: its type as a file in File Explorer, "File
+    folder" or "Application", as UI Automation's ItemType gives it."""
 
-    def __init__(self, name, role="button", value=None, state=None, password=False, on=None):
+    def __init__(self, name, role="button", value=None, state=None, password=False, on=None, kind=""):
         self.name, self.role, self.value, self.state, self.password, self.on = name, role, value, state, password, on
+        self.CurrentItemType = kind
 
 
 class Window:
@@ -433,8 +436,10 @@ class Learning(Live):
         """A file or a mail named in a few words, with no date in it, was kept by its name, and opened again next
         time whichever was meant. What your words name ("Downloads") stays by name."""
         w = self.app.window("explorer", "explorer.exe", "Downloads - File Explorer")
-        w.controls = [Control("Downloads", "listitem"), Control("Documents", "listitem"),
-                      Control("Quarterly summary", "listitem"), Control("Holiday plan", "listitem"), Control("Back")]
+        w.controls = [Control("Downloads", "listitem", kind="File folder"),
+                      Control("Documents", "listitem", kind="File folder"),
+                      Control("Quarterly summary", "listitem", kind="Microsoft Word Document"),
+                      Control("Holiday plan", "listitem", kind="Microsoft Word Document"), Control("Back")]
         self.app.show("explorer")
         self.model(lambda: {"steps": [{"do": "click", "id": self.app.id("Downloads")},
                                       {"do": "click", "id": self.app.id("Quarterly summary")}],
@@ -1191,6 +1196,112 @@ class Safety(Live):
             self.assertEqual(r.outcome, "refused")
             self.assertIn("could start a program", line)
         self.assertEqual(self.app.done, [])
+
+    def test_an_editors_own_terminal_is_a_command_window(self):
+        """VS Code, Kiro and Cursor aren't command windows, but their terminal is: "build my project in VS Code" was
+        planned as npm run build typed into it and Enter, and the gate let both through."""
+        for exe in ("code.exe", "kiro.exe", "cursor.exe"):
+            w = self.app.window(exe, exe, "app.py - project - Visual Studio Code")
+            terminal = Control("Terminal 1, powershell", "edit", value="")
+            w.controls = [Control("app.py, Editor Group 1", "edit", value="print(1)"), terminal, Control("Explorer"),
+                          Control("Search"), Control("Run and Debug")]
+            self.app.focus = terminal
+            self.app.show(exe)
+            for step in ({"do": "type", "text": "npm run build"}, {"do": "keys", "keys": "enter"}):
+                self.model({"steps": [step]})
+                line, r = self.run_task(f"build my project in {exe[:-4]}")
+                self.assertEqual(r.outcome, "refused", (exe, step))
+                self.assertIn("could start a program", line)
+        self.assertEqual(self.app.done, [])
+        for keys in ("ctrl+v", "shift+insert", "ctrl+shift+v", "a", "shift+a", "space", "ctrl+enter",
+                     "ctrl+m", "ctrl+j", "ctrl+o", "ctrl+alt+q", "tab"):
+            self.model({"steps": [{"do": "keys", "keys": keys}]})
+            self.assertEqual(self.run_task("paste it in the terminal in cursor")[1].outcome, "refused", keys)
+        self.assertEqual(self.app.done, [])
+        # what leaves the terminal or works VS Code itself goes: "open app.py in VS Code" was abandoned at Ctrl+P
+        for keys in ("ctrl+`", "escape", "ctrl+p", "ctrl+shift+p"):
+            self.model({"steps": [{"do": "keys", "keys": keys}], "done": True, "expect": {"has": "Search"}})
+            self.run_task("open app.py in cursor")
+        self.assertEqual(self.app.done, [("keys", k) for k in ("ctrl+`", "esc", "ctrl+p", "ctrl+shift+p")])
+        self.app.done.clear()
+        self.app.focus = self.app.front.controls[0]  # the editor itself: typing goes, as anywhere
+        self.model({"steps": [{"do": "type", "text": "# done"}], "done": True, "expect": {"has": "Search"}})
+        self.run_task("add a comment in cursor")
+        self.assertEqual(self.app.done, [("app.py, Editor Group 1", "# done")])
+
+    def test_whatsapps_web_view_in_front_is_a_chat(self):
+        """With its message box focused, WhatsApp's 2025 app is msedgewebview2.exe in front, which the gate didn't
+        know as a chat: a plan could type there and press Enter, sending it to whichever chat was open."""
+        import psutil
+        w = self.app.window("view", "msedgewebview2.exe", "WhatsApp")
+        w.controls = [Control("Type a message to Ravi", "edit", value="")] + [Control(f"Chat {n}") for n in "abcd"]
+        self.app.focus = w.controls[0]
+        self.app.show("view")
+        app = SimpleNamespace(name=lambda: "WhatsApp.Root.exe", parent=lambda: None)
+        view = SimpleNamespace(parent=lambda: SimpleNamespace(name=lambda: "msedgewebview2.exe", parent=lambda: app))
+        self.patch(winplatform, "_pid", lambda hwnd: 2)
+        self.patch(psutil, "Process", lambda pid: view)
+        self.model({"steps": [{"do": "type", "text": "on my way"}, {"do": "keys", "keys": "enter"}]})
+        line, r = self.run_task("reply on my way")
+        self.assertEqual((r.outcome, line, self.app.done), ("chat", agent.CHAT_LINE, []))
+        self.assertTrue(agent.chat_in_front("msedgewebview2.exe", "WhatsApp", None))
+
+    def explorer(self, *items, focus=None):
+        """File Explorer in front, Downloads open, its address bar and these list items (name, type)."""
+        w = self.app.window("explorer", "explorer.exe", "Downloads - File Explorer")
+        w.controls = [Control("Address", "edit", value="C:\\Users\\me\\Downloads"), Control("Search Downloads", "edit"),
+                      Control("Back")] + [Control(name, "listitem", kind=kind) for name, kind in items]
+        self.app.focus = next((c for c in w.controls if c.name == focus), None)
+        self.app.show("explorer")
+        return w
+
+    def test_file_explorers_address_bar_takes_only_a_folder(self):
+        """The address bar starts a program as the Run box does. The gate let in any text that started like a path,
+        so C:\\Windows\\System32\\cmd.exe typed there, then Enter, would have run it."""
+        for text in ("C:\\Windows\\System32\\cmd.exe", "%windir%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe "
+                     "-c calc", "C:\\Users\\me\\Downloads\\setup.exe", "shell:AppsFolder\\Microsoft.WindowsCalculator"
+                     "_8wekyb3d8bbwe!App", "\\\\evil.example\\share\\x"):
+            self.explorer(focus="Address")
+            self.model({"steps": [{"do": "type", "text": text}]})
+            with mock.patch.object(agent.os.path, "isdir", side_effect=lambda p: self.assertFalse(
+                    p.startswith("\\\\"), "another PC was looked at") or False):
+                line, r = self.run_task("go to that in file explorer")
+            self.assertEqual(r.outcome, "refused", text)
+            self.assertIn("could start a program", line)
+        self.assertEqual(self.app.done, [])
+        folder = tempfile.mkdtemp()
+        for text in (folder, "shell:Downloads"):  # a folder that's there goes
+            self.explorer(focus="Address")
+            self.model({"steps": [{"do": "type", "text": text}], "done": True, "expect": {"has": "Back"}})
+            self.run_task("go to my folder in file explorer")
+        self.assertEqual([d[1] for d in self.app.done], [folder, "shell:Downloads"])
+        self.explorer(focus="Address").controls[0].value = "C:\\Windows\\System32\\cmd.exe"  # Enter on it asks
+        self.model({"steps": [{"do": "keys", "keys": "enter"}]})
+        line, r = self.run_task("go there in file explorer")
+        self.assertEqual(r.outcome, "held")
+
+    def test_a_program_in_file_explorer_asks_before_its_opened(self):
+        """A click by id opens a file as a double-click does, and Enter on it too: setup.exe ran with nobody asked.
+        Windows hides a name's ending, so "setup" is known for one by its type, an Application, and a file whose type
+        can't be read asks too: "plan.pdf" can be plan.pdf.exe."""
+        for name, kind in (("setup", "Application"), ("setup.exe", ""), ("tool.msi", "Windows Installer Package"),
+                           ("Shortcut to x", "Shortcut"), ("plan.pdf", ""), ("build.py", "Python File"),
+                           ("build", "Python File"), ("tool", "Executable Jar File"),
+                           ("disks.msc", "Microsoft Common Console Document")):
+            self.explorer((name, kind), ("Photos", "File folder"))
+            self.model(lambda: {"steps": [{"do": "click", "id": self.app.id(name)}]})
+            line, r = self.run_task("open it in file explorer")
+            self.assertEqual((r.outcome, line), ("held", f"Should I press {name}?"), name)
+            self.explorer((name, kind), focus=name)
+            self.model({"steps": [{"do": "keys", "keys": "enter"}]})
+            self.assertEqual(self.run_task("open it in file explorer")[1].outcome, "held", name)
+        self.assertEqual(self.app.done, [])
+        for name, kind in (("Photos", "File folder"), ("Holiday plan", "Microsoft Edge PDF Document")):  # these open
+            self.explorer((name, kind))
+            self.model(lambda: {"steps": [{"do": "click", "id": self.app.id(name)}], "done": True,
+                                "expect": {"has": "Back"}})
+            self.run_task("open it in file explorer")
+        self.assertEqual(self.app.done, [("Photos", "press"), ("Holiday plan", "press")])
 
     def test_a_switch_named_send_still_asks(self):
         w = self.app.window("app", "notes.exe", "Notes")
