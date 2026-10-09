@@ -301,7 +301,8 @@ class Harness(Case):
 class SmartTurn(unittest.TestCase):
     def test_it_keeps_no_pool_of_memory_between_runs(self):
         """P6: her working set was 1,090 MB at start against a 917-1,002 MB target. onnxruntime's own memory pool
-        kept what Smart Turn's 8 s of audio needed at every pause: 68 MB with it, 51 without (off Windows), as quick."""
+        kept what the end-of-turn model's 8 s of audio needed at every pause: 68 MB with it, 51 without (off Windows),
+        as quick."""
         with mock.patch("onnxruntime.InferenceSession") as session, \
                 mock.patch.object(speech, "model_path", lambda name, notify=None: name):
             speech.Turn()

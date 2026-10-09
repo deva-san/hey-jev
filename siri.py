@@ -2116,7 +2116,7 @@ class LiveSay:
     """Her answer said while the model is still writing it. Only a plain answer: once the reply has started
     {"steps": [], "say": " there's nothing to do, so nothing to check before she talks, and "say" goes out a
     sentence at a time (SentenceChunker) as it comes, each sentence's voice made while the one before plays (Line).
-    A reply in plain words is a plain answer too, up to any JSON or tag in it: Ling answered 18 of 89 questions that
+    A reply in plain words is a plain answer too, up to any JSON or tag in it: 18 of 89 questions were answered that
     way, and they waited for the whole reply. Each of its sentences waits for more words after it, so "Sure, I'll
     send that to Mum now." isn't said when a plan follows it. Without her name (gate), only a reply that is to her,
     {"to": "you", ... (COLD_NOTE asks for it first) or, for a follow-up (GATE_NOTE), {"steps": [], ..., never plain

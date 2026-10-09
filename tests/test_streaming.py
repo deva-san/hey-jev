@@ -99,7 +99,8 @@ class Live(unittest.TestCase):
 class Unnamed(unittest.TestCase):
     """P1: with Answer without her name on, 149 of 150 voice turns had no name, and not one of 113 was said as it was
     written or got a "One moment": think streamed only with her name, and only a reply that began {"steps": [],
-    "say": ", where Ling answered 18 of 89 questions in plain words. Never said over people talking in the room."""
+    "say": ", where the answer model answered 18 of 89 questions in plain words. Never said over people talking in the
+    room."""
 
     def setUp(self):
         FakeLine.said = []
