@@ -2663,13 +2663,20 @@ CORRECTION = re.compile(r"(?:no|nope|not that|wrong|that's wrong|i said|i meant|
 # about first", which could rewrite a routine you taught her. After plain(), which takes "thanks" and "now" off the end.
 # A "don't" only turns her down for what she was about to do ("don't send it", "don't send the message", a bare
 # "don't"): "No, don't do that again" and "No, don't call me sir" correct her, and any 3 words after it took those for
-# a decline too. Only "it" or one thing ("the email") may follow her action, so "don't do it like that" corrects too
-DECLINE = re.compile(r"(?:no|nope|nah|not)(?: (?:no|nope|nah|not(?: now| yet)?|thanks|thank you|leave it|"
-                     r"forget (?:it|about it)|never ?mind|cancel(?: it| that)?|stop|wait|hold on|it's (?:fine|ok|okay)|"
-                     r"that's (?:fine|ok|okay|all)|i'm (?:good|fine|ok|okay)|(?:don't|dont|do not)(?: (?:bother|worry)"
+# a decline too. Only "it" or one thing ("the email") may follow her action, so "don't do it like that" corrects too.
+# That cut "No, don't send this email", "... these files" and "... reply to him" off too, and plain() takes "okay"
+# and "now" off the end, so "No, it's okay" ("no it's") and "No, leave it for now" never matched: both corrections
+DECLINE = re.compile(r"(?:no|nope|nah|not|actually)(?: (?:no|nope|nah|not(?: now| yet| today)?|thanks|thank you|"
+                     r"leave it(?: for| alone| be)?|forget (?:it|about it)|never ?mind|cancel(?: it| that)?|stop|"
+                     r"wait(?: a (?:minute|min|sec|second|moment|bit))?|hold on|(?:maybe )?later|skip it|"
+                     r"(?:i |i've )?changed my mind|it's(?: (?:fine|ok|okay|alright))?|"
+                     r"that's(?: (?:fine|ok|okay|alright|all))?|i'm(?: (?:good|fine|ok|okay|alright))?|"
+                     r"(?:don't|dont|do not)(?: (?:bother|worry)"
                      r"(?: about it)?| (?:send|do|open|close|install|delete|buy|pay|run|play|type|save|post|reply|"
-                     r"call|text|email|share|download|remove|shut ?down|restart)(?: (?:it|that|this|them|anything)|"
-                     r" (?:the|a|an|my|any) [\w'.-]+)?(?: yet)?)?))*")
+                     r"call|text|email|share|download|remove|shut ?down|restart)(?: (?:it|that|this|them|him|her|"
+                     r"anything)| (?:the|a|an|my|any|this|that|these|those|his|her|their) "
+                     r"(?!again\b|like\b|way\b|anymore\b|ever\b)[\w'.-]+)?"
+                     r"(?: to (?:(?:my|the|his|her) )?[\w'.-]+)?(?: yet)?)?))*")
 _learning = {"turns": 0, "last": 0.0, "lock": threading.Lock(), "overheard": collections.deque(maxlen=20)}
 
 
