@@ -56,7 +56,9 @@ def labelled_turns():
         for line in open(shadow, encoding="utf-8"):
             e = json.loads(line)
             if e.get("label") in ("U", "N"):
-                out.append((e["said"], e.get("kind", "cold"), 1 if e["label"] == "U" else 0, "", "shadow", False))
+                # older rows have "True" for a follow-up (str of the gate), which features() saw as no kind
+                kind = {"True": "follow_up"}.get(e.get("kind"), e.get("kind", "cold"))
+                out.append((e["said"], kind, 1 if e["label"] == "U" else 0, "", "shadow", False))
     return out
 
 

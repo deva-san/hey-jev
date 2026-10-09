@@ -1054,7 +1054,7 @@ class AssistantWindow:
             ttk.Checkbutton(form, text=text, variable=var, command=lambda k=key, v=var: settings.put(k, v.get())
                             ).grid(row=r * 2, column=1, rowspan=2, sticky="e")
         row(15, "Your voice", "She answers only you, not other people, the TV or a video. Press Learn, or say "
-                              "“Hey Jev, learn my voice”, and read her 10 short sentences. She learns your "
+                              "“Hey Jev, learn my voice”, and read her 20 short sentences. She learns your "
                               "voice for a few days first. The recordings stay on this PC.")
         yours = tk.Frame(form, bg=BG)
         yours.grid(row=30, column=1, rowspan=2, sticky="e")

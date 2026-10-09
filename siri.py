@@ -5479,6 +5479,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     speaker = [None]  # speech.Speaker, whose voice a turn is: loaded when voice ID is on, or to learn your voice
     profile = voiceid.Profile()  # your voice, see voiceid.py
     enrolling = [None]  # {"i": sentence, "prints": [...]} while you read her the sentences for your voice
+    scored = [None]  # the voice of the turn going on, for voice_kept once it's over
+    failed = [False]  # the last turn run_turn ran failed
 
     def load_speaker():
         if speaker[0] is None:
@@ -5511,7 +5513,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     def run_turn(text, words, stt_ms, gate=False, carried=False):
         """One turn. The mic stays on while she thinks and acts, and only pauses while she talks (see say), so what
         you say meanwhile is heard once she's done, not lost."""
-        result = False
+        result = failed[0] = False
         maybe[0] = False
         with busy:
             HER.begin()
@@ -5536,6 +5538,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 if result == "dictate":
                     start_dictation()
             except Exception as exc:
+                failed[0] = True
                 print(f"\n  turn failed: {exc!r}")
                 emit(notify, "Something went wrong", str(exc))
                 time.sleep(2)
@@ -5599,11 +5602,19 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         if e["i"] < len(voiceid.SENTENCES):
             show_sentence()
             return
-        profile.enrol(e["prints"])
+        keep = voiceid.keep_alike(e["prints"])
+        for i in sorted(set(range(len(e["prints"]))) - set(keep)):  # read in another voice, or over a noise
+            print(f"  (sentence {i + 1} didn't sound like the others: left out)")
+            try:
+                os.remove(os.path.join(voiceid.folder(), "clips", f"sentence-{i + 1}.wav"))
+            except OSError:
+                pass
+        profile.enrol([e["prints"][i] for i in keep])
         enrolling[0] = None
         settings.put("voice_id", "learning")
-        threading.Thread(target=tell, args=("Thanks, I've got your voice. For the next few days I'll just learn it, "
-                                            "then I'll only answer you.", "voice learned"), daemon=True).start()
+        threading.Thread(target=tell, args=("Thanks, I've got your voice. For the next few days I'll just learn it "
+                                            "from what you ask me, then I'll only answer you.", "voice learned"),
+                         daemon=True).start()
 
     def voice_setup(which):
         """"Learn my voice", "only answer me", "answer everyone", inside a turn."""
@@ -5635,19 +5646,35 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         return p, verdict
 
     def owner_ok(text, kind):
-        """False if voice ID is on and this isn't your voice (voiceid.judge). Logs the score while learning."""
+        """False if voice ID is on and this isn't your voice (voiceid.judge). Its score waits for voice_kept."""
         voice, spoke = getattr(text, "voice", None), getattr(text, "spoke", 0.0)
         score = profile.score(voice) if voice is not None and profile.ready else None
         named = bool(find_name(text))
         counted, why = voiceid.judge(profile, score, spoke, named, kind)
-        if voiceid.after_turn(profile, voice, score, spoke, named, kind, counted):
-            ANNOUNCE.put("I know your voice well now, so from here on I'll only answer you. "
-                         "Say answer everyone to change that.")
+        scored[0] = (voice, score, spoke, named, kind, counted) if text.strip(" .,!?") else None
         if not counted:
             print(f"\n  (not your voice, {why}: {str(text)[:80]!r})")
         elif score is not None:
             print(f"\n  (voice {why})")
         return counted
+
+    def voice_kept(result):
+        """Once the turn is over, what she did with it (run_turn's result, False if let go, None if not your voice)
+        goes with its score to voiceid.after_turn: while learning, a turn she acted on is yours and one she let go is
+        room talk. Kept before the turn ran, she couldn't tell; and empty words never are."""
+        kept, scored[0] = scored[0], None
+        try:  # never upsets the turn: a log held open on Windows skipped what comes after the turn
+            said = voiceid.after_turn(profile, *kept, result) if kept else None
+        except Exception as exc:
+            print(f"  couldn't keep the voice score: {exc!r}")
+            return
+        if said == "on":
+            ANNOUNCE.put("I know your voice well now, so from here on I'll only answer you. "
+                         "Say answer everyone to change that.")
+        elif said == "unsure":
+            ANNOUNCE.put("I've learned your voice from what you ask me, but some of the talk I let go sounded too "
+                         "much like you, so for now I'll keep answering everyone. Say only answer me to switch it on "
+                         "anyway.")
 
     def on_phrase(audio, kind, text, ms):
         """A turn from the listener, already in words: kind is dictation, armed, follow_up or other (see
@@ -5665,9 +5692,17 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             held[0] = None
             at[0] = held_at[0]
             text = speech.heard(f"{first} {text}".strip(), min(getattr(first, "sure", 1.0), getattr(text, "sure", 1.0)))
+            # and its voice, checked as for any turn: one print of both parts' audio (kept whole if it's held again).
+            # Joined as new words it had none, and the parts' own prints averaged were each from under a second, which
+            # can't tell voices apart: "Hey Jev, open [pause] YouTube" in your voice could be let go
+            try:
+                audio = np.concatenate([held_audio[0], audio])
+                text.voice, text.spoke = voice_print(audio)
+            except Exception as exc:
+                print(f"  voice print failed: {exc!r}")
             ms, kind = first_ms + ms, kind if first_kind == "other" else first_kind
         if unfinished(text) and isinstance(route(text, kind), tuple):  # "... we need to": wait for the rest
-            held[0], held_at[0] = (text, kind, ms, time.time() + HOLD), at[0]
+            held[0], held_at[0], held_audio[0] = (text, kind, ms, time.time() + HOLD), at[0], audio
             print(f"\n  (waiting for the rest: {text!r})")
             emit(notify, "Listening", text + " \u2026")
             return
@@ -5770,10 +5805,12 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 ROOM.append((time.time(), str(text)))
             if was_named:  # the popup came up as you talked, but it wasn't for her after all
                 emit(notify, "Ready", None)
+            voice_kept(False)
             return
         if not mine:  # not your voice: let go, as quietly as room talk
             if was_named:
                 emit(notify, "Ready", "That didn’t sound like you")
+            voice_kept(None)
             return
         chance, quiet = listener.ended  # why the turn ended there: Smart Turn's chance, and how much quiet
         if zone in ("over", "gap"):
@@ -5800,19 +5837,24 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             waiting = (PENDING["plan"] is not None and time.time() < PENDING["until"]) or asked_last()
             # said without her name: the decider's view, but never on what may be the answer to her own question
             judged = for_me(what[1], what[2]) if what[2] and not waiting else None
+            # written down as the decider was asked: str(gate) wrote "True" for a follow-up, which training read as
+            # no kind at all
+            asked_as = "follow_up" if what[2] is True else "cold"
             if judged and judged[1] == "no" and decider.mode() == "on":
                 print(f"  (the decider is sure that wasn't for her, {judged[0]:.2f}: staying quiet)")
-                decider.log({"when": round(time.time()), "said": str(what[1]), "kind": str(what[2]),
+                decider.log({"when": round(time.time()), "said": str(what[1]), "kind": asked_as,
                              "for_me": round(judged[0], 3), "verdict": "no", "mode": "on", "result": "let go"})
                 if was_named:
                     emit(notify, "Ready", None)
+                voice_kept(False)
                 return
             before = rec.blocks.qsize()
             if rec.keeps:  # a turn of yours: what's said from here till her first word is said while she thinks
                 her.update(asked=getattr(listener, "pos", 0), start=None, spoke=None, done=None)
             result = run_turn(what[0], what[1], ms, gate=what[2], carried=strict and what[2] is True)
+            voice_kept(None if failed[0] else result)  # one that failed came back False, but wasn't let go
             if judged:  # what it said and what happened, to train it again later
-                decider.log({"when": round(time.time()), "said": str(what[1]), "kind": str(what[2]),
+                decider.log({"when": round(time.time()), "said": str(what[1]), "kind": asked_as,
                              "for_me": round(judged[0], 3), "verdict": judged[1], "mode": decider.mode(),
                              "result": str(result)})
             # what was said while she thought and acted comes next, caught up on rather than skipped (see LAG). Only
@@ -5857,6 +5899,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
 
     held = [None]  # (text, kind, ms, until): a phrase cut off mid-sentence, waiting for the rest
     at, held_at = [None], [None]  # where the phrase being acted on began, and the held one (Listener.pos)
+    held_audio = [None]  # the held one's audio, for one voice print of it and the rest
     placed_as = [None]  # (where, her last word, strict) of a phrase begun over her, placed once her turn was over
     # her last turn in the audio, in Listener.pos: when you finished asking, her first word, the end of her last line,
     # and where her turn was over; strict: the window it asked for is (route). Only while the mic keeps listening
