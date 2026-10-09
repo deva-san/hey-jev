@@ -596,8 +596,8 @@ Today `say()` mutes the mic for her whole reply.
   re-enrolment.
 - **Decider mistakes:** it only goes live where it measured ≥ 95% precision, it can never remove a safety question,
   and it falls back to shadow mode by itself.
-- **CPU:** Nemotron streaming uses ~2.3 cores while anyone talks; Pocket uses 2 while she speaks. Today they don't
-  overlap, because the mic pauses while she talks. Interrupting her (later) would change that. To be measured in
+- **CPU:** Nemotron streaming uses ~2.3 cores while anyone talks; Pocket uses 2 while she speaks. In Echo-cancelling
+  mode the mic stays on while she talks, so they can run at the same time when you talk over her. To be measured in
   phase 2.
 - **Telegram while the PC is off:** messages sent then are dropped, not run later. She can't be reached when the PC
   is off or asleep.
