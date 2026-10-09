@@ -3736,7 +3736,7 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 # keys and typing never go to these, so nothing she hears, a video included, can run commands on the PC
 SHELLS = {"cmd.exe", "powershell.exe", "pwsh.exe", "windowsterminal.exe", "wt.exe", "openconsole.exe", "conhost.exe",
           "wsl.exe", "bash.exe", "mintty.exe", "alacritty.exe", "wezterm-gui.exe", "tabby.exe", "putty.exe",
-          "powershell_ise.exe"}
+          "powershell_ise.exe", "warp.exe", "hyper.exe", "conemu.exe", "conemu64.exe", "mobaxterm.exe"}
 KEY_NAMES = {"control": "ctrl", "escape": "esc", "return": "enter", "pgup": "page_up", "pageup": "page_up",
              "pgdn": "page_down", "pagedown": "page_down", "del": "delete", "arrowleft": "left", "arrowright": "right",
              "arrowup": "up", "arrowdown": "down", "spacebar": "space",
@@ -4045,20 +4045,31 @@ CHATS = {"whatsapp.exe", "whatsapp.root.exe", "telegram.exe", "signal.exe", "sla
 
 # Code editors with a terminal of their own: typing and Enter in it run a command as in a command window, so their
 # terminal counts as one. It's the box with the focus named "Terminal 1, powershell" (VS Code's and its forks'), not
-# a file called terminal.py
-IDES = {"code.exe", "code - insiders.exe", "cursor.exe", "kiro.exe", "windsurf.exe", "vscodium.exe", "trae.exe"}
+# a file called terminal.py, or one of a terminal's own kind (TERMINAL_CLASS). That's so in any program, not only
+# these: PyCharm's, Visual Studio's, Zed's and Warp's terminals weren't on a list, and "build my project in pycharm"
+# typed npm run build and pressed Enter with no yes. In these, nothing it can tell has the focus counts as one too
+IDES = {"code.exe", "code - insiders.exe", "cursor.exe", "kiro.exe", "windsurf.exe", "vscodium.exe", "trae.exe",
+        "pycharm64.exe", "idea64.exe", "webstorm64.exe", "rider64.exe", "studio64.exe", "clion64.exe", "goland64.exe",
+        "phpstorm64.exe", "rubymine64.exe", "datagrip64.exe", "devenv.exe", "zed.exe"}
 TERMINAL_BOX = re.compile(r"\s*terminal\b(?!\.)", re.I)
+# xterm.js's box (VS Code's, Hyper's, Tabby's), Windows Terminal's, a console's and ConPTY's windows
+TERMINAL_CLASS = re.compile(r"xterm|terminal|termcontrol|consolewindowclass|pseudoconsole|conpty", re.I)
 
 
 def in_terminal(exe, focus=False):
-    """True if the window in front, of program exe, is a command window, or a code editor with its terminal focused
-    or with nothing it can tell has the focus. focus: the control with the focus (winplatform.ui_focused), if known."""
+    """True if the window in front, of program exe, is a command window, or has a terminal focused, or is a code
+    editor with nothing it can tell has the focus. focus: the control with the focus (winplatform.ui_focused), if
+    known."""
     if exe in SHELLS:
         return True
-    if exe not in IDES:
-        return False
     focus = win.ui_focused() if focus is False else focus
-    return focus is None or bool(TERMINAL_BOX.match(str(focus.get("name") or "")))
+    if focus is None:
+        return exe in IDES
+    try:
+        kind = str(getattr(focus.get("el"), "CurrentClassName", "") or "")
+    except Exception:  # a control gone since: can't tell, so it counts as one
+        return True
+    return bool(TERMINAL_BOX.match(str(focus.get("name") or "")) or TERMINAL_CLASS.search(kind))
 
 
 # The keys an editor's terminal takes: ones that leave it or work the editor (Ctrl+` hides it, Ctrl+P and the command
@@ -4104,7 +4115,7 @@ def hosted_chat(hwnd):
 def not_into_shell(keys=()):
     """Raises if typing (no keys) or keys would go where they run a command or send a message with nobody asked."""
     front = os.path.basename(win.foreground_exe()).lower()
-    if front in SHELLS or (in_terminal(front) and types_into(keys)):
+    if front in SHELLS or (types_into(keys) and in_terminal(front)):  # keys that type nothing: no focus to read
         raise RuntimeError("I don't type into command windows")
     # Start's search, where typing and Enter start any program: a plan once pressed Win+S, typed and pressed Enter
     if front in agent.LAUNCHERS and (not keys or keys[-1] == "enter"):
