@@ -4047,7 +4047,9 @@ CHATS = {"whatsapp.exe", "whatsapp.root.exe", "telegram.exe", "signal.exe", "sla
 # terminal counts as one. It's the box with the focus named "Terminal 1, powershell" (VS Code's and its forks'), not
 # a file called terminal.py, or one of a terminal's own kind (TERMINAL_CLASS). That's so in any program, not only
 # these: PyCharm's, Visual Studio's, Zed's and Warp's terminals weren't on a list, and "build my project in pycharm"
-# typed npm run build and pressed Enter with no yes. In these, nothing it can tell has the focus counts as one too
+# typed npm run build and pressed Enter with no yes. In these, any focus but a named text box or document counts as
+# one too: PyCharm paints its terminal itself and Zed shows only its window, so the focus read is the window, named
+# after the file ("hey-jev – app.py", class SunAwtFrame), and npm run build was still typed into the terminal
 IDES = {"code.exe", "code - insiders.exe", "cursor.exe", "kiro.exe", "windsurf.exe", "vscodium.exe", "trae.exe",
         "pycharm64.exe", "idea64.exe", "webstorm64.exe", "rider64.exe", "studio64.exe", "clion64.exe", "goland64.exe",
         "phpstorm64.exe", "rubymine64.exe", "datagrip64.exe", "devenv.exe", "zed.exe"}
@@ -4058,8 +4060,8 @@ TERMINAL_CLASS = re.compile(r"xterm|terminal|termcontrol|consolewindowclass|pseu
 
 def in_terminal(exe, focus=False):
     """True if the window in front, of program exe, is a command window, or has a terminal focused, or is a code
-    editor with nothing it can tell has the focus. focus: the control with the focus (winplatform.ui_focused), if
-    known."""
+    editor with no named text box or document focused. focus: the control with the focus (winplatform.ui_focused),
+    if known."""
     if exe in SHELLS:
         return True
     focus = win.ui_focused() if focus is False else focus
@@ -4069,7 +4071,10 @@ def in_terminal(exe, focus=False):
         kind = str(getattr(focus.get("el"), "CurrentClassName", "") or "")
     except Exception:  # a control gone since: can't tell, so it counts as one
         return True
-    return bool(TERMINAL_BOX.match(str(focus.get("name") or "")) or TERMINAL_CLASS.search(kind))
+    name = str(focus.get("name") or "")
+    if exe in IDES and not (name and focus.get("role") in ("edit", "document")):
+        return True
+    return bool(TERMINAL_BOX.match(name) or TERMINAL_CLASS.search(kind))
 
 
 # The keys an editor's terminal takes: ones that leave it or work the editor (Ctrl+` hides it, Ctrl+P and the command

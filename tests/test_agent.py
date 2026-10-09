@@ -1291,6 +1291,23 @@ class Safety(Live):
         self.run_task("add a comment in sometool")
         self.assertEqual(self.app.done, [("Editor for app.py", "# done")])
 
+    def test_an_editors_window_with_the_focus_is_its_terminal(self):
+        """PyCharm paints its terminal itself and Zed shows only its window, so the focus read is the window, named
+        after the file: "build my project in pycharm" still typed npm run build into its terminal and pressed Enter."""
+        for exe in ("pycharm64.exe", "zed.exe"):
+            w = self.app.window(exe, exe, "hey-jev – app.py")
+            window = Control("hey-jev – app.py", "", value="")
+            window.CurrentClassName = "SunAwtFrame"
+            w.controls = [window, Control("Search")]
+            self.app.focus = window
+            self.app.show(exe)
+            for step in ({"do": "type", "text": "npm run build"}, {"do": "keys", "keys": "enter"}):
+                self.model({"steps": [step]})
+                line, r = self.run_task(f"build my project in {exe[:-4]}")
+                self.assertEqual(r.outcome, "refused", (exe, step))
+                self.assertIn("could start a program", line)
+        self.assertEqual(self.app.done, [])
+
     def test_whatsapps_web_view_in_front_is_a_chat(self):
         """With its message box focused, WhatsApp's 2025 app is msedgewebview2.exe in front, which the gate didn't
         know as a chat: a plan could type there and press Enter, sending it to whichever chat was open."""

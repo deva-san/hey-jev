@@ -344,6 +344,13 @@ class ChatApps(unittest.TestCase):
             self.assertEqual(self.run_quick(r"C:\x\sometool.exe", "type dir and press enter", focus=focus)[1], [], kind)
         for exe in (r"C:\x\pycharm64.exe", r"C:\x\zed.exe"):  # an editor it can't tell the focus of
             self.assertEqual(self.run_quick(exe, "press enter", focus=None)[1], [], exe)
+        # PyCharm paints its terminal itself and Zed shows only its window: the focus read is the window, by its file
+        window = {"name": "hey-jev – app.py", "role": "", "el": SimpleNamespace(CurrentClassName="SunAwtFrame")}
+        for exe in (r"C:\x\pycharm64.exe", r"C:\x\zed.exe"):
+            for words in ("type npm run build and press enter", "press enter"):
+                self.assertEqual(self.run_quick(exe, words, focus=window)[1], [], (exe, words))
+        self.assertEqual(self.run_quick(r"C:\x\sometool.exe", "type hello and press enter", focus=window),
+                         ([], [("paste", "hello"), ("enter",)]))  # an app with no terminal of its own
         # ordinary typing goes, in an editor's own file or any other app, focus told or not
         for exe, focus in ((r"C:\x\pycharm64.exe", {"name": "Editor for app.py", "role": "edit"}),
                            (r"C:\Windows\notepad.exe", {"name": "Text editor", "role": "edit",
