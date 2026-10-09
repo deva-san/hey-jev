@@ -154,9 +154,18 @@ class Lookups(Turn):
     def test_what_changes_is_still_looked_up(self):
         for words in ("what's the weather in Tokyo", "what's the latest news on the monsoon", "who won the match today",
                       "what's the price of gold now", "who is the prime minister of Japan", "what does this button mean",
-                      "how far is my office", "google the capital of Japan", "open notepad"):
+                      "how far is my office", "google the capital of Japan", "open notepad",
+                      # this PC and what's on it are looked at, not known; an age, a new phone or the news change
+                      "how big is the C drive", "how high is the CPU", "what does the error on the screen mean",
+                      "how old is Virat Kohli", "how big is the new iPhone",
+                      "what does the budget announcement mean for salaried people"):
             with self.subTest(words=words):
                 self.assertNotIn(siri.KNOWN_NOTE, self.asked(words))
+
+    def test_words_overheard_get_no_push_to_answer(self):
+        """Said near the PC, "how long is the movie" is likely to a friend: the model decides that, unpushed."""
+        self.think("how long is the movie", "cold", '{"to": "others"}')
+        self.assertNotIn(siri.KNOWN_NOTE, self.model.calls[0][0][-1]["content"])
 
 
 class GoogleQuestion(Turn):
