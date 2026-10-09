@@ -27,7 +27,7 @@ NOT_CHAT = ("jev-", "muse-spark")
 FREE_EXTRA = {"big-pickle"}  # free on OpenCode's price list without "-free" in the name
 # OpenCode keeps most free chat models for its own app and turns other apps away with a 403.
 # space-bunny-free is the one that answered from Hey Jev in October 2026. Refresh in Settings checks again.
-FALLBACK_FREE = ["kilo/inclusionai/ling-3.0-flash-sante:free", "space-bunny-free"]
+FALLBACK_FREE = ["space-bunny-free", "kilo/nvidia/nemotron-3-super-120b-a12b:free"]
 WHY = (("can only be used from within OpenCode", "OpenCode only lets this free model run inside OpenCode itself"),
        ("isn't a free model", "it isn't free, and Hey Jev only uses free models"),
        ("unavailable", "not available right now"),

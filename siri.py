@@ -2105,9 +2105,11 @@ TASK_ASKED = re.compile(r"(?:run|check|schedule|remind|research|set|start|queue|
 REMEMBER = re.compile(r"^(?!.*\b(?:i|we|he|she|they|you)(?:'\w+)? (?:(?!(?<=\byou )to\b)[\w']+ ){0,2}"
                       r"(?:remember|forget)\b).*\b(?:remember|forget|keep in mind|note (?:that|this|it|down))\b")
 HEDGE_AFTER = 2.5  # the free model usually answers in 1 to 3 s but now and then takes 8 or more, so then ask again
-# On her own prompt in October 2026: Ling 3.0 Flash Sante on Kilo 1.8 to 2.2 s (median of 5), space-bunny on
-# OpenCode 3.6 to 3.7 s. Cohere's North Mini Code, Step 3.7 Flash and Nemotron 3 Super were slower or timed out
-FAST_MODEL = "kilo/inclusionai/ling-3.0-flash-sante:free"
+# Kilo dropped Ling 3.0 Flash's free model on 9 October. Every free model on her own prompt that day, 12 typical asks
+# twice, plans checked: Nemotron 3 Super on Kilo 24 of 24 right at 2.5 s median, space-bunny on OpenCode 23 of 24 at
+# 1.4 s, Step 5 Preview 23 of 24 at 2.1 s, Dots 3 Note and North Mini Code 21 at 4.9 and 7.6 s. The rest were slower,
+# got plans wrong (LFM 2.5 6 of 24) or turned most requests away
+FAST_MODEL = "kilo/nvidia/nemotron-3-super-120b-a12b:free"
 # BACKGROUND: the day's summary and the learning loop go to space-bunny, whatever she answers with. Nobody waits on
 # them, it keeps nothing, and they send whole conversations. Ling once sent back no JSON for a day's summary
 BACKUP_MODEL = "space-bunny-free"

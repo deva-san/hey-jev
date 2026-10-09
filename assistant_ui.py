@@ -137,7 +137,7 @@ KEY_ROWS = (
     ("OpenCode Zen", "OPENCODE_ZEN_API_KEY", "Works out what you asked and answers, on free models only",
      "https://opencode.ai/zen"),
     ("Fish Audio", "FISH_AUDIO_API_KEY", "Her voice, on Fish's free model", "https://fish.audio/?fpr=henryk"),
-    ("Kilo", "KILO_API_KEY", "More free models, like the quick Ling 3.0 Flash, free ones only",
+    ("Kilo", "KILO_API_KEY", "More free models, like Nemotron 3 Super, free ones only",
      "https://kilo.ai/docs/gateway/authentication"),
     ("Telegram bot", "TELEGRAM_BOT_TOKEN", "Jev on your phone: make a bot with @BotFather, then Settings > Phone > "
      "Pair", "https://core.telegram.org/bots/tutorial#obtain-your-bot-token"),

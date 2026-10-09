@@ -1025,7 +1025,8 @@ class DictationStart(Case):
         with mock.patch.object(siri, "think", lambda words, gate, notify=None, sure=1.0: asked.append(gate)), \
                 mock.patch.object(siri, "run_plan", lambda plan, notify: ran.append(plan) or ([], True, None, [])), \
                 mock.patch.object(siri, "learn_later", lambda *args: None), \
-                mock.patch.object(siri.history, "add", lambda *args: None), contextlib.redirect_stdout(io.StringIO()):
+                mock.patch.object(siri.history, "add", lambda *args: None),                 mock.patch.object(siri, "media_playing", lambda: None), contextlib.redirect_stdout(io.StringIO()):
+            # nothing playing: with music on the PC she stays quiet without her name, and the test asked Windows
             for words in ("Dictate.", "start transcribing", "take dictation"):
                 with self.subTest(words=words):
                     self.assertFalse(siri.handle(words, words, 100, None, "cold"))  # the model said not for her
