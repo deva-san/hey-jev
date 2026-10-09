@@ -230,6 +230,36 @@ class Snapshots(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "too long"):
                     coder.snapshot(self.folder)
 
+    def test_git_failing_isnt_read_as_nothing_to_keep(self):
+        """A held .git/index.lock (a commit's editor still open, or a crash) made stash create fail: read as nothing
+        uncommitted, the job started with app.py's edit kept nowhere and an undo line, git checkout ., that'd wipe it.
+        And git refusing the folder ("dubious ownership") made ls-files fail, read as no new files."""
+        self.write("app.py", "print(2)\n")
+        with open(os.path.join(self.folder, ".git", "index.lock"), "w"):
+            pass
+        with self.assertRaisesRegex(RuntimeError, "index.lock"):
+            coder.snapshot(self.folder)
+        os.remove(os.path.join(self.folder, ".git", "index.lock"))
+        self.write("notes.md", "my notes\n")
+        real = subprocess.run
+        with mock.patch.object(coder.subprocess, "run", lambda args, **kw: real(
+                args + ["--no-such-option"] if "ls-files" in args else args, **kw)):
+            with self.assertRaisesRegex(RuntimeError, "not started"):
+                coder.snapshot(self.folder)
+        self.assertEqual(git(self.folder, "for-each-ref", "refs/heyjev"), "")
+
+    def test_files_only_staged_in_a_repo_with_no_commits_are_kept(self):
+        """With no commit yet stash create fails, and files you'd only git added were kept nowhere: "head:", no undo."""
+        folder = git_folder()
+        with open(os.path.join(folder, "main.py"), "w", encoding="utf-8") as f:
+            f.write("print('mine')\n")
+        git(folder, "add", "main.py")
+        snap = coder.snapshot(folder)
+        self.assertTrue(snap.startswith("files:"), snap)
+        self.assertEqual(git(folder, "show", snap.split(":")[1] + ":main.py"), "print('mine')")
+        self.assertIn("git restore --source", coder.undo_line(snap))
+        self.assertEqual(git(folder, "status", "--porcelain"), "A  main.py")  # nothing changed
+
     def test_too_many_new_files_arent_copied_into_git(self):
         """Every new file went into .git for good: a 180 MB venv-like folder grew .git from 205 to 382 MB."""
         os.makedirs(os.path.join(self.folder, "venv", "lib"))

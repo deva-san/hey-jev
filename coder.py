@@ -78,10 +78,10 @@ SNAPSHOT_MAX_BYTES, SNAPSHOT_MAX_FILES, KEEP_SNAPSHOTS = 50 * 1024 * 1024, 5000,
 def snapshot(folder):
     """The folder as it is now, changing none of its files: "stash:<commit>" of its uncommitted work (git stash
     create); "files:<commit>" of everything when it has new files git doesn't track yet, made with a spare index, as
-    stash create leaves those out and a job that overwrote your notes.md left no copy of them; or "head:<commit>" if
-    there's nothing uncommitted. Kept under refs/heyjev, the last KEEP_SNAPSHOTS of them, so git's clean-up never
-    throws it away. Raises if the new files can't be kept, or are too big to, rather than start a job that could
-    overwrite them."""
+    stash create leaves those out and a job that overwrote your notes.md left no copy of them, or when there's no
+    commit yet; or "head:<commit>" if there's nothing uncommitted. Kept under refs/heyjev, the last KEEP_SNAPSHOTS of
+    them, so git's clean-up never throws it away. Raises if git fails, or the new files can't be kept, or are too big
+    to, rather than start a job that could overwrite them."""
     def run(*args, env=None):  # what git printed, or None if it failed; raises if it took too long
         try:
             done = subprocess.run(["git", "-C", folder, *args], capture_output=True, text=True, timeout=30, env=env,
@@ -91,8 +91,12 @@ def snapshot(folder):
             raise RuntimeError("git took too long to keep a copy of the folder first, so I've not started it")
         return done.stdout.strip() if done.returncode == 0 else None
     head, kind, commit = run("rev-parse", "--verify", "-q", "HEAD") or "", "stash", ""
-    new = [n for n in (run("ls-files", "-z", "--others", "--exclude-standard") or "").split("\0") if n]
-    if new:
+    listed = run("ls-files", "-z", "--others", "--exclude-standard")
+    if listed is None:  # not "no new files": git refusing a folder on a USB drive ("dubious ownership") read as
+        # nothing to keep, and the job started on your notes.md and your edits with no way back
+        raise RuntimeError("git couldn't read the folder to keep a copy of it first, so I've not started it")
+    new = [n for n in listed.split("\0") if n]
+    if new or not head:  # with no commit yet, stash create fails and files you'd only staged were kept nowhere
         sizes = {}  # bytes by the top folder they're in
         for name in new:
             try:
@@ -132,6 +136,10 @@ def snapshot(folder):
         kind = "files"
     if not commit:
         kind, commit = "stash", run("stash", "create")
+    if commit is None:  # not "nothing uncommitted": with .git/index.lock held (a commit's editor still open, or a
+        # crash) it fails, and the job started with your edits kept nowhere and an undo line that would wipe them
+        raise RuntimeError("git couldn't keep a copy of your uncommitted changes first, so I've not started it. If "
+                           "git is busy in that folder, finish that, or delete .git/index.lock, and ask again")
     if not commit:
         return f"head:{head}"
     run("update-ref", f"refs/heyjev/{time.strftime('%Y%m%d-%H%M%S')}-{commit[:7]}", commit)
