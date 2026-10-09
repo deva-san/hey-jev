@@ -196,6 +196,17 @@ class InHerEars(unittest.TestCase):
             handled, _ = self.run_cold(a, "what are you doing tonight", "on", SureNo)
         self.assertEqual(handled, [])
 
+    def test_nor_an_order_after_a_word_or_two_or_said_in_hinglish(self):
+        """LEADS only looked first, and plain() leaves "actually", "wait", "accha" and "bhai" on: a sure decider let
+        "Actually, cancel that" and "Bhai, refresh karo" go, and Hinglish says the order last ("page reload karo")."""
+        a = self.assistant()
+        for words in ("Actually, cancel that", "Wait, go back", "Oh, refresh the page", "Accha, read my messages",
+                      "Right, run it", "Bhai, refresh karo", "Sorry, wait, go back", "page reload karo",
+                      "window chhota karo", "song lagao", "music chala do", "screen pe dikhao"):
+            handled, logged = self.run_cold(a, words, "on", SureNo)
+            self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
+        self.assertEqual(self.run_cold(a, "what are you doing tonight, bhai", "on", SureNo)[0], [])
+
     def test_in_shadow_it_only_writes_down_what_it_would_have_done(self):
         a = self.assistant()
         with mock.patch.object(siri, "could_be_request", lambda text: True):

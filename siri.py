@@ -4962,17 +4962,25 @@ ASKS_ABOUT = re.compile(r"\b(?:what|what's|whats|who|who's|how|where|when|why|wh
 # where an order goes once plain() has taken "okay" and "hey" off: "we should go back home" stays for it to judge
 LEADS = re.compile(r"^(?:go (?:back|forward|to)|forward|refresh|reload|read|remember|run|cancel|approve|switch|clone|"
                    r"schedule|softer|new (?:term|tap|tab)|do that)\b|\bwhat'?s the time\b")
+# what's said before an order that plain() leaves on: "Actually, cancel that", "Wait, go back", "Accha, read my
+# messages" and "Bhai, refresh karo" kept LEADS from seeing their order first, and a sure decider let them go
+LEAD_IN = re.compile(r"^(?:(?:actually|wait|oh|ah|sorry|right|no|well|listen|instead|accha|achha|acha|arre|arey|"
+                     r"bhai|yaar|haan|han|ji|ok|okay|so|and|then|now|yeah|yes|please|hey|um|uh|hmm)\s+)+")
+# and Hinglish puts the order last ("page reload karo", "song lagao", "music chala do"), where LEADS never looks
+LAST_DO = re.compile(r"\b(?:kar ?do|karo|kar dena|lagao|laga do|chalao|chala do|bolo|bol do|bhejo|bhej do|kholo|"
+                     r"khol do|badhao|badha do|ghatao|ghata do|dikhao|dikha do|sunao|suna do|batao|bata do|likho|"
+                     r"likh do|hatao|hata do|band karo|band kar do)$")
 _doing = [None]
 
 
 def asks_something(text, gate=None):
     """True if words said without her name ask her to do something or about something she knows, or name an app or a
     site; with gate True (right after her answer) any question too."""
-    t = plain(str(text))
+    t = LEAD_IN.sub("", plain(str(text)))
     if _doing[0] is None:
         names = sorted({*APP_LOOKUP, *SITES}, key=len, reverse=True)
         _doing[0] = re.compile(rf"\b(?:{DOING}|{'|'.join(map(re.escape, names))})\b", re.I)
-    return bool(COMMAND.search(t) or _doing[0].search(t) or LEADS.search(t) or
+    return bool(COMMAND.search(t) or _doing[0].search(t) or LEADS.search(t) or LAST_DO.search(t) or
                 (gate is True and ASKS_ABOUT.search(t)))
 
 
