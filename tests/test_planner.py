@@ -120,14 +120,28 @@ class TaskSteps(Turn):
     def test_written_out_only_for_words_that_may_ask_for_one(self):
         for words in ("run the tests in hey-jev", "every Monday at 9 check my C drive", "git status in hey-jev",
                       "remind me at 6 to call Mum", "add a dark mode toggle to my project", "cancel task 3",
-                      "schedule a disk check for tomorrow"):
+                      "schedule a disk check for tomorrow",
+                      # missed: a two-digit time, "each", a job, a server, an hour from now
+                      "can you check how my battery is doing at 10 pm", "find out about the monsoon at 10 am",
+                      "check my battery each morning", "stop job 3", "start the dev server in careerid",
+                      "look into flights to goa in an hour", "research the monsoon on friday at noon"):
             with self.subTest(words=words):
                 self.assertIn(siri.TASK_STEPS, self.system(words))
         for words in ("open notepad", "what's the capital of Japan", "play some lofi music"):
             with self.subTest(words=words):
                 system = self.system(words)
                 self.assertIn(siri.TASK_STUB, system)
-                self.assertNotIn('"kind":"reminder"', system)
+                self.assertNotIn("run hidden in the background", system)
+
+    def test_a_request_the_words_miss_still_has_each_steps_fields(self):
+        """"add a dark mode toggle to the settings page in hey-jev" got only the steps' names, so the model guessed
+        their fields and the code turned it down: "Say the project's full folder"."""
+        system = self.system("add a dark mode toggle to the settings page in hey-jev")
+        self.assertNotIn(siri.TASK_STEPS, system)
+        for field in ('"do":"code","task":', '"cwd":', '"task":{"kind":"reminder","text":', '"when":', '"repeat":',
+                      '"do":"task_control","action":"cancel|approve","id":'):
+            with self.subTest(field=field):
+                self.assertIn(field, system)
 
     def test_and_for_a_follow_up_to_one(self):
         recent = [(0, "remind me every day at 9 to take my medicine",

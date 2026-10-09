@@ -1646,11 +1646,13 @@ MESSAGE_PATTERNS = [(re.compile(p, re.I), make) for p, make in (
 TASK_REQUEST = re.compile(r"\b(?:run (?:the )?tests?|git status|command|powershell|schedule|every (?:day|monday|tuesday|"
                           r"wednesday|thursday|friday|saturday|sunday|\d+)|daily|weekly|tomorrow at|remind me at)\b", re.I)
 # Words that may ask for a command, a schedule, a coding job or a change to one (TASK_STEPS). Loose on purpose: a
-# miss leaves the model with only TASK_STUB, a needless hit costs 250 tokens
+# miss leaves the model with only TASK_STUB, the steps' fields without their rules; a needless hit costs 250 tokens.
+# "at 10 pm" missed "at \d", and "check my battery each morning" and "stop job 3" had nothing to hit
 TASK_WORDS = re.compile(r"\b(?:commands?|terminal|powershell|cmd|scripts?|run|runs|running|tests?|build|lint|npm|pip|"
                         r"git|commit|repo|project|folder|code|coding|program|bug|feature|refactor|opencode|schedules?|"
-                        r"every|daily|weekly|hourly|tomorrow|tonight|later|remind|tasks?|queued?|cancel|approve|at \d|"
-                        r"in \d+ (?:minutes?|hours?|days?))\b", re.I)
+                        r"every|each|daily|weekly|hourly|tomorrow|tonight|later|remind|tasks?|jobs?|queued?|cancel|"
+                        r"approve|at \d{1,2}|noon|midnight|in (?:\d+|an?|half an) (?:minutes?|hours?|days?)|"
+                        r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|next week|server)\b", re.I)
 TASK_STEP = re.compile(r'"do":\s*"(?:command|schedule|code|task_control|task_queued)"')  # one planned lately
 SCHEDULE_TIME = r"(?:\d{1,2}(?::\d\d)?\s*(?:am|pm)?|midnight|noon)"
 SCHEDULE_NUMBER = r"(?:\d+|one|two|three|four|five|ten|fifteen|thirty)"
@@ -1899,7 +1901,7 @@ lookup, recall, web, read, weather, news and skill_view send you the results: on
 {"do":"skill","action":"create","name":"work-mode","description":"Their work setup","triggers":["work mode"],"steps":[...],"say":"Work mode's on.","notes":"..."}  learn something to do again: a routine they teach ("when I say X, do Y") with steps that act (not lookups), so X runs at once next time; else how to do it in "notes". action create, patch ("old" and "new" text) or delete
 {"do":"research","topic":"budget phones in India under 20,000"}  "look into", "research", "find out all about": you work on it in the background, then tell them and save a note
 {"do":"note","title":"Shopping list","text":"..."}  save a note for them. {"do":"open_notes"}  show their notes
-{"do":"command"}  {"do":"schedule"}  {"do":"code"}  {"do":"task_control"}  terminal work, work at a time or on repeat, coding, and cancelling such a task, when they ask
+{"do":"command","command":"...","cwd":"C:\\\\full\\\\folder"}  {"do":"code","task":"...","cwd":"C:\\\\full\\\\git\\\\folder"}  {"do":"schedule","when":"tomorrow at 6 PM","repeat":"","description":"...","task":{"kind":"reminder","text":"..."}} (or kind lookup "what", research "topic", command "command" and "cwd")  {"do":"task_control","action":"cancel|approve","id":3}  terminal work, coding, work at a time or on repeat, and cancelling such a task, when they ask
 {"do":"send_screenshot"}  their screen to their own phone, when asked ("send me a screenshot"; on the phone, "screenshot")
 {"do":"install","app":"VLC"}  install or update an app, named as they said: she finds it, reads it back and asks first. Never a website, google or command for it
 {"do":"share","contact":"Mum","caption":""}  sends on WhatsApp the file they just sent you or selected in File Explorer
@@ -1912,8 +1914,9 @@ When they point at something on the screen ("this", "the second one", "that butt
 Questions and chat get no steps, the answer goes in "say". If no step can do it, say so in one sentence.
 Memory: your lasting memory is below and you know all of it. Save what will matter later as facts ("Their website CareerID is careerid.in"), not tasks or today's events: conversations are kept and recall finds them. "Remember ..." means save it; when full, replace or remove something old. Never say you can't remember or have no memory."""
 # The steps for terminal work, timed work and coding, written out in full only for words that may ask for one
-# (TASK_WORDS, see think): a thousand characters of the step list few requests need. The rest get the line naming them
-TASK_STUB = next(line for line in PROMPT.splitlines() if line.startswith('{"do":"command"}'))
+# (TASK_WORDS, see think): a thousand characters of the step list few requests need. The rest get the line with their
+# fields (TASK_STUB), so one the words miss can still be planned, and the code checks it as ever
+TASK_STUB = next(line for line in PROMPT.splitlines() if line.startswith('{"do":"command","command":"..."'))
 TASK_STEPS = """{"do":"command","command":"npm test","cwd":"C:\\\\path\\\\to\\\\project","description":"Run the tests"}  only for terminal, test, build, lint, Git or diagnostic work they explicitly ask for, run hidden in the background. Code checks it: changes wait for their approval, destructive, admin and download commands are blocked. Always an existing full cwd, never secrets
 {"do":"schedule","when":"2026-10-07T18:00:00","repeat":"","description":"Check C drive","task":{"kind":"lookup","what":"disk"}}  work at a time. when: local ISO time, "tomorrow at 6 PM" or "in 2 hours"; repeat "", "every 30 minutes", "daily at 6 PM" or "every Monday at 9 AM"; task {"kind":"reminder","text":"call Mum"}, {"kind":"lookup","what":"disk|battery|cpu|memory|apps|network|uptime|system"}, {"kind":"research","topic":"..."} or {"kind":"command","command":"git status","cwd":"C:\\\\path"}. Never anything that sends, deletes, pays, types, clicks or uses the screen
 {"do":"code","task":"add a dark mode toggle to the settings page","cwd":"C:\\\\path\\\\to\\\\project"}  coding in one of their git projects (the full folder), done in the background after she asks first
