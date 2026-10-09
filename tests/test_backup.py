@@ -1,6 +1,7 @@
 """backup.py: a backup puts everything back, a fresh start clears only her memory, skills and old chats."""
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -276,6 +277,20 @@ class CleanTestData(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("agent.jsonl", problems[0])
         self.assertNotIn("set a timer", self.said())  # the rest still went
+
+    def test_her_folder_can_have_a_hash_or_percent_in_its_path(self):
+        """A Windows user name can have # or % in it: read as a bare file: URI, the path stopped at the #."""
+        odd = os.path.join(tempfile.mkdtemp(prefix="heyjev-clean-"), "Hari#1 100%", "Hey Jev")
+        os.makedirs(odd)
+        shutil.copy(os.path.join(self.data, "history.db"), odd)
+        found = clean_test_data.plans(self.window, appdata=odd, local=self.local, tests=self.tests)
+        self.assertEqual([(p["name"], p["rows"], len(p["take"])) for p in found][0], ("history.db", 42, 35))
+
+    def test_a_window_that_ends_before_it_starts_is_refused(self):
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+            clean_test_data.main(["--from", "2026-10-08 19:10", "--to", "2026-10-08 15:55"])
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+            clean_test_data.main(["--from", "2026-10-08 19:10", "--to", "2026-10-08 19:10"])
 
     def test_what_she_heard_counts_the_way_her_history_keeps_it(self):
         """Her log has what she heard, her name and all; her history keeps the words without it."""

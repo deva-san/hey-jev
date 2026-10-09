@@ -30,6 +30,7 @@ import sqlite3
 import sys
 import time
 import zipfile
+from pathlib import Path
 
 import backup
 
@@ -180,10 +181,16 @@ def day_edits(folder, rows, take):
     return writes, left
 
 
+def _read_only(db):
+    """db, opened read-only. As a URI with its path percent-encoded: a Windows user name can have a # or % in it, and
+    a bare file: URI stopped the path at the #."""
+    return sqlite3.connect(Path(db).resolve().as_uri() + "?mode=ro", uri=True)
+
+
 def history_plan(db, window, phrases, heard):
     if not os.path.isfile(db):
         return None
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con = _read_only(db)
     try:
         rows = con.execute("SELECT rowid, said, ts, day FROM turns").fetchall()
     finally:
@@ -197,7 +204,7 @@ def history_plan(db, window, phrases, heard):
 def tasks_plan(db, window, phrases):
     if not os.path.isfile(db):
         return None
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con = _read_only(db)
     try:
         rows = con.execute("SELECT id, description, created FROM tasks").fetchall()
     finally:
@@ -372,6 +379,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     backup._closed()  # never while she's running: she has the history open
     window = tuple(time.mktime(time.strptime(v, "%Y-%m-%d %H:%M")) for v in (args.start, args.end))
+    if window[0] >= window[1]:
+        parser.error("--from has to be before --to")
     found = plans(window)
     report(found)
     listed = os.path.join(backup.localdata(), "Logs", "clean_test_data.txt")
