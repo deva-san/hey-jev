@@ -4977,9 +4977,11 @@ LEADS = re.compile(r"^(?:go (?:back|forward|to)|forward|refresh|reload|read|reme
                    r"schedule|softer|new (?:term|tap|tab)|do that|like|mark|reopen|print|learn|teach)\b|"
                    r"\bwhat'?s the time\b")
 # what's said before an order that plain() leaves on: "Actually, cancel that", "Wait, go back", "Accha, read my
-# messages" and "Bhai, refresh karo" kept LEADS from seeing their order first, and a sure decider let them go
+# messages" and "Bhai, refresh karo" kept LEADS from seeing their order first, and a sure decider let them go; so did
+# "Theek hai, read my messages", "Achha suno, ..." and "I mean, go back". A "look" that looks up or at stays on
 LEAD_IN = re.compile(r"^(?:(?:actually|wait|oh|ah|sorry|right|no|well|listen|instead|accha|achha|acha|arre|arey|"
-                     r"bhai|yaar|haan|han|ji|ok|okay|so|and|then|now|yeah|yes|please|hey|um|uh|hmm)\s+)+")
+                     r"bhai|yaar|haan|han|ji|ok|okay|so|and|then|now|yeah|yes|please|hey|um|uh|hmm|theek hai|thik hai|"
+                     r"suno|dekho|i mean|look(?! (?:up|at|for|into|through)\b))\s+)+")
 # and Hinglish puts the order last ("page reload karo", "song lagao", "music chala do"), where LEADS never looks
 LAST_DO = re.compile(r"\b(?:kar ?do|karo|kar dena|lagao|laga do|chalao|chala do|bolo|bol do|bhejo|bhej do|kholo|"
                      r"khol do|badhao|badha do|ghatao|ghata do|dikhao|dikha do|sunao|suna do|batao|bata do|likho|"
