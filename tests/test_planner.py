@@ -181,6 +181,14 @@ class Lookups(Turn):
         self.think("how long is the movie", "cold", '{"to": "others"}')
         self.assertNotIn(siri.KNOWN_NOTE, self.model.calls[0][0][-1]["content"])
 
+    def test_a_fact_asked_without_her_name_still_skips_the_look_up(self):
+        """149 of 150 voice turns had no name: "what's the capital of Japan" said so still gets the note, worded to
+        leave who it's to with the model."""
+        self.think("what's the capital of Japan", "cold", '{"to": "others"}')
+        self.assertTrue(self.model.calls[0][0][-1]["content"].endswith(siri.COLD_KNOWN_NOTE))
+        self.think("how big is the C drive", "cold", '{"to": "others"}')
+        self.assertNotIn(siri.COLD_KNOWN_NOTE, self.model.calls[-1][0][-1]["content"])
+
 
 class GoogleQuestion(Turn):
     """A22: "Google when is ..." is a question, with or without a question mark."""
