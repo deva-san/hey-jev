@@ -1046,7 +1046,7 @@ def gate(r, i, s, el=None, checked=False, trusted=()):
     focus = el if do in ("ui", "click") else win.ui_focused() if do in ("type", "keys") else None
     if do == "type" and not focus:
         return "stop", "There's nowhere to type that in front, so I've stopped."
-    # a code editor's own terminal too (siri.in_terminal): "build my project in VS Code" could type npm run build into
+    # any program's own terminal too (siri.in_terminal): "build my project in VS Code" could type npm run build into
     # Kiro's and press Enter, with no yes and none of the command runner's rules. Only what types, pastes or presses
     # Enter there: Ctrl+` or Escape to leave the terminal go, as in VS Code itself
     types = do != "keys" or text is not None or host.types_into(host.combo(s.get("keys")).split("+"))

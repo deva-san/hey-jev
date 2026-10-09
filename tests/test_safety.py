@@ -242,6 +242,7 @@ class ChatApps(unittest.TestCase):
 
     def keys(self, exe, keys):
         with mock.patch.object(siri.win, "foreground_exe", return_value=exe), \
+                mock.patch.object(siri.win, "ui_focused", lambda: None), \
                 mock.patch.object(siri.win, "press") as press:
             try:
                 siri.do_step({"do": "keys", "keys": keys})
@@ -327,6 +328,36 @@ class ChatApps(unittest.TestCase):
             self.assertEqual(self.run_quick(r"C:\x\Code.exe", "type hello and press enter",
                                             focus={"name": name, "role": "edit"}),
                              ([], [("paste", "hello"), ("enter",)]), name)
+
+    def test_any_programs_terminal_is_a_command_window(self):
+        """Only VS Code and its forks were editors with a terminal: "build my project in pycharm" typed npm run build
+        into PyCharm's, Visual Studio's, Zed's or Warp's terminal and pressed Enter, with no yes."""
+        terminal = {"name": "Terminal", "role": "edit"}
+        for exe in (r"C:\x\PyCharm\bin\pycharm64.exe", r"C:\x\Microsoft Visual Studio\devenv.exe", r"C:\x\Zed\zed.exe",
+                    r"C:\x\Warp\warp.exe", r"C:\x\SomeTool\sometool.exe"):
+            said, done = self.run_quick(exe, "type npm run build and press enter", focus=terminal)
+            self.assertEqual(done, [], exe)
+            self.assertIn("command windows", said[0], exe)
+        # a terminal by its kind, whatever it's called: xterm.js's box, Windows Terminal's
+        for kind in ("xterm-helper-textarea", "TermControl"):
+            focus = {"name": "", "role": "edit", "el": SimpleNamespace(CurrentClassName=kind)}
+            self.assertEqual(self.run_quick(r"C:\x\sometool.exe", "type dir and press enter", focus=focus)[1], [], kind)
+        for exe in (r"C:\x\pycharm64.exe", r"C:\x\zed.exe"):  # an editor it can't tell the focus of
+            self.assertEqual(self.run_quick(exe, "press enter", focus=None)[1], [], exe)
+        # PyCharm paints its terminal itself and Zed shows only its window: the focus read is the window, by its file
+        window = {"name": "hey-jev – app.py", "role": "", "el": SimpleNamespace(CurrentClassName="SunAwtFrame")}
+        for exe in (r"C:\x\pycharm64.exe", r"C:\x\zed.exe"):
+            for words in ("type npm run build and press enter", "press enter"):
+                self.assertEqual(self.run_quick(exe, words, focus=window)[1], [], (exe, words))
+        self.assertEqual(self.run_quick(r"C:\x\sometool.exe", "type hello and press enter", focus=window),
+                         ([], [("paste", "hello"), ("enter",)]))  # an app with no terminal of its own
+        # ordinary typing goes, in an editor's own file or any other app, focus told or not
+        for exe, focus in ((r"C:\x\pycharm64.exe", {"name": "Editor for app.py", "role": "edit"}),
+                           (r"C:\Windows\notepad.exe", {"name": "Text editor", "role": "edit",
+                                                         "el": SimpleNamespace(CurrentClassName="RichEditD2DPT")}),
+                           (r"C:\x\sometool.exe", None)):
+            self.assertEqual(self.run_quick(exe, "type hello and press enter", focus=focus),
+                             ([], [("paste", "hello"), ("enter",)]), exe)
 
     def test_start_search_is_never_typed_into(self):
         """A plan pressed Win+S, typed a command into Start's search and pressed Enter, which runs it."""
@@ -490,14 +521,21 @@ class CommandPolicy(unittest.TestCase):
                         # run by path or by pnpm, or code given to node -p or python -Ic: these only asked
                         "pnpm rimraf dist", "./node_modules/.bin/rimraf x", "node_modules\\.bin\\rimraf C:/x",
                         "node -p \"require('fs').rmSync('x',{recursive:true})\"",
-                        "python -Ic \"import shutil;shutil.rmtree('x')\""):
+                        "python -Ic \"import shutil;shutil.rmtree('x')\"",
+                        # by npm x or pnpx, or code that names the call without calling it: these only asked too
+                        "npm x rimraf dist", "npm x -y rimraf dist", "pnpx rimraf dist",
+                        "python -c \"getattr(__import__('shutil'),'rmtree')('x')\"",
+                        "node -e \"require('fs')['rmSync']('x',{recursive:true})\"",
+                        "python -c \"import os; os.system('rm -rf x')\""):
             self.assertEqual(tasks.command_policy(command, self.folder), ("block", "recursive deletion is blocked"),
                              command)
         for command in ("node -e \"require('fs').unlinkSync('x.txt')\"", "python -c \"import os; os.remove('x.txt')\"",
                         "python -c \"print(42)\"", "node -e \"console.log(require('os').cpus().length)\"",
                         "git log --grep=rmtree", "npm install -D rimraf", "npm uninstall rimraf", "pnpm add -D rimraf",
                         "git commit -m \"drop rimraf\"", "git log --grep rimraf",
-                        "git commit -m \"remove (old) recursive flag\"", "git commit -m \"use shutil.rmtree(x)\""):
+                        "git commit -m \"remove (old) recursive flag\"", "git commit -m \"use shutil.rmtree(x)\"",
+                        "node -e \"require('fs').mkdirSync('a/b',{recursive:true})\"", "npm x vitest",
+                        "pnpx prettier ."):
             self.assertNotEqual(self.level(command), "block", command)  # one file asks; looking is fine
         self.assertEqual(self.level("git log --oneline -- rimraf.config.js"), "allow")  # read-only, as before
 
