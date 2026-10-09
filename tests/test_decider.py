@@ -74,12 +74,12 @@ class InHerEars(unittest.TestCase):
         self.addCleanup(a.close)
         return a
 
-    def run_cold(self, a, words, setting):
+    def run_cold(self, a, words, setting, head=trained):
         handled, logged = [], []
         text = speech.heard(words)
         with mock.patch.object(siri, "handle", lambda text, *args, **kw: handled.append(str(text)) or False), \
                 mock.patch.dict(siri.settings._load(), {"decider": setting, "no_name": True, "voice_id": "off"}), \
-                mock.patch.object(decider, "get", lambda: trained()), \
+                mock.patch.object(decider, "get", head), \
                 mock.patch.object(decider, "available", lambda: True), \
                 mock.patch.object(decider, "log", logged.append):
             a.var("act_on")(text, "other", 100)
@@ -103,6 +103,23 @@ class InHerEars(unittest.TestCase):
         for words in ("A turn of nightlight", "check for Realme P3 in stock", "and Notepad, I said", "Click chat messages"):
             handled, logged = self.run_cold(a, words, "on")
             self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
+
+    def test_nor_commands_or_questions_it_is_sure_of(self):
+        """On by default, its "sure it isn't for her" was only kept from the two kinds of words it got wrong on 8
+        October: "Shut down the computer", "what time is it", or "how about tomorrow" right after her answer, would
+        have been let go with no model call."""
+        class SureNo:
+            def for_me(self, words, kind):
+                return 0.01, "no"
+        a = self.assistant()
+        for words in ("Shut down the computer", "Okay, copy that link", "Take a screenshot", "what time is it",
+                      "What's the weather tomorrow"):
+            handled, logged = self.run_cold(a, words, "on", SureNo)
+            self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
+        self.assertEqual(self.run_cold(a, "pass the salt please", "on", SureNo)[0], [])  # room talk still goes
+        self.assertTrue(siri.asks_something("how about tomorrow", True))  # right after her answer: to her
+        self.assertTrue(siri.asks_something("Send a message to Bunty saying I'm late", True))
+        self.assertFalse(siri.asks_something("what are you doing tonight", "cold"))  # said cold: room talk
 
     def test_in_shadow_it_only_writes_down_what_it_would_have_done(self):
         a = self.assistant()

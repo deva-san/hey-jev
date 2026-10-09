@@ -4599,18 +4599,28 @@ COMMAND = re.compile(r"\b(?:open|close|quit|play|pause|stop|resume|search|google
                      re.I)
 # and what the decider's "sure it isn't for her" never lets go before the model (act_on): those words, or an app or a
 # site named. Of the 18 times it was sure on 8 October, the 2 it got wrong were "A turn of nightlight" and "... check
-# for Realme P3 in stock"
-DOING = r"check|find|look up|tell me|night ?light|select|click|" + OPEN_GLUED
+# for Realme P3 in stock". The rest of ASKING's things to do count too, and sending ("Shut down the computer", "Okay,
+# copy that link", "Send a message to Bunty"), with what she's asked about ("what's the weather tomorrow", "what time
+# is it"): the decider being on by default would have let those go with no model call. Its question words only count
+# right after her answer (ASKS_ABOUT), where "how about tomorrow" is to her: said cold, most are room talk
+DOING = (r"check|find|look up|tell me|night ?light|select|click|" + OPEN_GLUED + "|"
+         r"shut ?down|restart|reboot|install|uninstall|download|update|upgrade|copy|paste|undo|redo|screenshot|"
+         r"maximi[sz]e|minimi[sz]e|summari[sz]e|transcrib\w*|dictat\w*|notifications?|"
+         r"clear (?:it|that|this|all|everything|the|my)|send|message|email|e-mail|call|reply|delete|remove|research|"
+         r"alarm|exit|unmute|brightness|bluetooth|wi-?fi|dark mode|light mode|what time|weather|news|battery|cpu|ram|"
+         r"storage")
+ASKS_ABOUT = re.compile(r"\b(?:what|what's|whats|who|who's|how|where|when|why|which)\b")
 _doing = [None]
 
 
-def asks_something(text):
-    """True if words said without her name ask her to do something, or name an app or a site."""
+def asks_something(text, gate=None):
+    """True if words said without her name ask her to do something or about something she knows, or name an app or a
+    site; with gate True (right after her answer) any question too."""
     t = plain(str(text))
     if _doing[0] is None:
         names = sorted({*APP_LOOKUP, *SITES}, key=len, reverse=True)
         _doing[0] = re.compile(rf"\b(?:{DOING}|{'|'.join(map(re.escape, names))})\b", re.I)
-    return bool(COMMAND.search(t) or _doing[0].search(t))
+    return bool(COMMAND.search(t) or _doing[0].search(t) or (gate is True and ASKS_ABOUT.search(t)))
 
 
 # What you say while she talks, or as she ends, is heard (Recorder.keeps): Windows' speech mode takes all of her
@@ -5764,7 +5774,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             waiting = (PENDING["plan"] is not None and time.time() < PENDING["until"]) or asked_last()
             # said without her name: the decider's view, but never on what may be the answer to her own question
             judged = for_me(what[1], what[2]) if what[2] and not waiting else None
-            if judged and judged[1] == "no" and decider.mode() == "on" and not asks_something(what[1]):
+            if judged and judged[1] == "no" and decider.mode() == "on" and not asks_something(what[1], what[2]):
                 print(f"  (the decider is sure that wasn't for her, {judged[0]:.2f}: staying quiet)")
                 decider.log({"when": round(time.time()), "said": str(what[1]), "kind": str(what[2]),
                              "for_me": round(judged[0], 3), "verdict": "no", "mode": "on", "result": "let go"})
