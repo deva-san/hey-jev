@@ -143,7 +143,8 @@ class Stopping(unittest.TestCase):
         self.addCleanup(siri.PENDING.update, plan=None, until=0.0, origin="voice")
         with mock.patch.object(siri, "run_plan", run_plan), mock.patch.object(siri, "quick", lambda *a: plan), \
                 mock.patch.object(siri, "learn_later", lambda *a, **k: None), \
-                mock.patch.object(siri, "drop_staged", lambda: None):
+                mock.patch.object(siri, "drop_staged", lambda: None), \
+                mock.patch.object(siri.history, "add", lambda *a, **k: None):  # her "...?" would be asked_last() after
             siri.handle("send hi to mum on whatsapp", "send hi to mum on whatsapp")
         self.assertIsNone(siri.PENDING["plan"])
 
