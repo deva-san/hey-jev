@@ -4857,6 +4857,9 @@ PHONE_WAITS = 300.0  # seconds a question asked on the phone waits for a tap, as
 
 def origin():
     return "phone" if REPLY_TO.get() is not None else "voice"
+# what a typed no says not to do, no command: "don't type it", "do not send", or a bare "stop" ("no stop", "stop it"),
+# where "stop the music" is one
+NOT_DONE = re.compile(r"\b(?:don't|dont|do not|not) \w+|\bstop(?:(?= (?:it|that|this|now)$)| ?$)")
 YES = re.compile(r"(?:yes|yeah|yep|yup|ya|sure|ok|okay|do it|go ahead|go on|please|please do|correct|right|haan|ha|"
                  r"avunu|of course)(?: (?:yes|please|do it|go ahead|sure|thanks|thank you))*")  # after plain()
 NO = re.compile(r"(?:no|nope|nah|not|don't|dont|do not|cancel|stop|never ?mind|forget (?:it|about it|that)|leave it|"
@@ -4967,9 +4970,9 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         # model, which planned the step again and ran it with no tap
         say("Tap Yes on my question to go ahead.", notify)
         return True
-    if typed and NO.fullmatch(plain(words)) and not COMMAND.search(plain(words)):
+    if typed and NO.fullmatch(plain(words)) and not COMMAND.search(NOT_DONE.sub("", plain(words))):
         # a typed no is the No button, though "stop the music" stays a command: "no" got "Sure." and left the message
-        # typed in the chat
+        # typed in the chat, and so did "stop", "no stop" and "no, don't type it", their stop and type taken as commands
         pending = PENDING["plan"]
     answer = plain(words) if pending else ""
     # a mumbled yes isn't one; the phone's Yes button is as clear as a yes gets
@@ -4987,7 +4990,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
             plan = use_found(found)  # saved, then the message staged and asked about: a yes to that sends it
     # any no in the first few seconds; after that a message stays waiting, and "Jev, stop the music" or "cancel the
     # timer" is that, where it was taken as a no to the message and the music played on
-    elif pending and NO.fullmatch(answer) and (time.time() < PENDING["soon"] or not COMMAND.search(answer)):
+    elif pending and NO.fullmatch(answer) and (time.time() < PENDING["soon"] or typed or not COMMAND.search(answer)):
         found = next((s for s in pending.get("steps") or [] if s.get("do") == "contact_found"), None)
         if found and not CANCEL.search(answer):
             plan = not_them(found)  # "No", "not him": the next one she found. Nothing's staged, so nothing to clear

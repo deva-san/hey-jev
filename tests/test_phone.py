@@ -593,18 +593,24 @@ class Questions(unittest.TestCase):
 
     def test_a_typed_no_is_the_no_button(self):
         """"Send hi to Mum?" on the phone, and you typed "no": she said "Sure.", and "hi" stayed typed in Mum's chat on
-        the PC, one Enter from going."""
-        siri.PENDING.update(plan={"steps": [{"do": "message_send"}], "say": ""})
+        the PC, one Enter from going. "stop", "no stop" and "no, don't type it" did the same, their stop and type taken
+        as commands, where "stop the music" is one."""
+        siri.PENDING.update(plan={"steps": [{"do": "message_send"}], "say": ""}, soon=0.0)  # typed after a while
         siri.STAGED.update(ready={"app": "whatsapp", "contact": "Mum", "text": "hi"}, until=time.time() + 60)
         self.addCleanup(siri.STAGED.update, ready=None, until=0.0)
         cleared = []
-        for words in ("no", "No, cancel it", "don't send it"):
+        words_said = ("no", "No, cancel it", "don't send it", "stop", "no stop", "No, stop it", "no, don't type it")
+        for words in words_said:
             with mock.patch.object(siri.messaging, "discard", lambda ready: cleared.append(ready["text"]) or True):
                 lines = self.turn(words, phone=True)
             self.assertIn(lines[0], siri.REPLIES["confirm_no"], words)
-            siri.PENDING.update(plan={"steps": [{"do": "message_send"}], "say": ""})
+            siri.PENDING.update(plan={"steps": [{"do": "message_send"}], "say": ""}, soon=0.0)  # typed after a while
             siri.STAGED.update(ready={"app": "whatsapp", "contact": "Mum", "text": "hi"}, until=time.time() + 60)
-        self.assertEqual(cleared, ["hi", "hi", "hi"])
+        self.assertEqual(cleared, ["hi"] * len(words_said))
+        with mock.patch.object(siri.messaging, "discard", lambda ready: cleared.append(ready["text"]) or True), \
+                mock.patch.object(siri, "quick", lambda text, *a, **kw: siri.make_plan(say="Stopped.")):
+            self.turn("stop the music", phone=True)  # a command, not an answer to her question
+        self.assertEqual(cleared, ["hi"] * len(words_said))
 
     def test_on_the_phone_her_lines_go_back_to_the_chat(self):
         siri.PENDING.update(plan=None)
