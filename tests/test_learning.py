@@ -268,11 +268,15 @@ class PromptSize(Home):
         fixed = len(siri.DEFAULT_SOUL + "\n\n" + siri.PROMPT) + 700  # + the PC's context, about 630 characters
         total = fixed + len("\n\n" + known) + len(memory)
         tasks = total + len(siri.TASK_STEPS) - len(siri.TASK_STUB)
+        # without her name (149 of 150 voice turns) COLD_NOTE comes on top: outside PLAN's 4,000, and held here too
+        cold = tasks + len(siri.COLD_NOTE)
         print(f"\n  prompt with full memory and 40 skills, about 4 characters a token: fixed {fixed / 4:.0f}, "
-              f"total {total / 4:.0f}, for a command or schedule {tasks / 4:.0f} tokens")
+              f"total {total / 4:.0f}, for a command or schedule {tasks / 4:.0f}, and that without her name "
+              f"{cold / 4:.0f} tokens")
         self.assertLessEqual(fixed / 4, 3000)
         self.assertLessEqual(total / 4, 4000)
         self.assertLessEqual(tasks / 4, 4000)
+        self.assertLessEqual(cold / 4, 4300)
 
 
 if __name__ == "__main__":
