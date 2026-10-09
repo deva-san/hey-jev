@@ -47,6 +47,8 @@ class Messaging(unittest.TestCase):
             self.box.value += text
         for target, name, value in (
                 (m, "compose_box", lambda app, hwnd: (self.box, "Amma \U0001f496") if self.box else (None, "")),
+                (m, "_compose_box", lambda app, hwnd: (self.box, "Amma \U0001f496") if self.box else (None, "")),
+                (m, "window_of", lambda app: 99),  # open already, in the tray or not
                 (m, "box_value", lambda box: " ".join(box.value.split())),
                 (m, "in_front", lambda app, hwnd: True),
                 (m, "open_chat", lambda app, handle, text: 99),
@@ -151,6 +153,59 @@ class Messaging(unittest.TestCase):
         self.assertTrue(self.m.discard(ready))
         self.assertEqual((self.box.value, self.pressed), ("", [("ctrl", "a"), ("backspace",)]))
 
+    def test_a_send_she_couldnt_read_back_is_never_called_sent(self):
+        """8 October: after Enter the message box couldn't be read ("NULL COM pointer access"), and she said "Sent, as
+        far as I can tell" for a "Hi" that hadn't come; asked again and again, it went four times."""
+        ready = self.m.prepare("whatsapp", "amma", "Hi")
+
+        def unreadable(app, hwnd):  # fine until Enter, then never again
+            if ("enter",) in self.pressed:
+                raise ValueError("NULL COM pointer access")
+            return self.box, "Amma \U0001f496"
+        with mock.patch.object(self.m, "compose_box", unreadable), mock.patch.object(self.m, "_compose_box", unreadable):
+            ok, said = self.m.send(ready)
+        self.assertFalse(ok)
+        self.assertNotIn("Sent", said)
+        self.assertIn("Look at the chat before asking me again", said)
+
+    def test_a_null_com_pointer_now_and_then_is_read_again(self):
+        flaky, self.box.value = [ValueError("NULL COM pointer access")], "Hi"
+
+        def read(app, hwnd):
+            if flaky:
+                raise flaky.pop()
+            return self.box, "Amma \U0001f496"
+        with mock.patch.object(self.m, "compose_box", read), mock.patch.object(self.m, "_compose_box", read):
+            self.assertEqual(self.m.typed_text("whatsapp", 99), "Hi")
+
+    def test_from_closed_its_page_is_waited_for_before_the_chat(self):
+        """"Close WhatsApp" quits the 2025 app, whose page takes up to 25 s to draw: the chat was looked for 4 s, and a
+        number that was fine got "WhatsApp didn't open the chat with amma", so you had to ask again. Quit while narrow,
+        it comes back with only the chat drawn and no search box: that chat is ready, not "still starting"."""
+        for page_at, box_at in ((10.0, 11.0), (None, 10.0), (None, None)):
+            with self.subTest(page_at=page_at, box_at=box_at):
+                self.typed.clear()
+                self.box.value = ""
+                clock = [0.0]
+
+                def chat(app, hwnd):  # the chat the link asked for, once the page is there
+                    return (self.box, "Amma") if box_at is not None and clock[0] >= box_at else (None, "")
+                with mock.patch.object(self.m, "time", SimpleNamespace(time=lambda: clock[0], sleep=lambda s: clock.
+                                                                       __setitem__(0, clock[0] + s))), \
+                        mock.patch.object(self.m, "window_of", lambda app: None), \
+                        mock.patch.object(self.m, "_uia", lambda: SimpleNamespace(ElementFromHandle=lambda h: None)), \
+                        mock.patch.object(self.m, "_search_box", lambda uia, root: "search" if page_at is not None
+                                          and clock[0] >= page_at else None), \
+                        mock.patch.object(self.m, "compose_box", chat), mock.patch.object(self.m, "_compose_box", chat):
+                    if box_at is not None:
+                        self.assertTrue(self.m.prepare("whatsapp", "amma", "Hi")["checked"])
+                        self.assertEqual(self.typed, ["Hi"])
+                    else:  # still drawing after all that time: said so, never blamed on the chat
+                        with self.assertRaises(RuntimeError) as err:
+                            self.m.prepare("whatsapp", "amma", "Hi")
+                        self.assertIn("WhatsApp is still starting", str(err.exception))
+                        self.assertEqual((self.typed, self.pressed), ([], []))
+
     def test_the_new_name_of_the_box_is_read(self):
         m = real_messaging()
         box = SimpleNamespace(CurrentName="Type a message to Amma \U0001f496")
@@ -218,6 +273,7 @@ class Files(unittest.TestCase):
             self.copies += 1
         for target, name, value in (
                 (m.m, "compose_box", lambda app, hwnd: (box, "Amma")), (m.m, "box_value", lambda b: ""),
+                (m.m, "window_of", lambda app: 99),
                 (m.m, "in_front", lambda app, hwnd: True), (m.m, "open_chat", lambda app, handle, text: 99),
                 (m.m, "find_contact", lambda contact, app: ("amma", "919999999999")),
                 (m.m, "offline_reason", lambda app, hwnd: None), (m.m, "typed_text", lambda app, hwnd: ""),
@@ -553,6 +609,22 @@ class FindingThem(unittest.TestCase):
             self.assertTrue(self.siri.said_yes(words, plan), words)
         for words in ("Ha.", "Right.", "Hmm.", "No, the other one", "Who?", "That's wrong", "Yes, the other one"):
             self.assertFalse(self.siri.said_yes(words, plan), words)
+
+
+class LookingThemUp(unittest.TestCase):
+    def test_my_mum_is_looked_for_as_mum(self):
+        """"Message my mum on WhatsApp: running late": "my mum" typed into WhatsApp's search found nobody, and she
+        asked for the number, where "message mum" found Mum."""
+        m, searched = real_messaging(), []
+        with mock.patch.object(m, "bring_up", lambda app, link: 5), \
+                mock.patch.object(m, "_uia", lambda: SimpleNamespace(ElementFromHandle=lambda h: None)), \
+                mock.patch.object(m, "_search_box", lambda uia, root: "box"), \
+                mock.patch.object(m, "_look_for", lambda uia, root, hwnd, box, name, most, stop=None:
+                                  searched.append(name) or []), \
+                mock.patch.object(m, "_set_value", lambda box, text: None):
+            m.whatsapp_people("my mum")
+            m.whatsapp_people("Bunty Kumar")
+        self.assertEqual(searched, ["mum", "Bunty Kumar", "Bunty"])
 
 
 class ReadingThePanel(unittest.TestCase):

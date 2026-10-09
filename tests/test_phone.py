@@ -247,6 +247,30 @@ class Fixes(unittest.TestCase):
             asyncio.run(app.process_error(None, NetworkError("httpx.ConnectError: All connection attempts failed")))
         self.assertEqual(out.getvalue(), "[phone: Telegram NetworkError, carrying on]\n")
 
+    def test_a_send_from_the_bots_own_loop_doesnt_freeze_it(self):
+        """"stop" from your phone during a task in an app: "Stopping." was sent from the message's own handler, which
+        waited 30 s for the loop it was holding. No message or tap was taken meanwhile, and "Stopping." came late."""
+        bot, sent = telegram_bot.Bot(on_message=None, on_tap=None), []
+
+        async def send_message(chat, text, **kw):
+            sent.append((chat, text))
+        bot.app = SimpleNamespace(bot=SimpleNamespace(send_message=send_message))
+        bot.loop = loop = asyncio.new_event_loop()
+
+        async def handler():  # as phone_message runs, inside Bot._message
+            start = time.time()
+            ok = bot.send(7, "Stopping.")
+            took = time.time() - start
+            await asyncio.sleep(0.05)  # the loop free again: the send goes
+            return ok, took
+        try:
+            ok, took = loop.run_until_complete(handler())
+        finally:
+            loop.close()
+        self.assertTrue(ok)
+        self.assertLess(took, 1.0)
+        self.assertEqual(sent, [(7, "Stopping.")])
+
     def test_a_bad_token_is_said_once_and_it_stops(self):
         stops = []
         bot = telegram_bot.Bot(on_message=None, on_tap=None, on_stop=stops.append)
@@ -255,6 +279,77 @@ class Fixes(unittest.TestCase):
             bot.thread.join(5)
         self.assertEqual(stops, ["InvalidToken"])
         self.assertFalse(bot.running)
+
+
+class Hiccups(unittest.TestCase):
+    """A network hiccup at the wrong moment never loses what you sent or tapped without a word: she always answers."""
+
+    def setUp(self):
+        from telegram.error import TimedOut
+        self.got, self.hiccup = [], TimedOut
+        self.bot = telegram_bot.Bot(on_message=lambda text, chat: self.got.append((text, chat)),
+                                    on_tap=lambda *a: self.got.append(a), transcribe=lambda audio: ("open notepad", 5))
+        p = mock.patch.dict(siri.settings._load(), {"telegram_owner": 7})
+        p.start()
+        self.addCleanup(p.stop)
+
+    async def fails(self, *a, **kw):
+        raise self.hiccup()
+
+    def test_fetching_a_voice_note_is_answered(self):
+        """A TimedOut while fetching the voice note ended the turn there: no answer, and the command was lost."""
+        upd, replies = update(None, voice=SimpleNamespace(file_size=4000, get_file=self.fails))
+        asyncio.run(self.bot._message(upd, Context()))
+        self.assertEqual(replies, ["I couldn't make out that voice note."])
+
+    def test_showing_what_she_heard_doesnt_lose_the_turn(self):
+        upd, _ = update(None, voice=SimpleNamespace(file_size=4000))
+        upd.effective_message.reply_text = self.fails  # the "🎤 open notepad" line doesn't go
+
+        async def hear(msg):
+            return "open notepad"
+        with mock.patch.object(self.bot, "_hear", hear):
+            asyncio.run(self.bot._message(upd, Context()))
+        self.assertEqual(self.got, [("open notepad", 7)])
+
+    def test_a_tap_is_taken_though_the_button_keeps_spinning(self):
+        """Acknowledging the tap came first, and when that failed (or Telegram called the tap too old), your Yes was
+        dropped and the question waited out its 5 minutes."""
+        q = SimpleNamespace(data="yes:4", answer=self.fails, message=SimpleNamespace(chat_id=7, message_id=50))
+        asyncio.run(self.bot._tap(SimpleNamespace(callback_query=q, effective_user=SimpleNamespace(id=7)), None))
+        self.assertEqual(self.got, [(True, "4", 7, 50)])
+
+    def test_whatever_else_goes_wrong_you_hear_about_it_in_one_line(self):
+        """No error handler: the library only wrote "No error handlers are registered" and a traceback to the log."""
+        mine, ctx = update("open notepad")[0], Context()
+        ctx.error = self.hiccup()
+        asyncio.run(self.bot._error(mine, ctx))
+        asyncio.run(self.bot._error(None, ctx))  # asking Telegram for messages: nobody's to tell
+        asyncio.run(self.bot._error(update("hi", user_id=99)[0], ctx))  # nor a stranger
+        self.assertEqual(ctx.sent, [(7, "Something went wrong with that. Send it again.")])
+
+
+class OnThePC(unittest.TestCase):
+    def test_what_you_type_on_the_phone_and_her_answer_stay_off_its_screen(self):
+        """"What does this blood report say?" from the phone was shown in the popup at the bottom of the PC's screen,
+        and her answer in its window, for anyone in the room to read."""
+        shown, lines = [], []
+        plan = {"steps": [], "say": "Your haemoglobin is a little low, the rest is normal."}
+        with mock.patch.object(siri, "ask_plan", return_value=(json.dumps(plan), dict(plan), {}, "test")), \
+                mock.patch.object(siri, "context", return_value=""), \
+                mock.patch.object(siri, "learn_later", lambda *a, **k: None):
+            to, chat = siri.REPLY_TO.set(lines), siri.PHONE_CHAT.set(7)
+            try:
+                siri.handle("what does this blood report say", "what does this blood report say",
+                            notify=lambda state, detail="": shown.append((state, detail)))
+            finally:
+                siri.REPLY_TO.reset(to)
+                siri.PHONE_CHAT.reset(chat)
+        self.assertEqual(lines, [plan["say"]])  # on the phone, as ever
+        self.assertTrue(shown)
+        for state, detail in shown:
+            self.assertNotIn("blood", str(detail), state)
+            self.assertNotIn("haemoglobin", str(detail), state)
 
 
 class Pictures(unittest.TestCase):
@@ -561,6 +656,36 @@ class Questions(unittest.TestCase):
         self.assertFalse(self.ran_shutdown())
         self.turn("yes", phone=True, tapped=True)
         self.assertTrue(self.ran_shutdown())
+
+    def test_a_typed_yes_in_other_words_is_sent_to_the_button_too(self):
+        """"Yes, type it" to her phone question went to the model, which planned the step again and typed with no
+        tap, and without the check a step steered by what she'd read gets."""
+        siri.PENDING.update(plan={"steps": [{"do": "type", "text": "on my way"}], "say": ""})
+        for words in ("Yes, type it", "yes please do that", "sure, go for it"):
+            self.assertEqual(self.turn(words, phone=True), ["Tap Yes on my question to go ahead."], words)
+        self.assertEqual(self.ran, [])
+        self.assertIsNotNone(siri.PENDING["plan"])  # still waiting for the tap
+
+    def test_a_typed_no_is_the_no_button(self):
+        """"Send hi to Mum?" on the phone, and you typed "no": she said "Sure.", and "hi" stayed typed in Mum's chat on
+        the PC, one Enter from going. "stop", "no stop" and "no, don't type it" did the same, their stop and type taken
+        as commands, where "stop the music" is one."""
+        siri.PENDING.update(plan={"steps": [{"do": "message_send"}], "say": ""}, soon=0.0)  # typed after a while
+        siri.STAGED.update(ready={"app": "whatsapp", "contact": "Mum", "text": "hi"}, until=time.time() + 60)
+        self.addCleanup(siri.STAGED.update, ready=None, until=0.0)
+        cleared = []
+        words_said = ("no", "No, cancel it", "don't send it", "stop", "no stop", "No, stop it", "no, don't type it")
+        for words in words_said:
+            with mock.patch.object(siri.messaging, "discard", lambda ready: cleared.append(ready["text"]) or True):
+                lines = self.turn(words, phone=True)
+            self.assertIn(lines[0], siri.REPLIES["confirm_no"], words)
+            siri.PENDING.update(plan={"steps": [{"do": "message_send"}], "say": ""}, soon=0.0)  # typed after a while
+            siri.STAGED.update(ready={"app": "whatsapp", "contact": "Mum", "text": "hi"}, until=time.time() + 60)
+        self.assertEqual(cleared, ["hi"] * len(words_said))
+        with mock.patch.object(siri.messaging, "discard", lambda ready: cleared.append(ready["text"]) or True), \
+                mock.patch.object(siri, "quick", lambda text, *a, **kw: siri.make_plan(say="Stopped.")):
+            self.turn("stop the music", phone=True)  # a command, not an answer to her question
+        self.assertEqual(cleared, ["hi"] * len(words_said))
 
     def test_on_the_phone_her_lines_go_back_to_the_chat(self):
         siri.PENDING.update(plan=None)

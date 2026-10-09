@@ -209,6 +209,7 @@ class Bot:
         self.pairing, self.strangers, self.told, self.name = Pairing(), set(), set(), ""
         self.answered = {}  # her questions already answered with a tap: (chat, message) -> when
         self.albums = {}  # (chat, album) -> the pictures of an album that have come in, see _album
+        self.sending = set()  # sends started on the loop itself, held until done (see _call)
         self.loop, self.app, self.thread, self.why = None, None, None, ""
         self.stopping, self.again = False, False  # stop() asked for, and start() asked for again meanwhile
         self.lock = threading.Lock()
@@ -343,17 +344,6 @@ class Bot:
         app.add_error_handler(self._error)
         return app
 
-    async def _error(self, update, context):
-        """An error from Telegram in one line: with no handler of its own the library logged each with its whole
-        traceback, about 140 lines ("No error handlers are registered"), six times in a morning of network hiccups,
-        which it rides out by itself. Only the error's class, never its message, which can hold the token. Anything
-        else is a mistake in her own code here, and keeps its traceback."""
-        from telegram.error import TelegramError
-        if isinstance(context.error, TelegramError):
-            print(f"[phone: Telegram {type(context.error).__name__}, carrying on]")
-        else:
-            logging.getLogger(__name__).error("phone: a message from Telegram failed", exc_info=context.error)
-
     async def _ready(self, app):
         me = await app.bot.get_me()
         self.name = me.first_name or me.username or ""
@@ -455,7 +445,10 @@ class Bot:
             if not text:
                 await self._reply(msg, "I couldn't make out that voice note.")
                 return
-            await self._reply(msg, f"\U0001f3a4 {text}" + (f"\n\n{FORWARDED}" if forwarded else ""))
+            try:  # what she heard, then the turn: a hiccup sending this one line lost the whole voice note
+                await self._reply(msg, f"\U0001f3a4 {text}" + (f"\n\n{FORWARDED}" if forwarded else ""))
+            except Exception as exc:
+                print(f"  telegram: couldn't show what she heard ({type(exc).__name__})")
             if forwarded:  # written out for you to read, and that's all
                 return
         if forwarded and not (picture or kept):
@@ -562,17 +555,17 @@ class Bot:
         note = msg.voice
         if (note.file_size or 0) > 20 * 1024 * 1024:  # Telegram's own limit for a bot downloading a file
             return ""
-        data = await (await note.get_file()).download_as_bytearray()
 
-        def write():
+        def write(data):
             audio, rate = sf.read(io.BytesIO(bytes(data)), dtype="float32", always_2d=True)
             audio = audio.mean(axis=1)
             if rate != 16000:
                 n = int(len(audio) * 16000 / rate)
                 audio = np.interp(np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio).astype(np.float32)
             return str(self.transcribe(audio)[0]).strip()
-        try:
-            return await asyncio.get_running_loop().run_in_executor(None, write)
+        try:  # the download too: a network hiccup there ended the turn with no answer, the note lost
+            data = await (await note.get_file()).download_as_bytearray()
+            return await asyncio.get_running_loop().run_in_executor(None, write, data)
         except Exception as exc:
             print(f"  voice note failed: {exc!r}")
             return ""
@@ -581,16 +574,41 @@ class Bot:
         q, user = update.callback_query, update.effective_user
         if q is None:
             return
-        await q.answer()  # stops the button spinning, whoever tapped
-        if user is None or user.id != owner() or q.message is None:
-            return  # a tap from anyone else does nothing
-        answer, _, ask = str(q.data or "").partition(":")
-        key = (q.message.chat_id, q.message.message_id)
-        if answer in ("yes", "no") and key not in self.answered:  # a second tap, before the buttons came off: no
-            self.answered[key] = time.time()
-            while len(self.answered) > 200:
-                self.answered.pop(next(iter(self.answered)))
-            self.on_tap(answer == "yes", ask, q.message.chat_id, q.message.message_id)
+        if user is not None and user.id == owner() and q.message is not None:  # a tap from anyone else does nothing
+            answer, _, ask = str(q.data or "").partition(":")
+            key = (q.message.chat_id, q.message.message_id)
+            if answer in ("yes", "no") and key not in self.answered:  # a second tap, before the buttons came off: no
+                self.answered[key] = time.time()
+                while len(self.answered) > 200:
+                    self.answered.pop(next(iter(self.answered)))
+                self.on_tap(answer == "yes", ask, q.message.chat_id, q.message.message_id)
+        try:  # stops the button spinning, whoever tapped. After the tap is taken: first, a hiccup here, or a tap
+            # Telegram calls too old, dropped your Yes and the question waited out its 5 minutes
+            await q.answer()
+        except Exception as exc:
+            print(f"  telegram: couldn't stop the button spinning ({type(exc).__name__})")
+
+    async def _error(self, update, context):
+        """An error from Telegram in one line: with no handler of its own the library logged each with its whole
+        traceback, about 140 lines ("No error handlers are registered"), six times in a morning of network hiccups,
+        which it rides out by itself. Only the error's class, never its message, which can hold the token. Anything
+        else is a mistake in her own code here, and keeps its traceback. A message or tap of yours it cut short is
+        answered, never left in silence."""
+        from telegram.error import TelegramError
+        if isinstance(context.error, TelegramError):
+            print(f"[phone: Telegram {type(context.error).__name__}, carrying on]")
+        else:
+            logging.getLogger(__name__).error("phone: a message from Telegram failed", exc_info=context.error)
+        chat, user = getattr(update, "effective_chat", None), getattr(update, "effective_user", None)
+        if chat is None or user is None or user.id != owner():
+            return
+        sent = _sending()
+        try:
+            await context.bot.send_message(chat.id, "Something went wrong with that. Send it again.")
+        except Exception as exc:
+            print(f"  telegram: couldn't say so ({type(exc).__name__})")
+        finally:
+            sent[1] = time.time()
 
     def _call(self, coro_fn):
         """Runs a send on the bot's own loop, from Jev's side. False if it couldn't."""
@@ -598,6 +616,22 @@ class Bot:
         if loop is None:
             return False
         sent = _sending()
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:  # from a handler on the loop itself ("stop" from your phone): waiting there for the
+            # loop froze it for 30 s, no message or tap taken, and "Stopping." came 30 s late. Sent once it's free
+            task = loop.create_task(coro_fn())
+            self.sending.add(task)
+
+            def done(t):
+                self.sending.discard(t)
+                sent[1] = time.time()
+                if not t.cancelled() and t.exception() is not None:
+                    print(f"  telegram send failed: {type(t.exception()).__name__}")
+            task.add_done_callback(done)
+            return True
         try:
             asyncio.run_coroutine_threadsafe(coro_fn(), loop).result(30)
             return True

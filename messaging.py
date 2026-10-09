@@ -367,12 +367,13 @@ def window_of(app):
 
 def again(fn, tries=3, pause=0.4):
     """fn(), tried again a moment later on a COM error: WhatsApp's web view answers UI Automation with "An event
-    was unable to invoke any of the subscribers" now and then while it redraws. The last error if it never works."""
+    was unable to invoke any of the subscribers" now and then while it redraws, or "NULL COM pointer access": never
+    tried again, that left a message unchecked after Enter. The last error if it never works."""
     for i in range(tries):
         try:
             return fn()
         except Exception as exc:
-            if "COMError" not in type(exc).__name__ or i == tries - 1:
+            if not ("COMError" in type(exc).__name__ or "NULL COM pointer" in str(exc)) or i == tries - 1:
                 raise
             time.sleep(pause)
 
@@ -440,9 +441,11 @@ def box_value(box):
 
 def typed_text(app, hwnd):
     """What the app's message box holds, where Windows exposes it, else None (Telegram draws its own)."""
-    try:
-        box, _ = compose_box(app, hwnd)
+    def read():
+        box, _ = _compose_box(app, hwnd)
         return box_value(box) if box else None
+    try:
+        return again(read)
     except Exception as exc:
         print(f"  couldn't read the message box: {exc!r}")
         return None
@@ -486,6 +489,27 @@ def type_into(app, hwnd, text):
         win.press("ctrl", "a")
         win.press("backspace")
         raise RuntimeError(f"{APPS[app]['say']} didn't take the message, so I've not sent anything")
+
+
+def drawn(hwnd):
+    """True once WhatsApp's page is drawn, its search box or a chat's message box there, giving it up to LOADING.
+    Started from closed ("Close WhatsApp" quits the 2025 app) the window shows long before: the chat was looked for
+    4 s, and a number that was fine got "didn't open the chat", so you had to ask again. The message box too: quit
+    while narrow, it comes back with only the chat drawn, no search box, and that ready chat got "still starting"."""
+    end, why = time.time() + LOADING, None
+    while True:
+        try:
+            uia = _uia()
+            if again(lambda: _search_box(uia, uia.ElementFromHandle(hwnd))) is not None or \
+                    again(lambda: _compose_box("whatsapp", hwnd))[0] is not None:
+                return True
+        except Exception as exc:  # the window may still be coming up
+            why = exc
+        if time.time() > end:
+            if why is not None:
+                print(f"  couldn't look at WhatsApp's page: {why!r}")
+            return False
+        time.sleep(0.5)
 
 
 def open_chat(app, handle, text):
@@ -568,7 +592,8 @@ def whatsapp_people(name, most=LOOK_AT, stop=None):
     "number": "919573309199", "shown": "+91 95733 09199"}]. [] if it finds nobody. RuntimeError if WhatsApp can't
     be looked in. Not linked to the phone, it finds nobody: the message she then stages says why. stop: called
     before each chat is opened, True to open no more (you talked over her)."""
-    name = clean_search(name)
+    # the name as alias_key has it, in your own letters: "my mum" typed in found nobody, where "mum" finds Mum
+    name = clean_search(" ".join([w for w in str(name or "").split() if w.lower() not in ("my", "the")]) or name)
     hwnd = bring_up("whatsapp", "whatsapp:")
     uia = _uia()
     root = uia.ElementFromHandle(hwnd)
@@ -931,7 +956,11 @@ def prepare_files(app, contact, paths, caption=""):
     caption = " ".join(str(caption or "").split())[:MAX_TEXT]
     name, handle = find_contact(contact, app)
     before = chat_open(app)
+    cold = window_of(app) is None  # as in prepare
     hwnd = open_chat(app, handle, "")
+    if cold and not drawn(hwnd):
+        raise RuntimeError(offline_reason(app, hwnd) or f"{APPS[app]['say']} is still starting, so I've not sent "
+                           f"anything. Ask me again in a moment")
     if box_shown(app, hwnd) is None:  # as in prepare: not linked, or the chat didn't open
         why = offline_reason(app, hwnd)
         raise RuntimeError(why or f"{APPS[app]['say']} didn't open the chat with {name}, so I've not sent anything")
@@ -1120,14 +1149,23 @@ def prepare(app, contact, text):
     text = clean_text(text)
     name, handle = find_contact(contact, app)
     before = chat_open(app)
+    cold = APPS[app]["compose"] and window_of(app) is None  # quit, not just in the tray: see drawn
     hwnd = open_chat(app, handle, text)
-    if APPS[app]["compose"] and box_shown(app, hwnd) is None:
+    if cold and not drawn(hwnd):
+        raise RuntimeError(offline_reason(app, hwnd) or f"{APPS[app]['say']} is still starting, so I've not typed "
+                           f"anything. Ask me again in a moment")
+    # what the box holds, as box_shown read it: read a second time it could come back unreadable, and then the text
+    # the 2025 app's link leaves out was never typed
+    shown = box_shown(app, hwnd) if APPS[app]["compose"] else typed_text(app, hwnd)
+    if APPS[app]["compose"] and shown is None:
         # no message box: not linked to the phone (the Reconnect button: a 7 s look on the 2025 app's big page, so
         # only now), or the chat didn't open, as for a number not on WhatsApp. Never Enter into whatever that is
         why = offline_reason(app, hwnd)
         raise RuntimeError(why or f"{APPS[app]['say']} didn't open the chat with {name}, so I've not typed anything")
     _opened(app, hwnd, before, name, handle)
-    shown = typed_text(app, hwnd)
+    if APPS[app]["compose"]:  # the chat may have switched while _opened waited: read its box again, if it reads
+        again = box_shown(app, hwnd)
+        shown = shown if again is None else again
     if shown is not None and shown != text:  # the link left the text out (WhatsApp's 2025 app): she types it
         type_into(app, hwnd, text)
         shown = text
@@ -1168,10 +1206,19 @@ def send(ready):
     win.press("enter")
     time.sleep(1.0)
     left = typed_text(app, hwnd)
+    for _ in range(4 if box else 0):  # a box that was there a moment ago: read again, never guessed at
+        if left is not None:
+            break
+        time.sleep(0.5)
+        left = typed_text(app, hwnd)
     if left is not None:  # the box empties when WhatsApp takes the message
         if left == text:
             raise RuntimeError("it's still sitting in the message box, so it may not have sent")
         return True, f"Sent to {ready['contact']}."
+    if box:  # never "Sent" unchecked: after "Sent, as far as I can tell" you said it hadn't come, and asked again, and
+        # "Hi" went four times (8 October)
+        return False, (f"I pressed Enter, but couldn't read {APPS[app]['say']} back to check it went. Look at the "
+                       f"chat before asking me again.")
     return True, f"Sent to {ready['contact']}, as far as I can tell. {APPS[app]['say']} doesn't let me read it back."
 
 

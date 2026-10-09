@@ -283,6 +283,60 @@ class Readback(Turn):
             siri.handle("tell me a story")
         self.assertEqual(self.said, [LONG[:LONG.index(" Tell Appa")]])
 
+    def test_a_yes_or_no_you_never_said_isnt_the_message(self):
+        """"You not sent the message", and the model planned the message again with "yes" for its words: "yes" was
+        typed in Mum's chat, asked about as the message to send."""
+        typed = []
+        with self.model({"steps": [{"do": "message", "app": "whatsapp", "contact": "Mum", "text": "Yes."}],
+                         "say": ""}), \
+                mock.patch.object(siri.messaging, "prepare", lambda app, contact, text: typed.append(text) or
+                                  staged(app, contact, text)):
+            siri.handle("You not sent the message")
+        self.assertEqual(typed, [])
+        self.assertEqual(self.said, ["What should the message say?"])
+        self.assertFalse(siri.bare_answer("No, I can't make it", "let ravi know i'm busy"))  # a message, that one
+        self.assertFalse(siri.bare_answer("yes", "reply yes"))
+
+
+class Short(unittest.TestCase):
+    """Out loud, an answer is a few sentences at most, without markdown or list numbers; on the phone it's read whole.
+    The model gave spoken answers of 374 letters, with ** and numbered lists."""
+    ANSWER = ("Here are three good phones under 20,000:\n1. **Pixel 9a** at 19,999\n2. Galaxy A55, the best screen\n"
+              "3. Nothing Phone 3a for the looks\nAll three take good photos, and the Pixel gets updates the longest. "
+              "If you mostly watch videos, the Galaxy's screen is the one to pick, and it charges fastest too.")
+
+    def test_said_short_without_the_list_numbers(self):
+        said = siri.tidy(self.ANSWER)
+        self.assertTrue(said.startswith("Here are three good phones under 20,000: Pixel 9a at 19,999. Galaxy A55, the "
+                                        "best screen. Nothing Phone 3a for the looks."), said)
+        self.assertLessEqual(len(said), siri.SAY_MOST)
+        self.assertNotIn("1.", said)
+
+    def test_read_whole_on_the_phone(self):
+        to = siri.REPLY_TO.set([])
+        try:
+            self.assertEqual(siri.tidy(f"{self.ANSWER}\n{LONG}"), f"{self.ANSWER}\n{LONG}".replace("**", ""))
+        finally:
+            siri.REPLY_TO.reset(to)
+
+    def test_said_as_its_written_it_stops_there_too(self):
+        """Most answers are said as the model writes them (LiveSay), a sentence at a time, so tidy alone cut nothing."""
+        live, chunker = siri.LiveSay(None, make=lambda line: None), siri.SentenceChunker()
+        for sentence in chunker.feed(self.ANSWER) + chunker.flush():
+            live._queue(sentence)
+        said = []
+        while not live.lines.empty():
+            said.append(live.lines.get()[0])
+        self.assertEqual(said[:2], ["Here are three good phones under 20,000:", "Pixel 9a at 19,999"])
+        self.assertLessEqual(len(" ".join(said)), siri.SAY_MOST)
+        self.assertNotIn("If you mostly watch videos", " ".join(said))  # nor anything after where it stopped
+        self.assertNotRegex(" ".join(said), r"\b\d\.")
+
+    def test_only_the_name_in_settings(self):
+        """The model called him Harish, where Settings say Hari."""
+        with mock.patch.dict(siri.settings._load(), {"name": "Hari"}):
+            self.assertIn("Their name is Hari, never any other.", siri.context())
+
 
 SEND = {"steps": [{"do": "message_send"}], "say": ""}
 SCREEN = {"steps": [{"do": "screen", "task": "open the Recycle Bin on the desktop"}], "say": ""}

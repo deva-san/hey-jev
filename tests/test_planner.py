@@ -131,7 +131,7 @@ class TaskSteps(Turn):
             with self.subTest(words=words):
                 system = self.system(words)
                 self.assertIn(siri.TASK_STUB, system)
-                self.assertNotIn("run hidden in the background", system)
+                self.assertNotIn("destructive, admin and download commands are blocked", system)
 
     def test_a_request_the_words_miss_still_has_each_steps_fields(self):
         """"add a dark mode toggle to the settings page in hey-jev" got only the steps' names, so the model guessed

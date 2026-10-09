@@ -310,7 +310,7 @@ Talk to her from your phone. Make a bot with [@BotFather](https://core.telegram.
 - It asks Telegram for messages, so nothing on the PC is open to the internet. Only private chats, messages and button taps.
 - Anything sent while the PC was off or asleep, or over 2 minutes ago, is dropped, never run late.
 - A message goes through the same turn as voice, and her answer comes back to the chat.
-- A risky step comes back as a question with Yes and No buttons. Only a tap answers it, within 5 minutes. A typed yes, or a yes said at the PC, doesn't, and a question asked at the PC can't be answered from the phone.
+- A risky step comes back as a question with Yes and No buttons. Only a tap of Yes goes ahead, within 5 minutes. A typed yes, or a yes said at the PC, doesn't, though a typed "no" is taken as No, and a question asked at the PC can't be answered from the phone.
 - Voice notes are written out by the speech-to-text on this PC. They do pass through Telegram's servers, as every Telegram voice note does.
 - "Send me a screenshot" (or just "screenshot" on the phone) sends a picture of the PC's screen to your chat, 1920 pixels wide, her popup left out. It only ever goes to your own paired account.
 - If Telegram can't be reached, it keeps trying. If the token stops working, even while it's listening, the PC says so next to Settings > Phone. A second tap on Yes or No does nothing.
