@@ -2663,13 +2663,25 @@ CORRECTION = re.compile(r"(?:no|nope|not that|wrong|that's wrong|i said|i meant|
 # about first", which could rewrite a routine you taught her. After plain(), which takes "thanks" and "now" off the end.
 # A "don't" only turns her down for what she was about to do ("don't send it", "don't send the message", a bare
 # "don't"): "No, don't do that again" and "No, don't call me sir" correct her, and any 3 words after it took those for
-# a decline too. Only "it" or one thing ("the email") may follow her action, so "don't do it like that" corrects too
-DECLINE = re.compile(r"(?:no|nope|nah|not)(?: (?:no|nope|nah|not(?: now| yet)?|thanks|thank you|leave it|"
-                     r"forget (?:it|about it)|never ?mind|cancel(?: it| that)?|stop|wait|hold on|it's (?:fine|ok|okay)|"
-                     r"that's (?:fine|ok|okay|all)|i'm (?:good|fine|ok|okay)|(?:don't|dont|do not)(?: (?:bother|worry)"
+# a decline too. Only "it" or one thing ("the email") may follow her action, so "don't do it like that" corrects too.
+# That cut "No, don't send this email", "... these files" and "... reply to him" off too, and plain() takes "okay"
+# and "now" off the end, so "No, it's okay" ("no it's") and "No, leave it for now" never matched: both corrections.
+# So were "No, no need" (plain() makes it "no need"), "No, hold on a sec", "No, let it be", "No, I'll do it myself"
+# and "No, rehne do", among the commonest ways to turn her down
+DECLINE = re.compile(r"(?:no|nope|nah|not|actually)(?: (?:no|nope|nah|not(?: now| yet| today)?|thanks|thank you|"
+                     r"leave it(?: for| alone| be)?|forget (?:it|about it)|never ?mind|cancel(?: it| that)?|"
+                     r"stop(?: it)?|actually|need|needed|let it be|i'll do it(?: myself)?|"
+                     r"i (?:don't|do not) want(?: (?:to|that|it))?|rehne do|chhodo|chhod do|mat [\w']+|"
+                     r"(?:wait|hold on)(?: a (?:minute|min|sec|second|moment|bit))?|one (?:minute|min|sec|second)|"
+                     r"(?:maybe )?(?:later|tomorrow)|skip it|"
+                     r"(?:i |i've )?changed my mind|it's(?: (?:fine|ok|okay|alright))?|"
+                     r"that's(?: (?:fine|ok|okay|alright|all|it))?|i'm(?: (?:good|fine|ok|okay|alright))?|"
+                     r"(?:don't|dont|do not)(?: (?:bother|worry)"
                      r"(?: about it)?| (?:send|do|open|close|install|delete|buy|pay|run|play|type|save|post|reply|"
-                     r"call|text|email|share|download|remove|shut ?down|restart)(?: (?:it|that|this|them|anything)|"
-                     r" (?:the|a|an|my|any) [\w'.-]+)?(?: yet)?)?))*")
+                     r"call|text|email|share|download|remove|shut ?down|restart)(?: (?:it|that|this|them|him|her|"
+                     r"anything)| (?:the|a|an|my|any|this|that|these|those|his|her|their) "
+                     r"(?!again\b|like\b|way\b|anymore\b|ever\b)[\w'.-]+)?"
+                     r"(?: to (?:(?:my|the|his|her) )?[\w'.-]+)?(?: yet)?)?))*")
 _learning = {"turns": 0, "last": 0.0, "lock": threading.Lock(), "overheard": collections.deque(maxlen=20)}
 
 
@@ -4971,24 +4983,41 @@ DOING = (r"check|find|look up|tell me|night ?light|select|click|" + OPEN_GLUED +
          r"maximi[sz]e|minimi[sz]e|summari[sz]e|transcrib\w*|dictat\w*|notifications?|"
          r"clear (?:it|that|this|all|everything|the|my)|send|message|email|e-mail|call|reply|delete|remove|research|"
          r"alarm|exit|unmute|brightness|bluetooth|wi-?fi|dark mode|light mode|what time|weather|news|battery|cpu|ram|"
-         r"storage")
+         r"storage|"
+         # and ASKING's things to act on, with the date and calendar asked about: "put on some music", "song lagao",
+         # "take a note", "what's on my screen", "is the internet down" and "what's the date today" were let go, and
+         # then "what's today's date" too
+         r"music|song|video|note|screen|page|window|internet|emoji|watch|bookmark|today'?s date|"
+         r"what(?:'?s| is) (?:the |today'?s )?(?:date|day)|"
+         r"what (?:date|day) is|(?:date|day) is it|my (?:calendar|meetings?)|on (?:my|the) calendar|ip address")
 ASKS_ABOUT = re.compile(r"\b(?:what|what's|whats|who|who's|how|where|when|why|which)\b")
 # and the rest of ASKING's things to do when they start what's said, with "what's the time": on by default the decider
 # could let "Go back", "Refresh the page", "Read my messages" and "Cancel that" go with no model call. Only first,
 # where an order goes once plain() has taken "okay" and "hey" off: "we should go back home" stays for it to judge
 LEADS = re.compile(r"^(?:go (?:back|forward|to)|forward|refresh|reload|read|remember|run|cancel|approve|switch|clone|"
-                   r"schedule|softer|new (?:term|tap|tab)|do that)\b|\bwhat'?s the time\b")
+                   r"schedule|softer|new (?:term|tap|tab)|do that|like|mark|reopen|print|learn|teach)\b|"
+                   r"\bwhat'?s the time\b")
+# what's said before an order that plain() leaves on: "Actually, cancel that", "Wait, go back", "Accha, read my
+# messages" and "Bhai, refresh karo" kept LEADS from seeing their order first, and a sure decider let them go; so did
+# "Theek hai, read my messages", "Achha suno, ..." and "I mean, go back". A "look" that looks up or at stays on
+LEAD_IN = re.compile(r"^(?:(?:actually|wait|oh|ah|sorry|right|no|well|listen|instead|accha|achha|acha|arre|arey|"
+                     r"bhai|yaar|haan|han|ji|ok|okay|so|and|then|now|yeah|yes|please|hey|um|uh|hmm|theek hai|thik hai|"
+                     r"suno|dekho|i mean|look(?! (?:up|at|for|into|through)\b))\s+)+")
+# and Hinglish puts the order last ("page reload karo", "song lagao", "music chala do"), where LEADS never looks
+LAST_DO = re.compile(r"\b(?:kar ?do|karo|kar dena|lagao|laga do|chalao|chala do|bolo|bol do|bhejo|bhej do|kholo|"
+                     r"khol do|badhao|badha do|ghatao|ghata do|dikhao|dikha do|sunao|suna do|batao|bata do|likho|"
+                     r"likh do|hatao|hata do|band karo|band kar do)$")
 _doing = [None]
 
 
 def asks_something(text, gate=None):
     """True if words said without her name ask her to do something or about something she knows, or name an app or a
     site; with gate True (right after her answer) any question too."""
-    t = plain(str(text))
+    t = LEAD_IN.sub("", plain(str(text)))
     if _doing[0] is None:
         names = sorted({*APP_LOOKUP, *SITES}, key=len, reverse=True)
         _doing[0] = re.compile(rf"\b(?:{DOING}|{'|'.join(map(re.escape, names))})\b", re.I)
-    return bool(COMMAND.search(t) or _doing[0].search(t) or LEADS.search(t) or
+    return bool(COMMAND.search(t) or _doing[0].search(t) or LEADS.search(t) or LAST_DO.search(t) or
                 (gate is True and ASKS_ABOUT.search(t)))
 
 
@@ -6267,7 +6296,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             # written down as the decider was asked: str(gate) wrote "True" for a follow-up, which training read as
             # no kind at all
             asked_as = "follow_up" if what[2] is True else "cold"
-            if judged and judged[1] == "no" and decider.mode() == "on" and not asks_something(what[1], what[2]):
+            # and only ever lets go words said cold: on by default it let "And tomorrow?", "Say that again" and "aur
+            # kal?" go unheard right after her answer, and an unsure "Jev" too, the turns most likely to be hers
+            if judged and judged[1] == "no" and decider.mode() == "on" and what[2] == "cold" and \
+                    not asks_something(what[1], what[2]):
                 print(f"  (the decider is sure that wasn't for her, {judged[0]:.2f}: staying quiet)")
                 decider.log({"when": round(time.time()), "said": str(what[1]), "kind": asked_as,
                              "for_me": round(judged[0], 3), "verdict": "no", "mode": "on", "result": "let go"})

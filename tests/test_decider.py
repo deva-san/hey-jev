@@ -36,6 +36,13 @@ def trained(hi=0.8, lo=0.2):
     return d
 
 
+class SureNo:
+    """A head sure nothing is for her."""
+
+    def for_me(self, words, kind):
+        return 0.01, "no"
+
+
 class Heads(unittest.TestCase):
     def test_it_learns_requests_from_room_talk_and_answers_like_jev(self):
         d = trained()
@@ -128,7 +135,8 @@ class InHerEars(unittest.TestCase):
                 mock.patch.dict(siri.settings._load(), {"decider": setting, "no_name": True, "voice_id": "off"}), \
                 mock.patch.object(decider, "get", head), \
                 mock.patch.object(decider, "available", lambda: True), \
-                mock.patch.object(decider, "log", logged.append):
+                mock.patch.object(decider, "log", logged.append), \
+                mock.patch.object(siri, "asked_last", lambda *a: False):  # a "...?" another test left in history
             a.var("act_on")(text, kind, 100)
         return handled, logged
 
@@ -155,9 +163,6 @@ class InHerEars(unittest.TestCase):
         """On by default, its "sure it isn't for her" was only kept from the two kinds of words it got wrong on 8
         October: "Shut down the computer", "what time is it", or "how about tomorrow" right after her answer, would
         have been let go with no model call."""
-        class SureNo:
-            def for_me(self, words, kind):
-                return 0.01, "no"
         a = self.assistant()
         for words in ("Shut down the computer", "Okay, copy that link", "Take a screenshot", "what time is it",
                       "What's the weather tomorrow", "Go back", "Refresh the page", "Read my messages", "Cancel that",
@@ -171,6 +176,52 @@ class InHerEars(unittest.TestCase):
         # her things to do only count first: said in the middle they're as often room talk, for it to judge
         for words in ("we should go back home", "I read that in the paper", "they cancelled it, run along"):
             self.assertFalse(siri.asks_something(words, "cold"), words)
+
+    def test_it_never_lets_go_a_follow_up_or_words_with_an_unsure_name(self):
+        """On by default, sure "no" let these go with no model call right after her answer ("It's 32 degrees in
+        Delhi."): none ask about anything once plain() has taken the "?" off. Only words said cold are its to let go."""
+        a = self.assistant()
+        for words in ("And tomorrow?", "Say that again", "Translate that to Hindi", "Try again", "Is it done?",
+                      "the second one", "aur kal?", "phir se bolo", "awaaz badhao"):
+            handled, logged = self.run_cold(a, words, "on", SureNo, kind="follow_up")
+            self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
+        handled, _ = self.run_cold(a, "say that again, Jev", "on", SureNo)  # her name, not sure of it
+        self.assertEqual(handled, ["say that again, Jev"])
+
+    def test_a_question_another_test_left_in_history_changes_nothing_here(self):
+        """run_cold read asked_last from the shared test history: a "...?" reply any other test wrote within 28 s
+        turned on waiting, the decider was never asked, and room talk went on to the model."""
+        a = self.assistant()
+        with mock.patch.object(siri, "asked_last", lambda *a: True):
+            handled, _ = self.run_cold(a, "what are you doing tonight", "on", SureNo)
+        self.assertEqual(handled, [])
+
+    def test_nor_an_order_after_a_word_or_two_or_said_in_hinglish(self):
+        """LEADS only looked first, and plain() leaves "actually", "wait", "accha" and "bhai" on: a sure decider let
+        "Actually, cancel that" and "Bhai, refresh karo" go, and Hinglish says the order last ("page reload karo")."""
+        a = self.assistant()
+        for words in ("Actually, cancel that", "Wait, go back", "Oh, refresh the page", "Accha, read my messages",
+                      "Right, run it", "Bhai, refresh karo", "Sorry, wait, go back", "page reload karo",
+                      "window chhota karo", "song lagao", "music chala do", "screen pe dikhao",
+                      "Theek hai, read my messages", "Achha suno, read my messages", "Suno, go back",
+                      "Hmm, I mean, go back", "Look, go back"):
+            handled, logged = self.run_cold(a, words, "on", SureNo)
+            self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
+        self.assertEqual(self.run_cold(a, "what are you doing tonight, bhai", "on", SureNo)[0], [])
+
+    def test_nor_a_thing_to_act_on_or_the_date(self):
+        """Said cold these reach routing on ASKING's things to act on, or a question, and none was in DOING, COMMAND or
+        LEADS: a sure decider let "put on some music", "song lagao" and "what's the date today" go."""
+        a = self.assistant()
+        for words in ("put on some music", "song lagao", "what's the date today", "take a note buy milk", "new note",
+                      "look at my screen", "what's on my screen", "is the internet down", "print this page",
+                      "like this video", "mark it as read", "reopen the closed tab", "thumbs up emoji", "emoji bhejo",
+                      "music chala do", "add this to watch later", "what's on my calendar", "learn how to do this",
+                      "what day is it", "what's today's date", "what is today's date"):
+            handled, logged = self.run_cold(a, words, "on", SureNo)
+            self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
+        for words in ("pass the salt", "are you coming for dinner", "what are you doing tonight", "how was your day"):
+            self.assertEqual(self.run_cold(a, words, "on", SureNo)[0], [], words)  # room talk still goes
 
     def test_in_shadow_it_only_writes_down_what_it_would_have_done(self):
         a = self.assistant()
