@@ -2773,9 +2773,12 @@ TOOL_ARG = re.compile(r"<arg_key>([^<]*)</arg_key>\s*<arg_value>(.*?)</arg_value
 # task={"kind": "reminder", "text": "call Mum"}
 TOOL_ATTR = re.compile(r"^[ \t]*(\w+)[ \t]*=[ \t]*(.*?)[ \t]*(?:</arg_value>)?[ \t]*$", re.M)
 # or several on one line, ending " /": seconds=300 label="5 min" alert="..." / made seconds '300 label="5 min" ...'
-# and a YouTube query 'lofi music" play=true /' (8 October). The next one starts at a name like the steps' own, "="
-# straight after it, so "what is e = mc2" stays one value
-NEXT_ATTR = re.compile(r"[ \t]+([a-z_]{2,})=[ \t]*")
+# and a YouTube query 'lofi music" play=true /' (8 October). The next one starts at a name the prompts give a step,
+# "=" straight after it, so "what is e = mc2" and text=let total=5 stay one value
+ARG_NAMES = {k for k in re.findall(r'"([a-z_]+)":', PROMPT + RESEARCH + agent.AGENT_PROMPT) if len(k) > 1}
+NEXT_ATTR = re.compile(r"[ \t]+(" + "|".join(sorted(ARG_NAMES, key=len, reverse=True)) + r")=[ \t]*")
+# and the call's own end on its last line: " /", "/>" or ">", as in play=false/>, which kept "false/>" and so played
+END = re.compile(r"[ \t]*/?>$|[ \t]+/$")
 QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
 # Every step she can take: the ones PROMPT, RESEARCH and agent.AGENT_PROMPT list, and the rest do_step knows. Any other
 # name is a misreading, left out so she doesn't say "I can't Here yet": prose in a tool call once came out as {"do":
@@ -2813,8 +2816,9 @@ def _attr(value):
 
 def _attrs(args):
     """The key=value arguments of a tool call, a line each or several to a line (see NEXT_ATTR), each as _attr."""
-    out = {}
-    for key, rest in TOOL_ATTR.findall(args):
+    out, last = {}, args.rstrip()
+    for m in TOOL_ATTR.finditer(args):
+        key, rest = m.groups()
         while True:
             value, after = rest, ""
             quoted = QUOTED.match(rest)
@@ -2829,7 +2833,7 @@ def _attrs(args):
             elif not rest.startswith('"'):
                 nxt = NEXT_ATTR.search(rest)
                 value, after = (rest[:nxt.start()], rest[nxt.start():]) if nxt else (rest, "")
-            out[key] = _attr(re.sub(r"[ \t]+/>?$", "", value))
+            out[key] = _attr(END.sub("", value) if not after and m.end() >= len(last) else value)
             nxt = NEXT_ATTR.match(after)
             if not nxt:
                 break

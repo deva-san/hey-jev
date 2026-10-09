@@ -168,13 +168,28 @@ class ToolCalls(unittest.TestCase):
                                          '"text": "call Mum"} /\n</tool_call>')["steps"],
                          [{"do": "schedule", "when": "in 5 minutes", "task": {"kind": "reminder", "text": "call Mum"}}])
 
+    def test_an_end_without_a_space_is_no_part_of_the_value(self):
+        """'play=false/>' kept its '/>', a truthy string, so YouTube played the top video when it should only show it."""
+        for raw, play in (('<tool_call>youtube\nquery=lofi play=false/>', False),
+                          ('<tool_call>youtube\nquery="lofi music" play=true></tool_call>', True)):
+            self.assertIs(siri.parse_plan(raw)["steps"][0]["play"], play, raw)
+        self.assertEqual(siri.parse_plan('<tool_call>website\nurl=https://example.com/\n</tool_call>')["steps"],
+                         [{"do": "website", "url": "https://example.com/"}])  # a site's own "/" stays
+
     def test_one_value_with_spaces_quotes_or_equals_stays_whole(self):
         self.assertEqual(siri.parse_plan('<tool_call>say\ntext="She said "hi" to you"\n</tool_call>')["say"],
                          'She said "hi" to you')  # a quote inside the value, not the end of it
         for raw, step in (('<tool_call>website\nurl=https://example.com/?q=a b\n</tool_call>',
                            {"do": "website", "url": "https://example.com/?q=a b"}),
                           ('<tool_call>web\nquery=what is e = mc2\n</tool_call>',
-                           {"do": "web", "query": "what is e = mc2"})):
+                           {"do": "web", "query": "what is e = mc2"}),
+                          # name= inside the text is no argument of a step's, so she types all of it
+                          ('<tool_call>type\ntext=let total=5\n</tool_call>', {"do": "type", "text": "let total=5"}),
+                          ('<tool_call>type\ntext=git config user_name=Hari\n</tool_call>',
+                           {"do": "type", "text": "git config user_name=Hari"}),
+                          # a " /" ends the call only on its last line, not text the model meant to type
+                          ('<tool_call>type\ntext=and /\nkeys=enter /\n</tool_call>',
+                           {"do": "type", "text": "and /", "keys": "enter"})):
             self.assertEqual(siri.parse_plan(raw)["steps"], [step], raw)
 
     def test_a_say_tool_call_is_what_she_says(self):
