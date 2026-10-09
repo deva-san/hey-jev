@@ -177,6 +177,17 @@ class InHerEars(unittest.TestCase):
         for words in ("we should go back home", "I read that in the paper", "they cancelled it, run along"):
             self.assertFalse(siri.asks_something(words, "cold"), words)
 
+    def test_it_never_lets_go_a_follow_up_or_words_with_an_unsure_name(self):
+        """On by default, sure "no" let these go with no model call right after her answer ("It's 32 degrees in
+        Delhi."): none ask about anything once plain() has taken the "?" off. Only words said cold are its to let go."""
+        a = self.assistant()
+        for words in ("And tomorrow?", "Say that again", "Translate that to Hindi", "Try again", "Is it done?",
+                      "the second one", "aur kal?", "phir se bolo", "awaaz badhao"):
+            handled, logged = self.run_cold(a, words, "on", SureNo, kind="follow_up")
+            self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
+        handled, _ = self.run_cold(a, "say that again, Jev", "on", SureNo)  # her name, not sure of it
+        self.assertEqual(handled, ["say that again, Jev"])
+
     def test_a_question_another_test_left_in_history_changes_nothing_here(self):
         """run_cold read asked_last from the shared test history: a "...?" reply any other test wrote within 28 s
         turned on waiting, the decider was never asked, and room talk went on to the model."""

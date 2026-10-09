@@ -6251,7 +6251,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             # written down as the decider was asked: str(gate) wrote "True" for a follow-up, which training read as
             # no kind at all
             asked_as = "follow_up" if what[2] is True else "cold"
-            if judged and judged[1] == "no" and decider.mode() == "on" and not asks_something(what[1], what[2]):
+            # and only ever lets go words said cold: on by default it let "And tomorrow?", "Say that again" and "aur
+            # kal?" go unheard right after her answer, and an unsure "Jev" too, the turns most likely to be hers
+            if judged and judged[1] == "no" and decider.mode() == "on" and what[2] == "cold" and \
+                    not asks_something(what[1], what[2]):
                 print(f"  (the decider is sure that wasn't for her, {judged[0]:.2f}: staying quiet)")
                 decider.log({"when": round(time.time()), "said": str(what[1]), "kind": asked_as,
                              "for_me": round(judged[0], 3), "verdict": "no", "mode": "on", "result": "let go"})
