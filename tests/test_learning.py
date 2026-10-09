@@ -288,7 +288,12 @@ class Corrections(unittest.TestCase):
                           "No, don't send this email", "No, don't send that message", "No, don't delete these files",
                           "No, don't install this app", "No, don't reply to him", "No, it's okay", "No, that's okay",
                           "No, I'm okay", "No, leave it for now", "No, not today", "No, maybe later", "No, skip it",
-                          "No, wait a minute", "No, I changed my mind", "Actually, I changed my mind"):
+                          "No, wait a minute", "No, I changed my mind", "Actually, I changed my mind",
+                          # and the commonest ways to turn her down after those, in English and in Hinglish
+                          "No, stop it", "No, no need", "No, not needed", "No, hold on a sec", "No, one sec",
+                          "No, let it be", "No, that's it", "No, maybe tomorrow", "No, I'll do it myself",
+                          "No, never mind, I'll do it myself", "No, actually never mind", "No, I don't want to",
+                          "No, rehne do", "No, mat bhejo", "No, chhodo"):
                 siri.learn_later(words, [], [], gate=True)
             self.assertEqual(started, [])
             fixes = ("No, I said Zostel", "No, not that one", "Nope, wrong one", "No, open Spotify instead",

@@ -2665,12 +2665,17 @@ CORRECTION = re.compile(r"(?:no|nope|not that|wrong|that's wrong|i said|i meant|
 # "don't"): "No, don't do that again" and "No, don't call me sir" correct her, and any 3 words after it took those for
 # a decline too. Only "it" or one thing ("the email") may follow her action, so "don't do it like that" corrects too.
 # That cut "No, don't send this email", "... these files" and "... reply to him" off too, and plain() takes "okay"
-# and "now" off the end, so "No, it's okay" ("no it's") and "No, leave it for now" never matched: both corrections
+# and "now" off the end, so "No, it's okay" ("no it's") and "No, leave it for now" never matched: both corrections.
+# So were "No, no need" (plain() makes it "no need"), "No, hold on a sec", "No, let it be", "No, I'll do it myself"
+# and "No, rehne do", among the commonest ways to turn her down
 DECLINE = re.compile(r"(?:no|nope|nah|not|actually)(?: (?:no|nope|nah|not(?: now| yet| today)?|thanks|thank you|"
-                     r"leave it(?: for| alone| be)?|forget (?:it|about it)|never ?mind|cancel(?: it| that)?|stop|"
-                     r"wait(?: a (?:minute|min|sec|second|moment|bit))?|hold on|(?:maybe )?later|skip it|"
+                     r"leave it(?: for| alone| be)?|forget (?:it|about it)|never ?mind|cancel(?: it| that)?|"
+                     r"stop(?: it)?|actually|need|needed|let it be|i'll do it(?: myself)?|"
+                     r"i (?:don't|do not) want(?: (?:to|that|it))?|rehne do|chhodo|chhod do|mat [\w']+|"
+                     r"(?:wait|hold on)(?: a (?:minute|min|sec|second|moment|bit))?|one (?:minute|min|sec|second)|"
+                     r"(?:maybe )?(?:later|tomorrow)|skip it|"
                      r"(?:i |i've )?changed my mind|it's(?: (?:fine|ok|okay|alright))?|"
-                     r"that's(?: (?:fine|ok|okay|alright|all))?|i'm(?: (?:good|fine|ok|okay|alright))?|"
+                     r"that's(?: (?:fine|ok|okay|alright|all|it))?|i'm(?: (?:good|fine|ok|okay|alright))?|"
                      r"(?:don't|dont|do not)(?: (?:bother|worry)"
                      r"(?: about it)?| (?:send|do|open|close|install|delete|buy|pay|run|play|type|save|post|reply|"
                      r"call|text|email|share|download|remove|shut ?down|restart)(?: (?:it|that|this|them|him|her|"
