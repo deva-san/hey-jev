@@ -101,10 +101,11 @@ NO_OPEN = re.compile(r"\b(?:cmd|command prompt|powershell|pwsh|terminal|wsl|bash
                      r"task scheduler|group policy|computer management|services)\b", re.I)
 FOLDER = re.compile(r"shell:[a-z][\w ]*", re.I)  # a shell folder by name: shell:Downloads, not shell:AppsFolder\x!App
 # A program, by its file's name, or by its type where Windows hides the name's ending ("setup", an Application):
-# opened from File Explorer, it runs, as an install would
-RUNS = re.compile(r"\.(?:exe|msi|msix|appx|bat|cmd|ps1|vbs|js|wsf|com|scr|lnk|reg|hta|cpl|url)\s*$", re.I)
+# opened from File Explorer, it runs, as an install would. A Python File too: the py launcher runs install.py there
+RUNS = re.compile(r"\.(?:exe|msi|msix|appx|bat|cmd|ps1|vbs|vbe|js|jse|wsf|wsh|com|scr|pif|lnk|reg|hta|cpl|msc|url|"
+                  r"py|pyw|jar|appref-ms|application)\s*$", re.I)
 PROGRAM_TYPES = re.compile(r"\b(?:application|installer|package|batch|script|shortcut|registration|control panel|"
-                           r"screen saver)\b", re.I)
+                           r"screen saver|python|java|executable)\b", re.I)
 # A live run (run): steps the model may plan, rounds of look-think-act, seconds, screenshots and rounds the screen may
 # stay the same before she gives up, steps a round, and how sure speech-to-text must be of a task's words for her to
 # start it without asking "Should I ...?" first

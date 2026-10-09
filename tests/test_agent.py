@@ -1284,7 +1284,9 @@ class Safety(Live):
         Windows hides a name's ending, so "setup" is known for one by its type, an Application, and a file whose type
         can't be read asks too: "plan.pdf" can be plan.pdf.exe."""
         for name, kind in (("setup", "Application"), ("setup.exe", ""), ("tool.msi", "Windows Installer Package"),
-                           ("Shortcut to x", "Shortcut"), ("plan.pdf", "")):
+                           ("Shortcut to x", "Shortcut"), ("plan.pdf", ""), ("build.py", "Python File"),
+                           ("build", "Python File"), ("tool", "Executable Jar File"),
+                           ("disks.msc", "Microsoft Common Console Document")):
             self.explorer((name, kind), ("Photos", "File folder"))
             self.model(lambda: {"steps": [{"do": "click", "id": self.app.id(name)}]})
             line, r = self.run_task("open it in file explorer")
