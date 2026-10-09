@@ -149,6 +149,15 @@ class Learning(unittest.TestCase):
         logged(p, [0.7] * 100, [])  # 4 in 200
         self.assertEqual(p.calibrate(), "on")
 
+    def test_one_in_thirty_of_what_she_let_go_passing_is_too_few_to_be_sure(self):
+        """Checked again after every turn, 1 in 30 let through also comes up about one time in five when 1 in 10 other
+        voices really pass: she'd say she knows your voice and let the TV in. With more of them she can be sure."""
+        p = profile()
+        logged(p, [0.7] * 40, [0.9] + [0.1] * 29)
+        self.assertEqual(p.calibrate(), "unsure")
+        logged(p, [], [0.9] * 5 + [0.1] * 160)  # 6 in 195
+        self.assertEqual(p.calibrate(), "on")
+
     def test_the_score_log_is_read_from_the_file_once(self):
         """Read again on every phrase, on the listening thread before the turn ran, it took 25 ms at 166 lines and
         48 ms at 14,000, and nothing ever cut it back."""

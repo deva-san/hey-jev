@@ -201,7 +201,10 @@ class Profile:
             if (named, strict, True) != (self.named, self.strict, self.calibrated):  # saved only when they move
                 self.named, self.strict, self.calibrated = named, strict, True
                 self.save()
-        apart = (mine >= strict).mean() >= YOURS_PASS and (room >= strict).mean() <= OTHERS_PASS
+        # what she let go that passes counted with one more of it, and one more that doesn't: 1 in 30 is too few to be
+        # sure of, since it's checked again after every turn and comes up one time in five when 1 in 10 really pass
+        others = (float((room >= strict).sum()) + 1) / (len(room) + 2)
+        apart = (mine >= strict).mean() >= YOURS_PASS and others <= OTHERS_PASS
         return "on" if apart else "unsure"
 
 
