@@ -4616,6 +4616,11 @@ DOING = (r"check|find|look up|tell me|night ?light|select|click|" + OPEN_GLUED +
          r"alarm|exit|unmute|brightness|bluetooth|wi-?fi|dark mode|light mode|what time|weather|news|battery|cpu|ram|"
          r"storage")
 ASKS_ABOUT = re.compile(r"\b(?:what|what's|whats|who|who's|how|where|when|why|which)\b")
+# and the rest of ASKING's things to do when they start what's said, with "what's the time": on by default the decider
+# could let "Go back", "Refresh the page", "Read my messages" and "Cancel that" go with no model call. Only first,
+# where an order goes once plain() has taken "okay" and "hey" off: "we should go back home" stays for it to judge
+LEADS = re.compile(r"^(?:go (?:back|forward|to)|forward|refresh|reload|read|remember|run|cancel|approve|switch|clone|"
+                   r"schedule|softer|new (?:term|tap|tab)|do that)\b|\bwhat'?s the time\b")
 _doing = [None]
 
 
@@ -4626,7 +4631,8 @@ def asks_something(text, gate=None):
     if _doing[0] is None:
         names = sorted({*APP_LOOKUP, *SITES}, key=len, reverse=True)
         _doing[0] = re.compile(rf"\b(?:{DOING}|{'|'.join(map(re.escape, names))})\b", re.I)
-    return bool(COMMAND.search(t) or _doing[0].search(t) or (gate is True and ASKS_ABOUT.search(t)))
+    return bool(COMMAND.search(t) or _doing[0].search(t) or LEADS.search(t) or
+                (gate is True and ASKS_ABOUT.search(t)))
 
 
 # What you say while she talks, or as she ends, is heard (Recorder.keeps): Windows' speech mode takes all of her

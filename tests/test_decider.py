@@ -113,13 +113,17 @@ class InHerEars(unittest.TestCase):
                 return 0.01, "no"
         a = self.assistant()
         for words in ("Shut down the computer", "Okay, copy that link", "Take a screenshot", "what time is it",
-                      "What's the weather tomorrow"):
+                      "What's the weather tomorrow", "Go back", "Refresh the page", "Read my messages", "Cancel that",
+                      "Hey, what's the time", "Run it", "Approve it", "Switch to the other window"):
             handled, logged = self.run_cold(a, words, "on", SureNo)
             self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
         self.assertEqual(self.run_cold(a, "pass the salt please", "on", SureNo)[0], [])  # room talk still goes
         self.assertTrue(siri.asks_something("how about tomorrow", True))  # right after her answer: to her
         self.assertTrue(siri.asks_something("Send a message to Bunty saying I'm late", True))
         self.assertFalse(siri.asks_something("what are you doing tonight", "cold"))  # said cold: room talk
+        # her things to do only count first: said in the middle they're as often room talk, for it to judge
+        for words in ("we should go back home", "I read that in the paper", "they cancelled it, run along"):
+            self.assertFalse(siri.asks_something(words, "cold"), words)
 
     def test_in_shadow_it_only_writes_down_what_it_would_have_done(self):
         a = self.assistant()
