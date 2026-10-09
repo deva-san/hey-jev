@@ -5,7 +5,8 @@ done on the PC: no steps run, nothing is said out loud, and nothing is kept in h
     .venv\\Scripts\\python checks\\open_mic.py
 
 The phrases go to the answer model in Settings, as text. Exits with 1 if more than ALLOWED are taken wrong: the
-model decides the unclear ones, so it can miss one now and then.
+model decides the unclear ones, so it can miss one now and then. It works on a copy of her data (checks/sandbox.py),
+so her memory, skills and Settings are the ones it sees; with --real-data on her own.
 """
 import contextlib
 import io
@@ -13,7 +14,11 @@ import os
 import sys
 import time
 
-# In checks\ since 8 Oct, see checks/listen.py: under a test runner, winplatform.own_data refuses her real folders
+# In checks\ since 8 Oct, see checks/listen.py: under a test runner, winplatform.own_data refuses her real folders,
+# and run by hand it works on a copy of her data unless it's given --real-data
+import sandbox  # noqa: E402
+
+sandbox.use()
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import history  # noqa: E402
 import siri  # noqa: E402

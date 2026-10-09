@@ -1,13 +1,17 @@
 """The harness itself: the app data is a temp folder and nothing can act on the PC or go online."""
 import glob
+import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
 from unittest import mock
+
+import dotenv
 
 from tests.support import DATA, REAL, ROOT, TRIPPED, siri, winplatform
 
@@ -138,6 +142,89 @@ class RealData(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(ROOT, "checks", "__init__.py")))
         for name in ("listen.py", "open_mic.py", "voice_id.py"):
             self.assertTrue(os.path.isfile(os.path.join(ROOT, "checks", name)), name)
+
+
+class HandChecks(unittest.TestCase):
+    """The hand checks in checks\\ run her real code with the real models, by hand, in a plain python. They work on a
+    copy of her data, which goes when they end: only --real-data lets them write to her own."""
+    CHECKS = os.path.join(ROOT, "checks")
+    maxDiff = None
+
+    def run_check(self, name, *args):
+        """Runs a check's top in a plain python, as you would by hand (not its main(): that needs Windows' voices
+        and the models), against a folder standing in for her real ones, then has her code write a turn and a
+        decider line as a check could. Returns (stand-in, what it saw, the stand-in's files before)."""
+        real = tempfile.mkdtemp(prefix="heyjev-real-")
+        roaming, local = os.path.join(real, "Roaming"), os.path.join(real, "Local")
+        files = {os.path.join(roaming, "Hey Jev", "settings.json"): '{"stt_engine": "whisper"}',
+                 os.path.join(roaming, "Hey Jev", "memories", "USER.md"): "Lives in Hyderabad.",
+                 os.path.join(local, "Hey Jev", "Logs", "Hey Jev.log"): "> heard: 'open notepad'\n"}
+        files.update({os.path.join(local, "Hey Jev", "voice", "clips", f"{i}.wav"): "RIFF" for i in range(3)})
+        for path, text in files.items():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        con = sqlite3.connect(os.path.join(roaming, "Hey Jev", "history.db"))  # one turn of yours already in it
+        with con:
+            con.execute("CREATE VIRTUAL TABLE turns USING fts5(said, did, reply, plan UNINDEXED, day UNINDEXED, "
+                        "ts UNINDEXED, tokenize='porter unicode61')")
+            con.execute("INSERT INTO turns (said, ts) VALUES ('what is the weather', 1)")
+        con.close()
+        before = self.contents(real)
+        script = os.path.join(self.CHECKS, name)
+        driver = textwrap.dedent(f"""
+            import glob, json, os, runpy, sys
+            sys.path[:0] = [{self.CHECKS!r}]  # as python puts a script's folder first
+            sys.path.append({ROOT!r})
+            from tests import winfakes
+            winfakes.install()  # Windows' own modules, off Windows: does nothing on Windows
+            sys.argv = [{script!r}, *{list(args)!r}]
+            runpy.run_path({script!r}, run_name="check")
+            import decider, history, settings, speech, voiceid, winplatform
+            history.add("open notepad", "opened Notepad")
+            decider.log({{"said": "open notepad"}})
+            print(json.dumps({{"argv": sys.argv[1:], "data": winplatform.APPDATA_DIR, "logs": winplatform.LOG_DIR,
+                               "history": history.DB, "turns": history.count(), "engine": settings.get("stt_engine"),
+                               "clips": len(glob.glob(os.path.join(voiceid.folder(), "clips", "*.wav"))),
+                               "models": speech.models_dir()}}))
+        """)
+        env = {k: v for k, v in os.environ.items() if k not in ("HEYJEV_TESTING", "HEYJEV_MODELS")}
+        env.update(APPDATA=roaming, LOCALAPPDATA=local)
+        run = subprocess.run([sys.executable, "-c", driver], cwd=real, env=env, capture_output=True, text=True,
+                             timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+        return real, json.loads(run.stdout.strip().splitlines()[-1]), before
+
+    def contents(self, folder):
+        out = {}
+        for root, _, names in os.walk(folder):
+            for name in names:
+                with open(os.path.join(root, name), "rb") as f:
+                    out[os.path.relpath(os.path.join(root, name), folder)] = hashlib.sha256(f.read()).hexdigest()
+        return out
+
+    def test_a_check_works_on_a_copy_of_her_data(self):
+        for name, args in (("listen.py", ("parakeet",)), ("open_mic.py", ()), ("voice_id.py", ())):
+            with self.subTest(name):
+                real, saw, before = self.run_check(name, *args)
+                self.assertEqual(before, self.contents(real))  # nothing written
+                self.assertEqual(saw["turns"], 1)  # her old turns aren't in the copy: a check starts with none
+                for key in ("data", "logs", "history"):
+                    self.assertFalse(os.path.abspath(saw[key]).startswith(real + os.sep), (key, saw[key]))
+                self.assertEqual(saw["argv"], list(args))  # its own arguments as they were
+                self.assertEqual(saw["engine"], "whisper")  # her settings, read from the copy
+                self.assertEqual(saw["clips"], 3)  # your clips, for voice_id.py
+                models = dotenv.dotenv_values(os.path.join(ROOT, ".env")).get("HEYJEV_MODELS")  # D:\HeyJev\models
+                self.assertEqual(saw["models"], models or os.path.join(real, "Local", "Hey Jev", "models"))  # real ones
+                self.assertFalse(os.path.exists(os.path.dirname(saw["data"])), "the copy is gone when it ends")
+
+    def test_only_real_data_lets_a_check_write_to_her_data(self):
+        real, saw, _ = self.run_check("listen.py", "--real-data", "parakeet")
+        self.assertEqual(saw["argv"], ["parakeet"])
+        self.assertEqual(saw["history"], os.path.join(real, "Roaming", "Hey Jev", "history.db"))
+        self.assertEqual(saw["turns"], 2)
+        with open(os.path.join(real, "Local", "Hey Jev", "decider", "shadow.jsonl"), encoding="utf-8") as f:
+            self.assertIn("open notepad", f.read())
 
 
 class ContactsBook(unittest.TestCase):

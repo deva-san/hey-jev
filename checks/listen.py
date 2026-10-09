@@ -5,7 +5,8 @@ path what to do about it.
     .venv\\Scripts\\python checks\\listen.py            # with the speech-to-text picked in Settings
     .venv\\Scripts\\python checks\\listen.py parakeet   # or name one: nemotron, parakeet or whisper
 
-Prints what was heard and how long it took, and exits with 1 if anything is routed wrong.
+Prints what was heard and how long it took, and exits with 1 if anything is routed wrong. It works on a copy of her
+data (checks/sandbox.py); with --real-data on her own.
 """
 import os
 import shutil
@@ -19,7 +20,11 @@ import soundfile as sf
 
 # In checks\ since 8 Oct: from the repo root, `python -m unittest` imported these hand checks, and siri through them,
 # before tests/support.py had moved %APPDATA%, and the test run wrote into her real data. Under a test runner without
-# support.py, winplatform.own_data now refuses her real folders on the first import below.
+# support.py, winplatform.own_data now refuses her real folders on the first import below. Run by hand, a check works
+# on a copy of her data, unless it's given --real-data: sandbox.use() comes before anything of hers is imported.
+import sandbox  # noqa: E402
+
+sandbox.use()
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import settings  # noqa: E402

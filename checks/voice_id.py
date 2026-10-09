@@ -2,7 +2,8 @@
 
 Scores your voice (the sentences you read for "learn my voice", in %LOCALAPPDATA%\\Hey Jev\\voice\\clips) against
 Windows' own voices saying commands, and times each voice print. Your clips are scored against the others, one left
-out at a time. Nothing leaves the PC; Windows' voices are made into WAV files in a temp folder and deleted."""
+out at a time. Nothing leaves the PC; Windows' voices are made into WAV files in a temp folder and deleted. Your clips
+and levels are read from a copy of her data (checks/sandbox.py); with --real-data from her own."""
 import glob
 import os
 import subprocess
@@ -12,12 +13,14 @@ import time
 
 import numpy as np
 import soundfile as sf
-from dotenv import load_dotenv
 
-# In checks\ since 8 Oct, see checks/listen.py: under a test runner, winplatform.own_data refuses her real folders
+# In checks\ since 8 Oct, see checks/listen.py: under a test runner, winplatform.own_data refuses her real folders,
+# and run by hand it works on a copy of her data unless it's given --real-data. sandbox.use() reads .env first.
+import sandbox  # noqa: E402
+
+sandbox.use()
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
-load_dotenv(os.path.join(HERE, ".env"))
 import speech  # noqa: E402
 import voiceid  # noqa: E402
 
