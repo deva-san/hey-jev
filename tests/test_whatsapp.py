@@ -132,10 +132,12 @@ class Messaging(unittest.TestCase):
 
     def test_from_closed_its_page_is_waited_for_before_the_chat(self):
         """"Close WhatsApp" quits the 2025 app, whose page takes up to 25 s to draw: the chat was looked for 4 s, and a
-        number that was fine got "WhatsApp didn't open the chat with amma", so you had to ask again."""
-        for page_at, box_at in ((10.0, 11.0), (None, None)):
-            with self.subTest(page_at=page_at):
+        number that was fine got "WhatsApp didn't open the chat with amma", so you had to ask again. Quit while narrow,
+        it comes back with only the chat drawn and no search box: that chat is ready, not "still starting"."""
+        for page_at, box_at in ((10.0, 11.0), (None, 10.0), (None, None)):
+            with self.subTest(page_at=page_at, box_at=box_at):
                 self.typed.clear()
+                self.box.value = ""
                 clock = [0.0]
 
                 def chat(app, hwnd):  # the chat the link asked for, once the page is there
@@ -147,7 +149,7 @@ class Messaging(unittest.TestCase):
                         mock.patch.object(self.m, "_search_box", lambda uia, root: "search" if page_at is not None
                                           and clock[0] >= page_at else None), \
                         mock.patch.object(self.m, "compose_box", chat), mock.patch.object(self.m, "_compose_box", chat):
-                    if page_at is not None:
+                    if box_at is not None:
                         self.assertTrue(self.m.prepare("whatsapp", "amma", "Hi")["checked"])
                         self.assertEqual(self.typed, ["Hi"])
                     else:  # still drawing after all that time: said so, never blamed on the chat

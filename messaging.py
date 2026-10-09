@@ -478,14 +478,16 @@ def type_into(app, hwnd, text):
 
 
 def drawn(hwnd):
-    """True once WhatsApp's page is drawn, its search box there, giving it up to LOADING. Started from closed ("Close
-    WhatsApp" quits the 2025 app) the window shows long before: the chat was looked for 4 s, and a number that was
-    fine got "didn't open the chat", so you had to ask again."""
+    """True once WhatsApp's page is drawn, its search box or a chat's message box there, giving it up to LOADING.
+    Started from closed ("Close WhatsApp" quits the 2025 app) the window shows long before: the chat was looked for
+    4 s, and a number that was fine got "didn't open the chat", so you had to ask again. The message box too: quit
+    while narrow, it comes back with only the chat drawn, no search box, and that ready chat got "still starting"."""
     end, why = time.time() + LOADING, None
     while True:
         try:
             uia = _uia()
-            if again(lambda: _search_box(uia, uia.ElementFromHandle(hwnd))) is not None:
+            if again(lambda: _search_box(uia, uia.ElementFromHandle(hwnd))) is not None or \
+                    again(lambda: _compose_box("whatsapp", hwnd))[0] is not None:
                 return True
         except Exception as exc:  # the window may still be coming up
             why = exc
