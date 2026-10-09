@@ -312,7 +312,8 @@ class ChatApps(unittest.TestCase):
             self.assertEqual(done, [], exe)
             self.assertIn("command windows", said[0], exe)
             self.assertEqual(self.run_quick(exe, "press enter", focus=None)[1], [], exe)  # can't tell where it'd go
-            for keys in ("ctrl+v", "shift+insert", "ctrl+shift+v", "x", "shift+x", "space"):
+            for keys in ("ctrl+v", "shift+insert", "ctrl+shift+v", "x", "shift+x", "space",
+                         "ctrl+m", "ctrl+j", "ctrl+o", "ctrl+alt+q"):
                 self.assertEqual(self.run_quick(exe, f"press {keys}", focus=terminal)[1], [], (exe, keys))
             # hiding the terminal or the command palette goes: once the terminal had the focus they were refused
             for keys in ("ctrl+`", "ctrl+shift+p", "escape"):

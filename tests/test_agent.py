@@ -1213,7 +1213,8 @@ class Safety(Live):
                 self.assertEqual(r.outcome, "refused", (exe, step))
                 self.assertIn("could start a program", line)
         self.assertEqual(self.app.done, [])
-        for keys in ("ctrl+v", "shift+insert", "ctrl+shift+v", "a", "shift+a", "space", "ctrl+enter"):
+        for keys in ("ctrl+v", "shift+insert", "ctrl+shift+v", "a", "shift+a", "space", "ctrl+enter",
+                     "ctrl+m", "ctrl+j", "ctrl+o", "ctrl+alt+q", "tab"):
             self.model({"steps": [{"do": "keys", "keys": keys}]})
             self.assertEqual(self.run_task("paste it in the terminal in cursor")[1].outcome, "refused", keys)
         self.assertEqual(self.app.done, [])

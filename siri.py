@@ -3801,17 +3801,25 @@ def in_terminal(exe, focus=False):
     return focus is None or bool(TERMINAL_BOX.match(str(focus.get("name") or "")))
 
 
+# The keys an editor's terminal takes: ones that leave it or work the editor (Ctrl+` hides it, Ctrl+P and the command
+# palette, Escape), move about, or stop what's running. Only these, as listing the ones to refuse let others through:
+# Ctrl+M and Ctrl+J are Enter to a shell, Ctrl+O runs a line in bash, and Up then Ctrl+M re-ran the last command
+TERMINAL_KEYS = {"esc", "f1", "up", "down", "left", "right", "page_up", "page_down", "ctrl+`", "ctrl+shift+`", "ctrl+p",
+                 "ctrl+shift+p", "ctrl+c"}
+
+
 def types_into(keys):
-    """True if keys (names, pressed together; none for typing) would type, paste or press Enter where the keyboard is.
-    In an editor's terminal only these run anything: Ctrl+` to hide it or Escape to leave it were refused too, and
-    "hide the terminal" and "open the command palette" stopped working in VS Code once its terminal had the focus."""
-    keys = [str(k).lower() for k in keys]
-    if not keys or keys[-1] == "enter":
+    """True if keys (names, pressed together; none for typing) could type, paste or press Enter where the keyboard is:
+    anything but TERMINAL_KEYS. In an editor's terminal only these run anything: Ctrl+` to hide it or Escape to leave it
+    were refused too, and "hide the terminal" and "open the command palette" stopped working in VS Code once its
+    terminal had the focus."""
+    keys = [KEY_NAMES.get(str(k).lower(), str(k).lower()) for k in keys]
+    if not keys:
         return True
     mods, last = set(keys[:-1]), keys[-1]
-    if (last == "v" and "ctrl" in mods) or (last == "insert" and "shift" in mods):  # paste, Enter and all
+    if not mods <= {"ctrl", "shift"}:  # Ctrl+Alt+a letter types one on an AltGr keyboard
         return True
-    return mods <= {"shift"} and (len(last) == 1 or last == "space")  # a letter or a space, typed as it is
+    return "+".join([m for m in ("ctrl", "shift") if m in mods] + [last]) not in TERMINAL_KEYS
 
 
 def hosted_chat(hwnd):
