@@ -82,12 +82,13 @@ def snapshot(folder):
     there's nothing uncommitted. Kept under refs/heyjev, the last KEEP_SNAPSHOTS of them, so git's clean-up never
     throws it away. Raises if the new files can't be kept, or are too big to, rather than start a job that could
     overwrite them."""
-    def run(*args, env=None):  # what git printed, or None if it failed or took too long
+    def run(*args, env=None):  # what git printed, or None if it failed; raises if it took too long
         try:
             done = subprocess.run(["git", "-C", folder, *args], capture_output=True, text=True, timeout=30, env=env,
                                   creationflags=CREATE_NO_WINDOW)
-        except subprocess.TimeoutExpired:
-            return None
+        except subprocess.TimeoutExpired:  # not "nothing new": a slow ls-files read as no new files and a slow stash
+            # create as nothing uncommitted, and the job started with your notes.md, and your edits, kept nowhere
+            raise RuntimeError("git took too long to keep a copy of the folder first, so I've not started it")
         return done.stdout.strip() if done.returncode == 0 else None
     head, kind, commit = run("rev-parse", "--verify", "-q", "HEAD") or "", "stash", ""
     new = [n for n in (run("ls-files", "-z", "--others", "--exclude-standard") or "").split("\0") if n]
@@ -134,9 +135,12 @@ def snapshot(folder):
     if not commit:
         return f"head:{head}"
     run("update-ref", f"refs/heyjev/{time.strftime('%Y%m%d-%H%M%S')}-{commit[:7]}", commit)
-    for old in (run("for-each-ref", "--sort=-refname", "--format=%(refname)", "refs/heyjev") or "").split()[
-            KEEP_SNAPSHOTS:]:
-        run("update-ref", "-d", old)
+    try:  # tidying old ways back: a slow git here leaves them for next time, this one is already kept
+        for old in (run("for-each-ref", "--sort=-refname", "--format=%(refname)", "refs/heyjev") or "").split()[
+                KEEP_SNAPSHOTS:]:
+            run("update-ref", "-d", old)
+    except RuntimeError:
+        pass
     return f"{kind}:{commit}"
 
 

@@ -211,6 +211,25 @@ class Snapshots(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "keep a copy"):
                 coder.snapshot(self.folder)
 
+    def test_git_too_slow_to_list_or_stash_means_it_doesnt_start(self):
+        """A slow ls-files read as "no new files" and a slow stash create as "nothing uncommitted": the job started
+        with notes.md kept nowhere, or with an undo line, git checkout ., that would wipe your unsaved edit."""
+        self.write("app.py", "print(2)\n")
+        real = subprocess.run
+        for step, new in (("ls-files", True), ("stash", False)):
+            if new:
+                self.write("notes.md", "my notes\n")
+            elif os.path.exists(os.path.join(self.folder, "notes.md")):
+                os.remove(os.path.join(self.folder, "notes.md"))
+
+            def slow(args, **kw):
+                if step in args:
+                    raise subprocess.TimeoutExpired(args, 30)
+                return real(args, **kw)
+            with mock.patch.object(coder.subprocess, "run", slow):
+                with self.assertRaisesRegex(RuntimeError, "too long"):
+                    coder.snapshot(self.folder)
+
     def test_too_many_new_files_arent_copied_into_git(self):
         """Every new file went into .git for good: a 180 MB venv-like folder grew .git from 205 to 382 MB."""
         os.makedirs(os.path.join(self.folder, "venv", "lib"))
