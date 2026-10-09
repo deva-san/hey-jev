@@ -2397,7 +2397,8 @@ def skills_block(text=""):
         detail = [name for name, fits in ranked[:WRITTEN_OUT] if fits]
         for name in detail:
             used_later(name)
-        return skills.system_prompt_block(entries, detail, [name for name, _ in ranked])
+        # with no request (learn_later's review) all are described: it judges a correction by their words
+        return skills.system_prompt_block(entries, detail, [name for name, _ in ranked] if text else None)
     except Exception as exc:
         print(f"  couldn't list her skills: {exc!r}")
         return ""

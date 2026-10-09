@@ -135,6 +135,20 @@ class Skills(Home):
         self.assertEqual(len(named), 13 - skills.MOST_DESCRIBED)
         self.assertTrue(all(f"chore-{i:02}" in block for i in range(12)))
 
+    def test_her_review_sees_every_skill_with_its_words(self):
+        """learn_later's review lists her skills with no request: with only six described, "no, when I say focus time
+        also close Teams" had no skill with "focus time" to patch, and a second one could be written."""
+        for i in range(10):
+            skills.create_skill(f"chore-{i:02}", skills.build_content(f"chore-{i:02}", f"Does chore {i} their way",
+                                                                      "Step one.", [f"chore {i}"]))
+        skills.create_skill("zz-focus", skills.build_content("zz-focus", "Mutes Slack and opens VS Code", "Mute it.",
+                                                             ["focus time"]))
+        siri._skill_cache[0] = 0.0
+        with mock.patch.object(siri.decider, "available", lambda: False):
+            block = siri.skills_block()
+        self.assertIn("zz-focus: Mutes Slack and opens VS Code (the user says: focus time)", block)
+        self.assertNotIn("also: ", block)
+
 
 class Curator(Home):
     def test_a_skill_she_wrote_and_never_used_is_archived_one_you_taught_her_is_not(self):
