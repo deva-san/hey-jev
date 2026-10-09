@@ -197,6 +197,54 @@ class Snapshots(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 coder.snapshot(self.folder)
 
+    def test_git_too_slow_means_it_doesnt_start_with_a_reason(self):
+        """git add took past its 30 s on a folder with a big venv nobody ignored: TimeoutExpired went up uncaught,
+        and the task failed with "Open Tasks for the details"."""
+        self.write("notes.md", "my notes\n")
+        real = subprocess.run
+
+        def slow(args, **kw):
+            if "add" in args:
+                raise subprocess.TimeoutExpired(args, 30)
+            return real(args, **kw)
+        with mock.patch.object(coder.subprocess, "run", slow):
+            with self.assertRaisesRegex(RuntimeError, "keep a copy"):
+                coder.snapshot(self.folder)
+
+    def test_too_many_new_files_arent_copied_into_git(self):
+        """Every new file went into .git for good: a 180 MB venv-like folder grew .git from 205 to 382 MB."""
+        os.makedirs(os.path.join(self.folder, "venv", "lib"))
+        self.write("venv/lib/big.bin", "x" * 3000)
+        self.write("notes.md", "my notes\n")
+        with mock.patch.object(coder, "SNAPSHOT_MAX_BYTES", 2000):
+            with self.assertRaisesRegex(RuntimeError, "venv"):
+                coder.snapshot(self.folder)
+        self.assertEqual(git(self.folder, "for-each-ref", "refs/heyjev"), "")
+        self.assertEqual(git(self.folder, "count-objects").split()[0], "3")  # the first commit's, nothing more
+        with mock.patch.object(coder, "SNAPSHOT_MAX_FILES", 1):
+            with self.assertRaisesRegex(RuntimeError, "too many new files"):
+                coder.snapshot(self.folder)
+        self.assertTrue(coder.snapshot(self.folder).startswith("files:"))  # small enough: kept as before
+
+    def test_only_the_last_ways_back_are_kept_and_the_real_index_is_reused(self):
+        """Snapshots stayed under refs/heyjev for ever. And read-tree gave the spare index none of the real one's
+        file times, so every tracked file was hashed again for each job."""
+        real, calls, stamps = subprocess.run, [], iter(f"2026010{n}-000000" for n in range(1, 10))
+
+        def seen(args, **kw):
+            calls.append(args)
+            return real(args, **kw)
+        with mock.patch.object(coder, "KEEP_SNAPSHOTS", 2), mock.patch.object(coder.subprocess, "run", seen), \
+                mock.patch.object(coder.time, "strftime", lambda fmt: next(stamps)):
+            snaps = []
+            for n in range(3):
+                self.write("notes.md", f"notes {n}\n")
+                snaps.append(coder.snapshot(self.folder).split(":")[1])
+        kept = git(self.folder, "for-each-ref", "--format=%(objectname)", "refs/heyjev").split()
+        self.assertEqual(sorted(kept), sorted(snaps[1:]))
+        self.assertFalse([c for c in calls if "read-tree" in c])
+        self.assertEqual(git(self.folder, "status", "--porcelain"), "?? notes.md")  # the real index untouched
+
 
 class OverTheProtocol(unittest.TestCase):
     @needs_windows  # runs a real process with CREATE_NO_WINDOW
