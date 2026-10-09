@@ -393,6 +393,28 @@ class InHerEars(unittest.TestCase):
         self.assertEqual(seen, [0])
         self.assertEqual([e["who"] for e in p.scores()], ["you"])
 
+    def test_a_score_that_cant_be_written_down_doesnt_upset_the_turn(self):
+        """Written once the turn is over, a log held open on Windows (a virus scan, say) skipped what comes after it:
+        where the turn ended, for the follow-up window, and what to catch up on."""
+        a = self.assistant()
+        a.var("answered")[0] = None
+        with mock.patch.object(siri, "handle", lambda *args, **kw: True), \
+                mock.patch.object(a.var("profile"), "log", mock.Mock(side_effect=PermissionError("in use"))), \
+                mock.patch.dict(siri.settings._load(), {"voice_id": "learning", "no_name": True}):
+            a.var("act_on")(turn("open notepad please", YOU), "other", 100)
+        self.assertEqual(a.var("answered")[0], a.rec.gen)
+
+    def test_a_turn_of_yours_that_failed_isnt_taken_for_room_talk(self):
+        a = self.assistant()
+
+        def fails(*args, **kw):
+            raise RuntimeError("Notepad didn't open")
+
+        with mock.patch.object(siri, "handle", fails), mock.patch.object(siri.time, "sleep", lambda s: None), \
+                mock.patch.dict(siri.settings._load(), {"voice_id": "learning", "no_name": True}):
+            a.var("act_on")(turn("open notepad please", YOU), "other", 100)
+        self.assertEqual(a.var("profile").scores(), [])
+
     def test_a_phrase_held_for_the_rest_keeps_its_voice(self):
         """"Hey Jev, open [pause] YouTube" in someone else's voice was joined as new words with no voice print, so it
         passed as too short to check, her name being in it; and yours, "open [pause] recycle bin" without her name,

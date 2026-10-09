@@ -5384,6 +5384,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     profile = voiceid.Profile()  # your voice, see voiceid.py
     enrolling = [None]  # {"i": sentence, "prints": [...]} while you read her the sentences for your voice
     scored = [None]  # the voice of the turn going on, for voice_kept once it's over
+    failed = [False]  # the last turn run_turn ran failed
 
     def load_speaker():
         if speaker[0] is None:
@@ -5416,7 +5417,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     def run_turn(text, words, stt_ms, gate=False, carried=False):
         """One turn. The mic stays on while she thinks and acts, and only pauses while she talks (see say), so what
         you say meanwhile is heard once she's done, not lost."""
-        result = False
+        result = failed[0] = False
         maybe[0] = False
         with busy:
             HER.begin()
@@ -5441,6 +5442,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 if result == "dictate":
                     start_dictation()
             except Exception as exc:
+                failed[0] = True
                 print(f"\n  turn failed: {exc!r}")
                 emit(notify, "Something went wrong", str(exc))
                 time.sleep(2)
@@ -5565,7 +5567,11 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         goes with its score to voiceid.after_turn: while learning, a turn she acted on is yours and one she let go is
         room talk. Kept before the turn ran, she couldn't tell; and empty words never are."""
         kept, scored[0] = scored[0], None
-        said = voiceid.after_turn(profile, *kept, result) if kept else None
+        try:  # never upsets the turn: a log held open on Windows skipped what comes after the turn
+            said = voiceid.after_turn(profile, *kept, result) if kept else None
+        except Exception as exc:
+            print(f"  couldn't keep the voice score: {exc!r}")
+            return
         if said == "on":
             ANNOUNCE.put("I know your voice well now, so from here on I'll only answer you. "
                          "Say answer everyone to change that.")
@@ -5750,7 +5756,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             if rec.keeps:  # a turn of yours: what's said from here till her first word is said while she thinks
                 her.update(asked=getattr(listener, "pos", 0), start=None, spoke=None, done=None)
             result = run_turn(what[0], what[1], ms, gate=what[2], carried=strict and what[2] is True)
-            voice_kept(result)
+            voice_kept(None if failed[0] else result)  # one that failed came back False, but wasn't let go
             if judged:  # what it said and what happened, to train it again later
                 decider.log({"when": round(time.time()), "said": str(what[1]), "kind": asked_as,
                              "for_me": round(judged[0], 3), "verdict": judged[1], "mode": decider.mode(),
