@@ -215,7 +215,7 @@ class InHerEars(unittest.TestCase):
                       "look at my screen", "what's on my screen", "is the internet down", "print this page",
                       "like this video", "mark it as read", "reopen the closed tab", "thumbs up emoji", "emoji bhejo",
                       "music chala do", "add this to watch later", "what's on my calendar", "learn how to do this",
-                      "what day is it"):
+                      "what day is it", "what's today's date", "what is today's date"):
             handled, logged = self.run_cold(a, words, "on", SureNo)
             self.assertEqual((handled, logged[0]["verdict"]), ([words], "no"), words)
         for words in ("pass the salt", "are you coming for dinner", "what are you doing tonight", "how was your day"):

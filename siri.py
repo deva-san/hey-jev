@@ -4964,8 +4964,10 @@ DOING = (r"check|find|look up|tell me|night ?light|select|click|" + OPEN_GLUED +
          r"alarm|exit|unmute|brightness|bluetooth|wi-?fi|dark mode|light mode|what time|weather|news|battery|cpu|ram|"
          r"storage|"
          # and ASKING's things to act on, with the date and calendar asked about: "put on some music", "song lagao",
-         # "take a note", "what's on my screen", "is the internet down" and "what's the date today" were let go
-         r"music|song|video|note|screen|page|window|internet|emoji|watch|bookmark|what'?s (?:the )?(?:date|day)|"
+         # "take a note", "what's on my screen", "is the internet down" and "what's the date today" were let go, and
+         # then "what's today's date" too
+         r"music|song|video|note|screen|page|window|internet|emoji|watch|bookmark|today'?s date|"
+         r"what(?:'?s| is) (?:the |today'?s )?(?:date|day)|"
          r"what (?:date|day) is|(?:date|day) is it|my (?:calendar|meetings?)|on (?:my|the) calendar|ip address")
 ASKS_ABOUT = re.compile(r"\b(?:what|what's|whats|who|who's|how|where|when|why|which)\b")
 # and the rest of ASKING's things to do when they start what's said, with "what's the time": on by default the decider
