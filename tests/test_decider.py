@@ -36,6 +36,13 @@ def trained(hi=0.8, lo=0.2):
     return d
 
 
+class SureNo:
+    """A head sure nothing is for her."""
+
+    def for_me(self, words, kind):
+        return 0.01, "no"
+
+
 class Heads(unittest.TestCase):
     def test_it_learns_requests_from_room_talk_and_answers_like_jev(self):
         d = trained()
@@ -128,7 +135,8 @@ class InHerEars(unittest.TestCase):
                 mock.patch.dict(siri.settings._load(), {"decider": setting, "no_name": True, "voice_id": "off"}), \
                 mock.patch.object(decider, "get", head), \
                 mock.patch.object(decider, "available", lambda: True), \
-                mock.patch.object(decider, "log", logged.append):
+                mock.patch.object(decider, "log", logged.append), \
+                mock.patch.object(siri, "asked_last", lambda *a: False):  # a "...?" another test left in history
             a.var("act_on")(text, kind, 100)
         return handled, logged
 
@@ -155,9 +163,6 @@ class InHerEars(unittest.TestCase):
         """On by default, its "sure it isn't for her" was only kept from the two kinds of words it got wrong on 8
         October: "Shut down the computer", "what time is it", or "how about tomorrow" right after her answer, would
         have been let go with no model call."""
-        class SureNo:
-            def for_me(self, words, kind):
-                return 0.01, "no"
         a = self.assistant()
         for words in ("Shut down the computer", "Okay, copy that link", "Take a screenshot", "what time is it",
                       "What's the weather tomorrow", "Go back", "Refresh the page", "Read my messages", "Cancel that",
@@ -171,6 +176,14 @@ class InHerEars(unittest.TestCase):
         # her things to do only count first: said in the middle they're as often room talk, for it to judge
         for words in ("we should go back home", "I read that in the paper", "they cancelled it, run along"):
             self.assertFalse(siri.asks_something(words, "cold"), words)
+
+    def test_a_question_another_test_left_in_history_changes_nothing_here(self):
+        """run_cold read asked_last from the shared test history: a "...?" reply any other test wrote within 28 s
+        turned on waiting, the decider was never asked, and room talk went on to the model."""
+        a = self.assistant()
+        with mock.patch.object(siri, "asked_last", lambda *a: True):
+            handled, _ = self.run_cold(a, "what are you doing tonight", "on", SureNo)
+        self.assertEqual(handled, [])
 
     def test_in_shadow_it_only_writes_down_what_it_would_have_done(self):
         a = self.assistant()
