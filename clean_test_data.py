@@ -8,11 +8,14 @@ now makes that impossible): 982 test turns in history.db beside 191 of yours, 1,
 entries in the dictation log. A row is taken out only if all of these hold:
 - it was written in the window (--from and --to, 8 Oct 15:55 to 19:10 by default),
 - what it says is word for word a phrase from the tests (tests\\*.py),
+- it came in a burst: another such row within BURST seconds (a test run wrote dozens a second, you one at a time),
 - and there are more of it than you said: Logs\\Hey Jev.log has every phrase she heard from you, and that many are
   kept, the ones least like a test's burst of rows in the same few seconds.
-Everything else stays. Rows in the window that came in bursts like a test's but match no test phrase are listed for
-you to look at, not taken out. Her memory (USER.md, MEMORY.md), skills, notes, contacts, recipes and settings are
-never touched. Run it with Hey Jev closed: it refuses while she's running.
+Everything else stays. A row that matches a test phrase but stands on its own, and rows in the window that came in
+bursts like a test's but match no test phrase, are listed for you to look at, not taken out. Every row it would take
+out, and every one to look at, is listed in Logs\\clean_test_data.txt, the only file a dry run writes. Her memory
+(USER.md, MEMORY.md), skills, notes, contacts, recipes and settings are never touched. Run it with Hey Jev closed: it
+refuses while she's running.
 """
 import argparse
 import ast
@@ -53,8 +56,18 @@ def test_phrases(folder=None):
     return found
 
 
+def kept_as(said):
+    """A phrase she heard as her history keeps it: siri.route takes her name off ("Hey Jev, open Notepad." is "open
+    Notepad"), and siri.handle puts app names and your Dictionary's words right."""
+    import siri  # only here: everything else in this script needs none of her
+    found = siri.find_name(said)
+    return siri.fix_vocab(siri.fix_names(found[1] if found and found[1] else said))
+
+
 def heard_counts(logs):
-    """How many times she heard each phrase from you, from her own log (Hey Jev.log and any older copies)."""
+    """How many times she heard each phrase from you, from her own log (Hey Jev.log and any older copies), counted
+    both as heard and as her history keeps it. Every day's: the log doesn't say which day a line is from, and
+    counting more only keeps more."""
     counts = collections.Counter()
     for path in sorted(glob.glob(os.path.join(logs, "Hey Jev.log*"))):
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -62,9 +75,11 @@ def heard_counts(logs):
                 m = HEARD.match(line)
                 if m:
                     try:
-                        counts[plain(ast.literal_eval(m["said"]))] += 1
+                        said = ast.literal_eval(m["said"])
                     except (ValueError, SyntaxError):
-                        pass
+                        continue
+                    for text in {plain(said), plain(kept_as(said))}:
+                        counts[text] += 1
     return counts
 
 
@@ -75,20 +90,24 @@ def _burst(times):
 
 
 def pick(rows, window, phrases, heard):
-    """rows are (key, text, when). Returns (the tests' rows to take out, bursty rows to look at, kept)."""
+    """rows are (key, text, when). Returns (the tests' rows to take out, rows to look at, kept). A test phrase on its
+    own, with no other within BURST seconds, is never taken out: a real "Hey Jev, open Notepad." in the window is
+    one of those, and the dictation log and tasks have no log of what you said to keep yours by."""
     start, end = window
     inside = [r for r in rows if start <= r[2] <= end]
     crowd = _burst([r[2] for r in inside])
+    matched = [r for r in inside if plain(r[1]) in phrases]
+    near = _burst([r[2] for r in matched])  # other test phrases within BURST seconds
     left = collections.Counter(heard)
     take, look = [], []
     by_text = collections.defaultdict(list)
-    for r in inside:
-        (by_text[plain(r[1])] if plain(r[1]) in phrases else look).append(r)
+    for r in matched:
+        by_text[plain(r[1])].append(r)
     for text, same in by_text.items():
-        same.sort(key=lambda r: crowd[r[2]])  # yours first: the ones on their own
-        keep = min(left[text], len(same))
-        take += same[keep:]
-    look = [r for r in look if crowd[r[2]] >= 3]
+        same.sort(key=lambda r: near[r[2]])  # yours first: the ones on their own
+        for r in same[min(left[text], len(same)):]:
+            (take if near[r[2]] else look).append(r)
+    look += [r for r in inside if plain(r[1]) not in phrases and crowd[r[2]] >= 3]
     return take, look, len(rows) - len(take)
 
 
@@ -233,6 +252,17 @@ def apply(found, appdata=None, local=None):
     return made
 
 
+def write_list(found, path):
+    """Every row it would take out, and every one to look at, one a line, for reading before --apply."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for p in found:
+            for kind, rows in (("out ", p["take"]), ("look", p["look"])):
+                for _, text, ts in sorted(rows, key=lambda r: r[2]):
+                    f.write(f"{kind} {p['name']}  {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))}  "
+                            f"{text!r}\n")
+
+
 def report(found):
     for p in found:
         print(f"\n{p['name']}: {p['rows']} rows, {len(p['take'])} from the tests to take out, {p['kept']} kept")
@@ -241,8 +271,8 @@ def report(found):
         if len(p["take"]) > 5:
             print(f"  ... and {len(p['take']) - 5} more")
         if p["look"]:
-            print(f"  {len(p['look'])} more came in bursts like a test's but match no test phrase, so they stay. "
-                  "Have a look:")
+            print(f"  {len(p['look'])} more stay: a test phrase on its own, or bursts like a test's that match no test "
+                  "phrase. Have a look:")
             for _, text, ts in p["look"][:5]:
                 print(f"  look {time.strftime('%H:%M:%S', time.localtime(ts))}  {text[:70]!r}")
 
@@ -280,6 +310,9 @@ def main(argv=None):
     window = tuple(time.mktime(time.strptime(v, "%Y-%m-%d %H:%M")) for v in (args.start, args.end))
     found = plans(window)
     report(found)
+    listed = os.path.join(backup.localdata(), "Logs", "clean_test_data.txt")
+    write_list(found, listed)
+    print(f"\nEvery row it would take out, and every one to look at, is in {listed}")
     seen = leftovers(window)
     if seen:
         print(f"\nChanged in the window, never touched by this, have a look: {len(seen)}")

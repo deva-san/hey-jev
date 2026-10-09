@@ -203,6 +203,38 @@ class CleanTestData(unittest.TestCase):
         self.assertIn("Dry run: nothing changed. 38 rows would go.", printed.call_args_list[-1].args[0])
         self.assertEqual(self.said(), before)
         self.assertFalse(os.path.exists(os.path.join(self.local, "Backups")))
+        listed = os.path.join(self.local, "Logs", "clean_test_data.txt")  # every one, not a sample of five
+        self.assertIn(listed, "\n".join(str(c.args[0]) for c in printed.call_args_list))
+        lines = read(listed).splitlines()
+        self.assertEqual(sum(line.startswith("out ") for line in lines), 38)
+        self.assertEqual(sum(line.startswith("look ") for line in lines), 4)
+
+    def test_a_match_on_its_own_stays(self):
+        """A real "set a timer" in the window, one row on its own, is word for word a test phrase: listed for a look,
+        never taken out. Also in the dictation log, which has no log of what you said to go by."""
+        with mock.patch("time.time", return_value=self.T0 + 2500):
+            history.add("set a timer", reply="ok")  # yours: not in her log, nothing near it
+        when = lambda ts: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+        dictated = [{"time": when(self.T0 + 2600), "text": "Set a timer."}]  # yours
+        dictated += [{"time": when(self.T0 + 2700 + i), "text": "set a timer"} for i in range(3)]  # a test's
+        path = os.path.join(self.local, "Logs", "Hey Jev dictation.jsonl")
+        write(path, "".join(json.dumps(d) + "\n" for d in dictated))
+        found = clean_test_data.plans(self.window, tests=self.tests)
+        clean_test_data.apply(found)
+        self.assertEqual(self.said().count("set a timer"), 1)
+        self.assertEqual([json.loads(line)["text"] for line in read(path).splitlines()], ["Set a timer."])
+        looks = [r[1] for p in found for r in p["look"]]
+        self.assertIn("set a timer", looks)
+        self.assertIn("Set a timer.", looks)
+
+    def test_what_she_heard_counts_the_way_her_history_keeps_it(self):
+        """Her log has what she heard, her name and all; her history keeps the words without it."""
+        logs = os.path.join(self.local, "Other logs")
+        write(os.path.join(logs, "Hey Jev.log"), "\n> heard: 'Hey Jev, open Notepad.'  (stt 300ms, 95% sure)\n"
+                                                 "> heard: 'Jev set a timer'\n")
+        heard = clean_test_data.heard_counts(logs)
+        self.assertEqual(heard["open notepad"], 1)
+        self.assertEqual(heard["set a timer"], 1)
 
     def test_never_while_she_runs(self):
         with mock.patch.object(backup, "running", lambda: True), self.assertRaises(SystemExit):
