@@ -95,6 +95,26 @@ class RealData(unittest.TestCase):
         self.assertIn("real data", run.stderr)
         self.assertFalse(os.path.exists(os.path.join(real, "Hey Jev")), os.listdir(real))
 
+    def test_a_library_loading_pytest_later_never_turns_her_own_run_away(self):
+        """Her own run, not a test's, with a library that imports pytest once she's going: her voice and decider
+        folders are worked out on every use, and must not start raising then."""
+        real = tempfile.mkdtemp(prefix="heyjev-real-")
+        driver = textwrap.dedent(f"""
+            import os, sys, types
+            sys.path[:0] = [{ROOT!r}]
+            from tests import winfakes
+            winfakes.install()
+            import winplatform
+            sys.modules["pytest"] = types.ModuleType("pytest")
+            print(winplatform.own_data(os.path.join({real!r}, "Hey Jev", "voice")))
+        """)
+        env = {k: v for k, v in os.environ.items() if k != "HEYJEV_TESTING"}
+        env.update(APPDATA=real, LOCALAPPDATA=real)
+        run = subprocess.run([sys.executable, "-c", driver], cwd=real, env=env, capture_output=True, text=True,
+                             timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+        self.assertEqual(run.stdout.strip(), os.path.join(real, "Hey Jev", "voice"))
+
     def test_no_hand_check_is_left_where_discovery_finds_it(self):
         """The hand checks are in checks\\ now, which isn't a package: unittest discovery doesn't load them."""
         self.assertEqual(glob.glob(os.path.join(ROOT, "test*.py")), [])

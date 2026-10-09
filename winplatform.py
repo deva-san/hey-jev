@@ -31,10 +31,15 @@ def _test_run():
     return started in ("unittest", "pytest") or any(name in sys.modules for name in RUNNERS)
 
 
+# Worked out once, here: a runner is always loaded before it imports her code. Asked again on every use, a library
+# that imported pytest inside her running app would have made her voice and decider folders raise from then on.
+TEST_RUN = _test_run()
+
+
 def own_data(path):
     """path, unless this is a test run and path is in her real data, which raises instead."""
     real = os.environ.get("HEYJEV_TESTING")
-    if real is None and not _test_run():
+    if real is None and not TEST_RUN:
         return path
     home = os.path.expanduser("~")
     bases = (real or os.pathsep.join((os.environ.get("APPDATA", ""), os.environ.get("LOCALAPPDATA", "")))).split(
