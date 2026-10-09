@@ -121,10 +121,14 @@ class Profile:
     def centre(self, read_only=False):
         """The middle of your prints. The ones added from turns count for half at most, and each was checked against
         the ones you read (after_turn), so turns that weren't quite you can't walk it over to another voice: the
-        guard against drift PLAN promised."""
+        guard against drift PLAN promised. Below that each counts as one of the sentences does: the first one added
+        counted for half straight away, moving every score off the ones the levels were set from."""
         unit = lambda c: c / (np.linalg.norm(c) or 1.0)
         c = unit(self.read.mean(axis=0))
-        return c if read_only or not len(self.grown) else unit(c + unit(self.grown.mean(axis=0)))
+        if read_only or not len(self.grown):
+            return c
+        w = min(0.5, len(self.grown) / (len(self.grown) + len(self.read)))
+        return unit((1 - w) * c + w * unit(self.grown.mean(axis=0)))
 
     def score(self, print_, read_only=False):
         """How like your voice, -1 to 1 (cosine with the middle of your prints, or of the ones you read)."""

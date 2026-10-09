@@ -200,6 +200,21 @@ class Learning(unittest.TestCase):
         self.assertGreater(p.score(YOU), 0.9)
         self.assertLess(p.score(SOMEONE), 0.5)
 
+    def test_one_print_added_barely_moves_her_picture_of_your_voice(self):
+        """The first one added counted for half, as much as all the sentences you read, so a turn that only just
+        passed (with the TV on behind you, say) moved every score away from the ones the levels were set from."""
+        p = profile(calibrated=True)
+        edge = unit(np.cos(0.8), np.sin(0.8))  # just over the level it takes to be added
+        self.assertGreater(p.score(edge, read_only=True), p.strict + voiceid.GROW_ABOVE)
+        with mock.patch.dict(siri.settings._load(), {"voice_id": "on"}):
+            voiceid.after_turn(p, edge, p.score(edge), 2.0, False, "other", True, True)
+        self.assertEqual(len(p.grown), 1)
+        self.assertLess(abs(p.score(YOU) - p.score(YOU, read_only=True)), 0.01)
+        for _ in range(len(p.read) * 2):  # and however many are added, never more than half
+            p.grow(edge)
+        half = unit(*(np.array(p.centre(read_only=True)[:2]) + edge[:2]))
+        self.assertAlmostEqual(p.score(half), 1.0, places=4)
+
     def test_nothing_is_added_while_learning_or_before_the_levels_are_set(self):
         for setting, calibrated in (("learning", True), ("on", False)):
             p = profile(calibrated=calibrated)
