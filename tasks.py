@@ -428,9 +428,12 @@ BLOCKED = (
     # and in the code node -e or python -c is given, which the rule above can't see: node -e "require('fs').rmSync(
     # 'C:/x',{recursive:true,force:true})" only waited for approval. One file (os.remove, fs.unlinkSync) still asks.
     # Only rimraf run, and only such code: npm install -D rimraf, or git commit -m "remove (old) recursive flag", were
-    # blocked where they'd asked, and git log -- rimraf.config.js, which had gone ahead
-    (r"(?:^|[;&|(]\s*|\b(?:npx|bunx|dlx|exec|yarn)\s+(?:-\S+\s+)*)rimraf(?:\.cmd|\.exe)?\b|"
-     r"\b(?:node|pythonw?[\d.]*|py|deno|bun)(?:\.exe)?\b[^\r\n]*?\s(?:-[ec]|--eval)\b[^\r\n]*?(?:\brimraf\b|"
+    # blocked where they'd asked, and git log -- rimraf.config.js, which had gone ahead. But rimraf run by path or by
+    # pnpm (pnpm rimraf dist, node_modules\.bin\rimraf C:/x) and code given to node -p or python -Ic only asked then
+    (r"(?:^|[;&|(]\s*|\b(?:npx|bunx|dlx|exec|yarn|pnpm)\s+(?:-\S+\s+)*)[\"']?(?:[^\s;&|\"']*[\\/])?"
+     r"rimraf(?:\.cmd|\.exe)?\b|"
+     r"\b(?:node|pythonw?[\d.]*|py|deno|bun)(?:\.exe)?\b[^\r\n]*?\s(?:-[a-z]*[ecp]|--eval|--print)\b[^\r\n]*?"
+     r"(?:\brimraf\b|"
      r"\b(?:rmtree|removedirs|removesync|emptydir(?:sync)?)\s*\(|"
      r"\b(?:rm|rmdir|remove)(?:sync)?\s*\([^\r\n]*\brecursive\b)",
      "recursive deletion is blocked"),

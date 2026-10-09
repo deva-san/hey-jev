@@ -486,12 +486,16 @@ class CommandPolicy(unittest.TestCase):
                         "py -c \"__import__('shutil').rmtree(r'C:\\x', ignore_errors=True)\"",
                         "python -c \"import os; os.removedirs('C:/x/y')\"", "rimraf C:/x", "pnpm dlx rimraf x",
                         "npm exec rimraf x", "npx --yes rimraf x", "node -e \"require('rimraf').sync('x')\"",
-                        "C:\\Python312\\python.exe -c \"import shutil; shutil.rmtree('x')\""):
+                        "C:\\Python312\\python.exe -c \"import shutil; shutil.rmtree('x')\"",
+                        # run by path or by pnpm, or code given to node -p or python -Ic: these only asked
+                        "pnpm rimraf dist", "./node_modules/.bin/rimraf x", "node_modules\\.bin\\rimraf C:/x",
+                        "node -p \"require('fs').rmSync('x',{recursive:true})\"",
+                        "python -Ic \"import shutil;shutil.rmtree('x')\""):
             self.assertEqual(tasks.command_policy(command, self.folder), ("block", "recursive deletion is blocked"),
                              command)
         for command in ("node -e \"require('fs').unlinkSync('x.txt')\"", "python -c \"import os; os.remove('x.txt')\"",
                         "python -c \"print(42)\"", "node -e \"console.log(require('os').cpus().length)\"",
-                        "git log --grep=rmtree", "npm install -D rimraf", "npm uninstall rimraf",
+                        "git log --grep=rmtree", "npm install -D rimraf", "npm uninstall rimraf", "pnpm add -D rimraf",
                         "git commit -m \"drop rimraf\"", "git log --grep rimraf",
                         "git commit -m \"remove (old) recursive flag\"", "git commit -m \"use shutil.rmtree(x)\""):
             self.assertNotEqual(self.level(command), "block", command)  # one file asks; looking is fine
