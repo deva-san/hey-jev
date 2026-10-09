@@ -145,9 +145,9 @@ In `checks/open_mic.py`, all 20 phrases were taken right in each of three runs: 
 
 What could be a request goes to the answer model as text, with what was said just before it. Your voice never leaves the PC.
 
-Speech-to-text gets words wrong, so the answer model is told to work out what you meant from the sound, your apps and what you just did: "open prone" is open Chrome, "clone the tab" is close the tab, "new term" a new tab, and just "YouTube" opens it. The ones heard here most often are fixed on the PC too (`QUICK` in `siri.py`), so they're instant.
+Speech-to-text gets words wrong, so the answer model is told to work out what you meant from the sound, your apps and what you just did: "open prone" is open Chrome, "clone the tab" is close the tab, "new term" a new tab, and just "YouTube" opens it. The ones heard here most often are fixed on the PC too (`QUICK` in `siri.py`), so they're instant. A search or video for words speech-to-text is under 90% sure of (with Parakeet or Nemotron; Whisper's own figure runs lower), or that spell letters out ("search career eye dee"), goes to the model first, to be put right: "play avengers doomshare tyler" had played those very words.
 
-The mic stays on while she thinks and acts, and in Windows' speech mode (see Echo cancelling) while she talks too, since that takes her voice out of it. A mic that can't open that way pauses while she talks, so she doesn't hear herself. What you say while she's working is heard once she's done, instead of lost, up to 20 seconds of it.
+The mic stays on while she thinks and acts, and in Windows' speech mode (see Echo cancelling) while she talks too, since that takes her voice out of it (`"talk_over": false` in settings.json turns this off). A mic that can't open that way pauses while she talks, so she doesn't hear herself. What you say while she's working is heard once she's done, instead of lost, up to 20 seconds of it.
 
 ### Talking over her
 
@@ -231,7 +231,7 @@ You have 90 seconds to say yes ("yes", "yes, send it", "go ahead"); after the fi
 
 1. "Message Bunty on WhatsApp: hi" → *"Let me look for Bunty in your WhatsApp."*
 2. She types the name into WhatsApp's own search. For each chat it finds (up to three, groups left out), she opens it and reads the number off its contact panel.
-3. *"I found Buntyyy in your WhatsApp, number plus 9 1, 9 5 7 3 3, 0 9 1 9 9. Is that them?"* On your phone she shows the number as WhatsApp does.
+3. *"I found Buntyyy in your WhatsApp, number plus 9 1, 5 5 5 5 5, 0 1 2 3 4. Is that them?"* On your phone she shows the number as WhatsApp does.
 4. **Yes** saves them and types the message in, then she asks *"Send it?"* as usual; a second yes sends it. **No** moves on to the next one she found, and after the last she asks for the number.
 
 She never presses a key in WhatsApp while looking: the search box is filled through Windows' accessibility interface, and a chat is opened with a click only when that spot is WhatsApp's own window. She reads only the name and number on the contact panel, never the messages, though opening a chat marks it read, as it would for you. Nothing is saved without your yes to her question.
@@ -322,7 +322,7 @@ Talk to her from your phone. Make a bot with [@BotFather](https://core.telegram.
 - It asks Telegram for messages, so nothing on the PC is open to the internet. Only private chats, messages and button taps.
 - Anything sent while the PC was off or asleep, or over 2 minutes ago, is dropped, never run late.
 - A message goes through the same turn as voice, and her answer comes back to the chat.
-- A risky step comes back as a question with Yes and No buttons. Only a tap of Yes goes ahead, within 5 minutes. A typed yes, or a yes said at the PC, doesn't, though a typed "no" is taken as No, and a question asked at the PC can't be answered from the phone.
+- A risky step comes back as a question with Yes and No buttons. Only a tap of Yes goes ahead, within 5 minutes. A typed yes, or a yes said at the PC, doesn't, though a typed "no" is taken as No, and a question asked at the PC can't be answered from the phone. Only one question waits at a time, though: a new one from the phone replaces one waiting at the PC, and the other way round, so the first has to be asked again.
 - Voice notes are written out by the speech-to-text on this PC. They do pass through Telegram's servers, as every Telegram voice note does.
 - "Send me a screenshot" (or just "screenshot" on the phone) sends a picture of the PC's screen to your chat, 1920 pixels wide, her popup left out. It only ever goes to your own paired account.
 - If Telegram can't be reached, it keeps trying. If the token stops working, even while it's listening, the PC says so next to Settings > Phone. A second tap on Yes or No does nothing.

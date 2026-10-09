@@ -28,12 +28,12 @@ class Following(unittest.TestCase):
         self.addCleanup(messaging._write_json, messaging.FOLLOW_PATH, {})
 
     def test_by_the_chats_own_name_or_their_number(self):
-        messaging.follow("WhatsApp", "buntyyy", "Buntyyy\U0001f43c", "919573309199")
-        for sender in ("Buntyyy \U0001f43c", "buntyyy\U0001f43c", "+91 95733 09199"):
+        messaging.follow("WhatsApp", "buntyyy", "Buntyyy\U0001f43c", "915555501234")
+        for sender in ("Buntyyy \U0001f43c", "buntyyy\U0001f43c", "+91 55555 01234"):
             self.assertEqual(messaging.followed("WhatsApp", sender)["contact"], "buntyyy", sender)
         for app, sender in (("WhatsApp", "Bunty's group"), ("WhatsApp", "Buntyyy and Ravi"), ("Telegram", "Buntyyy"),
                             ("WhatsApp", "\U0001f43c"), ("WhatsApp", ""), ("WhatsApp", "Buntyyy \U0001f382"),
-                            ("WhatsApp", "+91 95733 00000")):
+                            ("WhatsApp", "+91 55555 00000")):
             self.assertIsNone(messaging.followed(app, sender), (app, sender))
 
     def test_never_by_a_shorter_name(self):
@@ -277,7 +277,7 @@ class AfterSending(unittest.TestCase):
     def test_followed_and_your_window_back(self):
         back = []
         ready = {"app": "whatsapp", "say": "WhatsApp", "contact": "buntyyy", "to": "Buntyyy\U0001f43c",
-                 "handle": "919573309199", "hwnd": 99, "back_to": 42}
+                 "handle": "915555501234", "hwnd": 99, "back_to": 42}
         with mock.patch.object(siri.win, "shown", lambda h: True), \
                 mock.patch.object(siri.win, "front_window", lambda: 99), \
                 mock.patch.object(siri.win, "bring_to_front", back.append):

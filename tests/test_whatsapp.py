@@ -427,8 +427,8 @@ class Asking(unittest.TestCase):
         self.assertIn("The chat open is Amma.", self.ask("Amma"))
 
 
-BUNTY = {"name": "Buntyyy \U0001f43c", "number": "919573309199", "shown": "+91 95733 09199"}
-OTHER = {"name": "Buntyyy \U0001f43c", "number": "918888802607", "shown": "+91 88888 02607"}
+BUNTY = {"name": "Buntyyy \U0001f43c", "number": "915555501234", "shown": "+91 55555 01234"}
+OTHER = {"name": "Buntyyy \U0001f43c", "number": "915550005678", "shown": "+91 55500 05678"}
 
 
 class FindingThem(unittest.TestCase):
@@ -488,7 +488,7 @@ class FindingThem(unittest.TestCase):
 
     def test_she_asks_with_their_number_before_saving_anything(self):
         plan = self.ask()
-        self.assertEqual(plan["say"], "I found Buntyyy in your WhatsApp, number plus 9 1, 9 5 7 3 3, 0 9 1 9 9. "
+        self.assertEqual(plan["say"], "I found Buntyyy in your WhatsApp, number plus 9 1, 5 5 5 5 5, 0 1 2 3 4. "
                                       "Is that them?")
         self.assertEqual(self.step()["do"], "contact_found")
         self.assertEqual((self.siri.messaging.read_contacts(), self.staged), ({}, []))
@@ -497,7 +497,7 @@ class FindingThem(unittest.TestCase):
         self.ask()
         asked = self.step()
         plan = self.yes()
-        self.assertEqual(self.siri.messaging.read_contacts()["buntyy"]["whatsapp"], "919573309199")
+        self.assertEqual(self.siri.messaging.read_contacts()["buntyy"]["whatsapp"], "915555501234")
         self.assertEqual(self.staged, [("buntyy", "hi")])
         self.assertEqual(plan["say"], "\u201chi\u201d to buntyy on WhatsApp. Send it? The chat open is Buntyyy.")
         self.assertEqual(plan["confirm"]["steps"], [{"do": "message_send"}])
@@ -506,9 +506,9 @@ class FindingThem(unittest.TestCase):
     def test_no_asks_about_the_next_then_for_the_number(self):
         self.found = [BUNTY, OTHER]
         self.assertTrue(self.ask()["say"].startswith("I found 2 who could be them in your WhatsApp. The first is "
-                                                     "Buntyyy, number plus 9 1, 9 5 7 3 3"))
+                                                     "Buntyyy, number plus 9 1, 5 5 5 5 5"))
         plan = self.no()
-        self.assertEqual(plan["say"], "Then is it Buntyyy, number plus 9 1, 8 8 8 8 8, 0 2 6 0 7?")
+        self.assertEqual(plan["say"], "Then is it Buntyyy, number plus 9 1, 5 5 5 0 0, 0 5 6 7 8?")
         self.assertEqual(self.step()["do"], "contact_found")
         self.assertEqual(self.no()["say"], "Okay. What's their phone number, with the country code?")
         self.assertEqual((self.siri.messaging.read_contacts(), self.staged), ({}, []))
@@ -521,10 +521,10 @@ class FindingThem(unittest.TestCase):
         self.ask()
         self.no()
         self.yes()
-        self.assertEqual(self.siri.messaging.read_contacts()["buntyy"]["whatsapp"], "918888802607")
+        self.assertEqual(self.siri.messaging.read_contacts()["buntyy"]["whatsapp"], "915550005678")
 
     def test_the_first_one_said_to_the_second_question_is_no_yes(self):
-        """Review: "the first one" to "Then is it Buntyyy, number ...2607?" saved the 2607 one."""
+        """Review: "the first one" to "Then is it Buntyyy, number ...5678?" saved the 5678 one."""
         self.found = [BUNTY, OTHER]
         self.ask()
         self.no()
@@ -576,7 +576,7 @@ class FindingThem(unittest.TestCase):
             say = self.ask()["say"]
         finally:
             siri.REPLY_TO.reset(to)
-        self.assertEqual(say, "I found Buntyyy \U0001f43c in your WhatsApp, number +91 95733 09199. Is that them?")
+        self.assertEqual(say, "I found Buntyyy \U0001f43c in your WhatsApp, number +91 55555 01234. Is that them?")
 
     def test_files_go_on_after_the_yes(self):
         self.plan = self.siri.stage_files("whatsapp", "buntyy", ["C:/x/a.jpg"])
@@ -650,8 +650,8 @@ class ReadingThePanel(unittest.TestCase):
         return m._read_person(uia, None, 1, 0, label)
 
     def test_a_saved_contacts_panel(self):
-        self.assertEqual(self.read(["Contact info", "Buntyyy", "+91 95733 09199", "About", "Call me +91 11111 11111"]),
-                         {"name": "Buntyyy", "number": "919573309199", "shown": "+91 95733 09199"})
+        self.assertEqual(self.read(["Contact info", "Buntyyy", "+91 55555 01234", "About", "Call me +91 11111 11111"]),
+                         {"name": "Buntyyy", "number": "915555501234", "shown": "+91 55555 01234"})
 
     def test_another_chats_panel_is_never_read_as_theirs(self):
         self.assertIsNone(self.read(["Contact info", "Amma", "+91 98765 43210"]))
@@ -663,8 +663,8 @@ class ReadingThePanel(unittest.TestCase):
                          {"name": "+91 98765 43210", "number": "919876543210", "shown": "+91 98765 43210"})
 
     def test_a_group_or_a_panel_without_a_number(self):
-        self.assertIsNone(self.read(["Group info", "Buntyyy", "+91 95733 09199"], title="Group info"))
-        self.assertIsNone(self.read(["Contact info", "Buntyyy", "About", "Call me +91 95733 09199"]))
+        self.assertIsNone(self.read(["Group info", "Buntyyy", "+91 55555 01234"], title="Group info"))
+        self.assertIsNone(self.read(["Contact info", "Buntyyy", "About", "Call me +91 55555 01234"]))
 
 
 class WhatsAppNumbers(unittest.TestCase):
@@ -672,11 +672,11 @@ class WhatsAppNumbers(unittest.TestCase):
 
     def test_the_panels_number(self):
         m = real_messaging()
-        shown = "\u202a+91 95733 09199\u202c"  # wrapped in direction marks
+        shown = "\u202a+91 55555 01234\u202c"  # wrapped in direction marks
         cleaned = " ".join(m.MARKS.sub("", shown).split())
         self.assertTrue(m.SHOWN_NUMBER.fullmatch(cleaned))
-        self.assertEqual(m.clean_number(cleaned), "919573309199")
-        self.assertIsNone(m.SHOWN_NUMBER.fullmatch("Call me on +91 95733 09199"))  # their About isn't their number
+        self.assertEqual(m.clean_number(cleaned), "915555501234")
+        self.assertIsNone(m.SHOWN_NUMBER.fullmatch("Call me on +91 55555 01234"))  # their About isn't their number
 
     def test_names_compare_without_emoji(self):
         m = real_messaging()

@@ -491,8 +491,8 @@ class FoundInWhatsApp(Turn):
             if not m.read_contacts().get(m.alias_key(contact), {}).get("whatsapp"):
                 raise m.NeedContact(f"I don't know {contact} on WhatsApp yet.")
             return {**staged(app, contact, text), "to": "Buntyyy"}
-        found = [{"name": "Buntyyy \U0001f43c", "number": "919573309199", "shown": "+91 95733 09199"},
-                 {"name": "Bunty K", "number": "918888802607", "shown": "+91 88888 02607"}]
+        found = [{"name": "Buntyyy \U0001f43c", "number": "915555501234", "shown": "+91 55555 01234"},
+                 {"name": "Bunty K", "number": "915550005678", "shown": "+91 55500 05678"}]
         for target, name, value in ((m, "prepare", prepare), (m, "whatsapp_people", lambda name, **kw: list(found)),
                                     (m, "send", lambda ready: self.sent.append(ready["contact"]) or (True, "Sent.")),
                                     (m, "discard", lambda ready: True)):
@@ -505,19 +505,19 @@ class FoundInWhatsApp(Turn):
     def test_yes_to_them_then_yes_to_the_message_sends_it(self):
         siri.handle("message buntyy on whatsapp: hi")
         self.assertEqual(self.said[0], "Let me look for buntyy in your WhatsApp.")
-        self.assertTrue(self.said[-1].endswith("The first is Buntyyy, number plus 9 1, 9 5 7 3 3, 0 9 1 9 9. "
+        self.assertTrue(self.said[-1].endswith("The first is Buntyyy, number plus 9 1, 5 5 5 5 5, 0 1 2 3 4. "
                                                "Is that them?"), self.said)
         siri.handle("Yes, that's him.", gate=True)
         self.assertEqual(self.said[-1], "“hi” to buntyy on WhatsApp. Send it? The chat open is Buntyyy.")
         self.assertEqual(self.sent, [])  # saved, and asked about: not sent
         siri.handle("Yes, send it.", gate=True)
         self.assertEqual(self.sent, ["buntyy"])
-        self.assertEqual(siri.messaging.read_contacts()["buntyy"]["whatsapp"], "919573309199")
+        self.assertEqual(siri.messaging.read_contacts()["buntyy"]["whatsapp"], "915555501234")
 
     def test_no_then_the_next_one(self):
         siri.handle("message buntyy on whatsapp: hi")
         siri.handle("No.", gate=True)
-        self.assertEqual(self.said[-1], "Then is it Bunty K, number plus 9 1, 8 8 8 8 8, 0 2 6 0 7?")
+        self.assertEqual(self.said[-1], "Then is it Bunty K, number plus 9 1, 5 5 5 0 0, 0 5 6 7 8?")
         siri.handle("No.", gate=True)
         self.assertEqual(self.said[-1], "Okay. What's their phone number, with the country code?")
         self.assertEqual((siri.messaging.read_contacts(), self.sent), ({}, []))
@@ -550,9 +550,9 @@ class FoundInWhatsApp(Turn):
         kept = []
         with mock.patch.object(siri.history, "add", lambda *a: kept.append(a)):
             siri.handle("message buntyy on whatsapp: hi")
-        self.assertIn("9 5 7 3 3", self.said[-1])
+        self.assertIn("5 5 5 5 5", self.said[-1])
         self.assertTrue(kept)
-        self.assertNotIn("9 5 7 3 3", repr(kept))
+        self.assertNotIn("5 5 5 5 5", repr(kept))
 
 
 def tripwire_quit(app):

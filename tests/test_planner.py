@@ -237,6 +237,44 @@ class ToolCalls(unittest.TestCase):
                          [{"do": "schedule", "when": "2026-10-07T14:51:00", "description": "Call Mum",
                            "task": {"kind": "reminder", "text": "call Mum"}}])
 
+    def test_several_attributes_on_one_line(self):
+        """R1: on 8 October the model wrote a timer and a video a line each, ending " /". The timer's seconds came out
+        as '300 label="5 min" alert=...', so no timer, and YouTube was searched for 'lofi music" play=true /'."""
+        raw = ('<tool_call>timer\n seconds=300 label="5 min" alert="Hey, your 5-minute timer\'s up." /\n'
+               '<tool_call>youtube\n query="lofi music" play=true /')
+        self.assertEqual(siri.parse_plan(raw)["steps"], [
+            {"do": "timer", "seconds": 300, "label": "5 min", "alert": "Hey, your 5-minute timer's up."},
+            {"do": "youtube", "query": "lofi music", "play": True}])
+        self.assertEqual(siri.parse_plan('<tool_call>youtube query=lofi music play=false />')["steps"],
+                         [{"do": "youtube", "query": "lofi music", "play": False}])
+        self.assertEqual(siri.parse_plan('<tool_call>schedule\nwhen="in 5 minutes" task={"kind": "reminder", '
+                                         '"text": "call Mum"} /\n</tool_call>')["steps"],
+                         [{"do": "schedule", "when": "in 5 minutes", "task": {"kind": "reminder", "text": "call Mum"}}])
+
+    def test_an_end_without_a_space_is_no_part_of_the_value(self):
+        """'play=false/>' kept its '/>', a truthy string, so YouTube played the top video when it should only show it."""
+        for raw, play in (('<tool_call>youtube\nquery=lofi play=false/>', False),
+                          ('<tool_call>youtube\nquery="lofi music" play=true></tool_call>', True)):
+            self.assertIs(siri.parse_plan(raw)["steps"][0]["play"], play, raw)
+        self.assertEqual(siri.parse_plan('<tool_call>website\nurl=https://example.com/\n</tool_call>')["steps"],
+                         [{"do": "website", "url": "https://example.com/"}])  # a site's own "/" stays
+
+    def test_one_value_with_spaces_quotes_or_equals_stays_whole(self):
+        self.assertEqual(siri.parse_plan('<tool_call>say\ntext="She said "hi" to you"\n</tool_call>')["say"],
+                         'She said "hi" to you')  # a quote inside the value, not the end of it
+        for raw, step in (('<tool_call>website\nurl=https://example.com/?q=a b\n</tool_call>',
+                           {"do": "website", "url": "https://example.com/?q=a b"}),
+                          ('<tool_call>web\nquery=what is e = mc2\n</tool_call>',
+                           {"do": "web", "query": "what is e = mc2"}),
+                          # name= inside the text is no argument of a step's, so she types all of it
+                          ('<tool_call>type\ntext=let total=5\n</tool_call>', {"do": "type", "text": "let total=5"}),
+                          ('<tool_call>type\ntext=git config user_name=Hari\n</tool_call>',
+                           {"do": "type", "text": "git config user_name=Hari"}),
+                          # a " /" ends the call only on its last line, not text the model meant to type
+                          ('<tool_call>type\ntext=and /\nkeys=enter /\n</tool_call>',
+                           {"do": "type", "text": "and /", "keys": "enter"})):
+            self.assertEqual(siri.parse_plan(raw)["steps"], [step], raw)
+
     def test_a_say_tool_call_is_what_she_says(self):
         raw = ('<tool_call>steps\n[\n  {"do": "open", "app": "Google Chrome"},\n  {"do": "website", "url": '
                '"https://www.youtube.com"}\n]\n</invoke>\n<tool_call>say\nOpening Chrome and heading to YouTube now.\n'
