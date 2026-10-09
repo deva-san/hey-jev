@@ -514,14 +514,20 @@ class CommandPolicy(unittest.TestCase):
                         # run by path or by pnpm, or code given to node -p or python -Ic: these only asked
                         "pnpm rimraf dist", "./node_modules/.bin/rimraf x", "node_modules\\.bin\\rimraf C:/x",
                         "node -p \"require('fs').rmSync('x',{recursive:true})\"",
-                        "python -Ic \"import shutil;shutil.rmtree('x')\""):
+                        "python -Ic \"import shutil;shutil.rmtree('x')\"",
+                        # by npm x or pnpx, or code that names the call without calling it: these only asked too
+                        "npm x rimraf dist", "npm x -y rimraf dist", "pnpx rimraf dist",
+                        "python -c \"getattr(__import__('shutil'),'rmtree')('x')\"",
+                        "node -e \"require('fs')['rmSync']('x',{recursive:true})\"",
+                        "python -c \"import os; os.system('rm -rf x')\""):
             self.assertEqual(tasks.command_policy(command, self.folder), ("block", "recursive deletion is blocked"),
                              command)
         for command in ("node -e \"require('fs').unlinkSync('x.txt')\"", "python -c \"import os; os.remove('x.txt')\"",
                         "python -c \"print(42)\"", "node -e \"console.log(require('os').cpus().length)\"",
                         "git log --grep=rmtree", "npm install -D rimraf", "npm uninstall rimraf", "pnpm add -D rimraf",
                         "git commit -m \"drop rimraf\"", "git log --grep rimraf",
-                        "git commit -m \"remove (old) recursive flag\"", "git commit -m \"use shutil.rmtree(x)\""):
+                        "git commit -m \"remove (old) recursive flag\"", "git commit -m \"use shutil.rmtree(x)\"",
+                        "node -e \"require('fs').mkdirSync('a/b',{recursive:true})\"", "npm x vitest", "pnpx prettier ."):
             self.assertNotEqual(self.level(command), "block", command)  # one file asks; looking is fine
         self.assertEqual(self.level("git log --oneline -- rimraf.config.js"), "allow")  # read-only, as before
 
