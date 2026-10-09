@@ -15,7 +15,8 @@ Everything else stays. A row that matches a test phrase but stands on its own, a
 bursts like a test's but match no test phrase, are listed for you to look at, not taken out. Every row it would take
 out, and every one to look at, is listed in Logs\\clean_test_data.txt, the only file a dry run writes. Her memory
 (USER.md, MEMORY.md), skills, notes, contacts, recipes and settings are never touched. Run it with Hey Jev closed: it
-refuses while she's running.
+refuses while her window is open, and can't see siri.py in a console, so close that too. A log or day file written to
+after it was read is left as it was, and said, for another run.
 """
 import argparse
 import ast
@@ -124,6 +125,14 @@ def _day_entry(ts, said):
     return f"- **{t.tm_hour % 12 or 12}:{t.tm_min:02d} {'AM' if t.tm_hour < 12 else 'PM'}** You: {said}".split("\n")[0]
 
 
+def _read(path):
+    """A file's bytes, and its size and time from just before, so it's only written back if nothing was added since
+    (backup.running() sees her window, not siri.py --wake in a console)."""
+    st = os.stat(path)
+    with open(path, "rb") as f:
+        return f.read(), (st.st_size, st.st_mtime_ns)
+
+
 def _head(part):
     return part.split(b"\n", 1)[0].rstrip(b"\r").decode("utf-8", "replace")
 
@@ -133,7 +142,8 @@ def day_edits(folder, rows, take):
     what was left in, with why. history.add wrote each turn into history.db and its day file in the same order, so the
     k-th entry with a time and words is the k-th turn of that day with them: a turn of yours with the same minute and
     words as a test's keeps its own entry. Where a file has a different number of them than history.db, none of them
-    goes. The summary at the end stays as it is, though one written on a day of test turns may mention them."""
+    goes. The summary at the end stays as it is, though one written on a day of test turns may mention them. Each
+    write is (path, new bytes, the file's size and time when read)."""
     taken = {r[0] for r in take}
     days = collections.defaultdict(list)
     for rowid, said, ts, day in sorted(rows):  # by rowid: the order history.add wrote them in
@@ -143,8 +153,7 @@ def day_edits(folder, rows, take):
         path = os.path.join(folder, f"{day}.md")
         if not day or not any(rowid in taken for rowid, _ in turns) or not os.path.isfile(path):
             continue
-        with open(path, "rb") as f:
-            raw = f.read()
+        raw, was = _read(path)
         m = SUMMARY.search(raw)
         parts = ENTRY.split(raw[:m.start()] if m else raw)
         have = collections.Counter(_head(part) for part in parts)
@@ -167,7 +176,7 @@ def day_edits(folder, rows, take):
             if (head, seen[head]) not in drop:
                 kept.append(part)
         if drop:
-            writes.append((path, b"".join(kept) + (raw[m.start():] if m else b"")))
+            writes.append((path, b"".join(kept) + (raw[m.start():] if m else b""), was))
     return writes, left
 
 
@@ -211,8 +220,8 @@ def jsonl_plan(path, when_key, text_key, window, phrases, heard):
     """A log of one JSON object a line: the tests' lines by their time and text. A line that isn't JSON is kept."""
     if not os.path.isfile(path):
         return None
-    with open(path, "rb") as f:
-        lines = f.read().split(b"\n")
+    raw, was = _read(path)
+    lines = raw.split(b"\n")
     lines = [line + b"\n" for line in lines[:-1]] + ([lines[-1]] if lines[-1] else [])  # each with its own end
     rows = []
     for i, line in enumerate(lines):
@@ -224,7 +233,7 @@ def jsonl_plan(path, when_key, text_key, window, phrases, heard):
             rows.append((i, str(entry.get(text_key) or ""), _when(entry.get(when_key))))
     take, look, kept = pick(rows, window, phrases, heard)
     drop = {r[0] for r in take}
-    writes = [(path, b"".join(line for i, line in enumerate(lines) if i not in drop))] if drop else []
+    writes = [(path, b"".join(line for i, line in enumerate(lines) if i not in drop), was)] if drop else []
     return {"name": os.path.basename(path), "path": path, "rows": len(lines), "take": take, "look": look,
             "kept": len(lines) - len(take), "writes": writes, "left": []}
 
@@ -292,8 +301,13 @@ def apply(found, local=None):
         except sqlite3.Error as exc:
             problems.append(f"{p['path']}: {exc}, nothing taken out of it")
             continue  # and its day files stay as they are, with the turns still in history.db
-        for path, data in p["writes"]:
+        for path, data, was in p["writes"]:
             try:
+                st = os.stat(path)
+                if (st.st_size, st.st_mtime_ns) != was:
+                    problems.append(f"{path}: written to since it was read, left as it was. Is she running? Close "
+                                    "her, then run this again")
+                    continue
                 _write(path, data)
             except OSError as exc:
                 problems.append(f"{path}: {exc}, left as it was")

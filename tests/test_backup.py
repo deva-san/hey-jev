@@ -263,6 +263,20 @@ class CleanTestData(unittest.TestCase):
         self.assertNotIn(b"You: set a timer", raw)
         self.assertNotIn("set a timer", read(os.path.join(self.local, "Logs", "agent.jsonl")))
 
+    def test_a_log_written_to_after_it_was_read_is_left_as_it_is(self):
+        """backup.running() only sees her window: siri.py --wake in a console keeps writing while this runs, and a
+        log rewritten from what was read before would lose what she wrote since."""
+        found = clean_test_data.plans(self.window, tests=self.tests)
+        path = os.path.join(self.local, "Logs", "agent.jsonl")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": int(self.T0 + 3000), "goal": "open my mail", "ms": 9000}) + "\n")
+        _, problems = clean_test_data.apply(found)
+        self.assertIn("open my mail", read(path))
+        self.assertEqual(read(path).count("set a timer"), 3)  # left as it was, for another run
+        self.assertEqual(len(problems), 1)
+        self.assertIn("agent.jsonl", problems[0])
+        self.assertNotIn("set a timer", self.said())  # the rest still went
+
     def test_what_she_heard_counts_the_way_her_history_keeps_it(self):
         """Her log has what she heard, her name and all; her history keeps the words without it."""
         logs = os.path.join(self.local, "Other logs")
