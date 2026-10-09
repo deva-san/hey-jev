@@ -77,14 +77,15 @@ class RealData(unittest.TestCase):
         self.assertEqual(siri.USER_VOCAB, dictation.USER_VOCAB)
         self.assertTrue(backup.HERE.startswith(DATA), backup.HERE)
         real = os.path.join(ROOT, "vocabulary.json")
-        before = os.path.exists(real) and os.stat(real)
+        stamp = lambda: os.path.exists(real) and (os.stat(real).st_size, os.stat(real).st_mtime_ns)
+        before = stamp()
         try:
             dictation.save_vocab({"Zostel": ["so steel"]})
             self.assertEqual(dictation.fix_vocab("book a so steel"), "book a Zostel")
         finally:
             os.remove(dictation.USER_VOCAB)
             dictation.load_vocab()
-        self.assertEqual(os.path.exists(real) and os.stat(real), before)
+        self.assertEqual(stamp(), before)
         self.assertEqual(dictation.fix_vocab("book a so steel"), "book a so steel")
 
     def test_her_real_folders_are_refused_in_a_test_run(self):
