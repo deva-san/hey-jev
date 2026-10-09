@@ -483,13 +483,18 @@ class CommandPolicy(unittest.TestCase):
                         "node -e \"require('fs-extra').removeSync('C:/x')\"", "npx rimraf C:/x",
                         "python -c \"import shutil; shutil.rmtree('C:/x')\"",
                         "py -c \"__import__('shutil').rmtree(r'C:\\x', ignore_errors=True)\"",
-                        "python -c \"import os; os.removedirs('C:/x/y')\""):
+                        "python -c \"import os; os.removedirs('C:/x/y')\"", "rimraf C:/x", "pnpm dlx rimraf x",
+                        "npm exec rimraf x", "npx --yes rimraf x", "node -e \"require('rimraf').sync('x')\"",
+                        "C:\\Python312\\python.exe -c \"import shutil; shutil.rmtree('x')\""):
             self.assertEqual(tasks.command_policy(command, self.folder), ("block", "recursive deletion is blocked"),
                              command)
         for command in ("node -e \"require('fs').unlinkSync('x.txt')\"", "python -c \"import os; os.remove('x.txt')\"",
                         "python -c \"print(42)\"", "node -e \"console.log(require('os').cpus().length)\"",
-                        "git log --grep=rmtree"):
+                        "git log --grep=rmtree", "npm install -D rimraf", "npm uninstall rimraf",
+                        "git commit -m \"drop rimraf\"", "git log --grep rimraf",
+                        "git commit -m \"remove (old) recursive flag\"", "git commit -m \"use shutil.rmtree(x)\""):
             self.assertNotEqual(self.level(command), "block", command)  # one file asks; looking is fine
+        self.assertEqual(self.level("git log --oneline -- rimraf.config.js"), "allow")  # read-only, as before
 
     def test_the_real_blocks_stay(self):
         for command in ("format C: /q", "Format-Volume -DriveLetter D", "powershell -enc abc", "pwsh -e abc",

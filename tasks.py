@@ -426,9 +426,14 @@ BLOCKED = (
      r"\s-r[a-z]*\b[^\r\n]*\|[^\r\n]*?(?<![\w'\"-])(?:remove-item|ri|rm|rmdir|rd|del|erase)\b",
      "recursive deletion is blocked"),
     # and in the code node -e or python -c is given, which the rule above can't see: node -e "require('fs').rmSync(
-    # 'C:/x',{recursive:true,force:true})" only waited for approval. One file (os.remove, fs.unlinkSync) still asks
-    (r"\brimraf\b|\b(?:rmtree|removedirs|removesync|emptydir(?:sync)?)\s*\(|"
-     r"\b(?:rm|rmdir|remove)(?:sync)?\s*\([^\r\n]*\brecursive\b", "recursive deletion is blocked"),
+    # 'C:/x',{recursive:true,force:true})" only waited for approval. One file (os.remove, fs.unlinkSync) still asks.
+    # Only rimraf run, and only such code: npm install -D rimraf, or git commit -m "remove (old) recursive flag", were
+    # blocked where they'd asked, and git log -- rimraf.config.js, which had gone ahead
+    (r"(?:^|[;&|(]\s*|\b(?:npx|bunx|dlx|exec|yarn)\s+(?:-\S+\s+)*)rimraf(?:\.cmd|\.exe)?\b|"
+     r"\b(?:node|pythonw?[\d.]*|py|deno|bun)(?:\.exe)?\b[^\r\n]*?\s(?:-[ec]|--eval)\b[^\r\n]*?(?:\brimraf\b|"
+     r"\b(?:rmtree|removedirs|removesync|emptydir(?:sync)?)\s*\(|"
+     r"\b(?:rm|rmdir|remove)(?:sync)?\s*\([^\r\n]*\brecursive\b)",
+     "recursive deletion is blocked"),
     (CREDENTIALS, "reading credentials, environment variables, and private keys is blocked"),
     (r"(?:^|[\s&(])(?:cmd(?:\.exe)?\s+(?:/\S+\s+)*/[ckr]|powershell(?:\.exe)?\b|pwsh(?:\.exe)?\b)|[\\/'\"](?:cmd|powershell|pwsh)"
      r"\.exe\b|\b(?:invoke-command|icm|start-job|start-threadjob)\b|\[scriptblock\]|&\s*\{",
