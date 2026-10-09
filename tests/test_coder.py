@@ -103,7 +103,7 @@ class Rules(unittest.TestCase):
         self.assertEqual(len(job.refused), 2)
 
 
-    def test_its_own_tests_ask_once_it_changed_what_they_run(self):
+    def test_its_own_tests_ask_once_it_changed_anything(self):
         """Edits go ahead, and "npm test" ran by itself as the project's own test: but it runs whatever package.json
         says, so a job that rewrote scripts.test could run any command with nobody asked."""
         here = git_folder()
@@ -111,8 +111,20 @@ class Rules(unittest.TestCase):
             json.dump({"scripts": {"test": "jest", "build": "tsc"}}, f)
         test = {"toolCall": {"kind": "execute", "title": "npm test", "rawInput": {"command": "npm test"}}}
         job = coder.Job(here, "fix the failing test")
-        self.assertTrue(job.permission({"toolCall": {"kind": "edit", "title": "src/app.js"}}))
-        self.assertTrue(job.permission(test))  # the code changed, not what the test runs: it goes ahead
+        self.assertTrue(job.permission(test))  # nothing changed yet: the project's own test goes ahead
+        # a test file or a test runner's config it rewrote runs as the test too: os.system added to
+        # tests/test_app.py ran under pytest with nobody asked
+        python = git_folder()
+        with open(os.path.join(python, "conftest.py"), "w", encoding="utf-8") as f:
+            f.write("")
+        pytest = {"toolCall": {"kind": "execute", "rawInput": {"command": "python -m pytest"}}}
+        self.assertTrue(coder.Job(python, "x").permission(pytest))
+        for edited in ("src/app.js", "tests/test_app.py", "jest.config.js", "vite.config.ts"):
+            for folder, run in ((here, test), (python, pytest)):
+                job = coder.Job(folder, "fix the failing test")
+                self.assertTrue(job.permission({"toolCall": {"kind": "edit", "title": edited}}))
+                self.assertFalse(job.permission(run), edited)
+                self.assertIn("code this job changed", job.refused[0])
         for edit in ({"title": "package.json"}, {"title": "Edit", "rawInput": {"filePath": "C:\\p\\package.json"}},
                      {"title": "Edit", "locations": [{"path": "C:\\p\\tests\\conftest.py"}]}, {"title": "web/.npmrc"}):
             job = coder.Job(here, "fix the failing test")

@@ -151,6 +151,7 @@ class Job:
         self.folder, self.task, self.ask, self.cancelled, self.timeout = folder, task, ask, cancelled, timeout
         self.text, self.refused, self.ran, self.edited = [], [], [], []
         self.defined = False  # it edited a file that says what the project's test or build command runs
+        self.changed = False  # it edited anything: a test file it rewrote runs as the project's own tests
 
     def permission(self, params):
         """True to let a request through. Edits in the folder, yes; commands by her own rules."""
@@ -162,14 +163,17 @@ class Job:
             where = [title, raw.get("filePath"), raw.get("path")]
             where += [p.get("path") for p in call.get("locations") or [] if isinstance(p, dict)]
             self.defined = self.defined or any(defines(w) for w in where if w)
+            self.changed = True
             return True
         if kind == "execute":
             command = str(raw.get("command") or title)
             level, reason = tasking.command_policy(command, self.folder)
             # "npm test" goes ahead as the project's own test, but it runs whatever package.json says, and an edit
-            # here goes ahead too: rewritten by the job, it'd run any command with nobody asked
-            if level == "allow" and reason == "project verification" and self.defined:
-                level, reason = "confirm", "it runs what this job changed"
+            # here goes ahead too: rewritten by the job, it'd run any command with nobody asked. So does any file it
+            # edited: os.system in tests/test_app.py, or globalSetup in jest.config.js, ran under pytest or npm test
+            if level == "allow" and reason == "project verification" and self.changed:
+                level, reason = "confirm", "it runs what this job changed" if self.defined else \
+                    "it runs code this job changed"
             if level == "allow":
                 self.ran.append(command)
                 return True
