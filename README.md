@@ -177,7 +177,7 @@ Her learning loop is a light version of Hermes'. After a turn worth learning fro
 With Hermes' parts brought in:
 
 - A correction ("no, I said ...", "that's wrong") is looked at straight away, with what you said as the focus, so she has it right next time. The look back carries Hermes' own rules: one fact in one place, a skill is the procedure and its pitfalls, and never keep "X doesn't work" or a one-off task.
-- Skills are written in Hermes' format, the description cut to its 60 letters. The ones that fit a request are written out in full in what she's asked, so the model doesn't spend a round trip loading them.
+- Skills are written in Hermes' format, the description cut to its 60 letters. The one that fits a request best is written out in full in what she's asked, so the model doesn't spend a round trip loading it; the next few are described and the rest named, so 40 skills keep her prompt within its budget.
 - Hermes' curator runs once a week, after 2 quiet hours. A skill she wrote herself and hasn't used in 14 days is marked stale; after 30 it's archived to `skills\.archive`, never deleted. Skills you taught her are never touched.
 - What a look back or a day's summary changed is kept as it was before. "Forget what you just learned" puts it back.
 

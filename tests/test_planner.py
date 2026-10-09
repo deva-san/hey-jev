@@ -107,6 +107,89 @@ class CommandRetry(Turn):
         self.assertEqual(plan["steps"][0]["do"], "schedule")
 
 
+class TaskSteps(Turn):
+    """P3: the steps for commands, schedules and coding jobs were a thousand characters of every request's prompt,
+    which few ask for. They're written out for words that may ask for one, or a follow-up to one; the rest get a line
+    naming them."""
+
+    def system(self, words, recent=()):
+        with patch.object(siri.history, "recent", lambda *a, **k: list(recent)):
+            self.think(words, False, '{"steps": [], "say": "Okay."}')
+        return self.model.calls[0][0][0]["content"]
+
+    def test_written_out_only_for_words_that_may_ask_for_one(self):
+        for words in ("run the tests in hey-jev", "every Monday at 9 check my C drive", "git status in hey-jev",
+                      "remind me at 6 to call Mum", "add a dark mode toggle to my project", "cancel task 3",
+                      "schedule a disk check for tomorrow",
+                      # missed: a two-digit time, "each", a job, a server, an hour from now
+                      "can you check how my battery is doing at 10 pm", "find out about the monsoon at 10 am",
+                      "check my battery each morning", "stop job 3", "start the dev server in careerid",
+                      "look into flights to goa in an hour", "research the monsoon on friday at noon"):
+            with self.subTest(words=words):
+                self.assertIn(siri.TASK_STEPS, self.system(words))
+        for words in ("open notepad", "what's the capital of Japan", "play some lofi music"):
+            with self.subTest(words=words):
+                system = self.system(words)
+                self.assertIn(siri.TASK_STUB, system)
+                self.assertNotIn("run hidden in the background", system)
+
+    def test_a_request_the_words_miss_still_has_each_steps_fields(self):
+        """"add a dark mode toggle to the settings page in hey-jev" got only the steps' names, so the model guessed
+        their fields and the code turned it down: "Say the project's full folder"."""
+        system = self.system("add a dark mode toggle to the settings page in hey-jev")
+        self.assertNotIn(siri.TASK_STEPS, system)
+        for field in ('"do":"code","task":', '"cwd":', '"task":{"kind":"reminder","text":', '"when":', '"repeat":',
+                      '"do":"task_control","action":"cancel|approve","id":'):
+            with self.subTest(field=field):
+                self.assertIn(field, system)
+
+    def test_and_for_a_follow_up_to_one(self):
+        recent = [(0, "remind me every day at 9 to take my medicine",
+                   '{"steps": [{"do": "schedule", "when": "", "repeat": "daily at 9 AM"}], "say": ""}')]
+        self.assertIn(siri.TASK_STEPS, self.system("make it 10 instead", recent))
+
+
+class Lookups(Turn):
+    """P2: 21 of 30 spoken answers took a look-up, a whole model round trip more, and "what's the capital of Japan"
+    and the moon's distance were looked up on the web 2 times in 3. What doesn't change is answered from what the
+    model knows; what changes is still looked up."""
+
+    def asked(self, words):
+        self.think(words, False, '{"steps": [], "say": "Okay."}')
+        return self.model.calls[0][0][-1]["content"]
+
+    def test_a_fact_that_doesnt_change_is_answered_without_a_look_up(self):
+        self.assertIn("What doesn't change (capitals, distances", siri.PROMPT)
+        for words in ("what's the capital of Japan", "how far away is the moon", "what's 15% of 2,400",
+                      "who wrote Pride and Prejudice", "what does serendipity mean", "how many feet in a mile"):
+            with self.subTest(words=words):
+                self.assertTrue(self.asked(words).endswith(siri.KNOWN_NOTE))
+
+    def test_what_changes_is_still_looked_up(self):
+        for words in ("what's the weather in Tokyo", "what's the latest news on the monsoon", "who won the match today",
+                      "what's the price of gold now", "who is the prime minister of Japan", "what does this button mean",
+                      "how far is my office", "google the capital of Japan", "open notepad",
+                      # this PC and what's on it are looked at, not known; an age, a new phone or the news change
+                      "how big is the C drive", "how high is the CPU", "what does the error on the screen mean",
+                      "how old is Virat Kohli", "how big is the new iPhone",
+                      "what does the budget announcement mean for salaried people"):
+            with self.subTest(words=words):
+                self.assertNotIn(siri.KNOWN_NOTE, self.asked(words))
+
+    def test_words_overheard_get_no_push_to_answer(self):
+        """Said near the PC, "how long is the movie" is likely to a friend: the model decides that, unpushed."""
+        self.think("how long is the movie", "cold", '{"to": "others"}')
+        self.assertNotIn(siri.KNOWN_NOTE, self.model.calls[0][0][-1]["content"])
+
+    def test_a_fact_asked_without_her_name_still_skips_the_look_up(self):
+        """149 of 150 voice turns had no name: "what's the capital of Japan" said so still gets the note, worded to
+        leave who it's to with the model."""
+        self.think("what's the capital of Japan", "cold", '{"to": "others"}')
+        self.assertTrue(self.model.calls[0][0][-1]["content"].endswith(siri.COLD_KNOWN_NOTE))
+        self.think("how big is the C drive", "cold", '{"to": "others"}')
+        self.assertNotIn(siri.COLD_KNOWN_NOTE, self.model.calls[-1][0][-1]["content"])
+
+
 class GoogleQuestion(Turn):
     """A22: "Google when is ..." is a question, with or without a question mark."""
 

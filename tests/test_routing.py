@@ -1,6 +1,8 @@
 """The local fast path: what quick() and fast_intent plan on this PC, and what they leave to the model."""
 import contextlib
 import io
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -156,6 +158,22 @@ class Routines(Routing):
                 with self.subTest(words=words):
                     self.assertEqual(self.quick(words), {"steps": [{"do": "volume", "to": "mute"}], "say": "Focus time."})
         self.assertEqual(self.installs, [])
+
+    def test_a_routine_doesnt_wait_for_the_skill_bookkeeping(self):
+        """"Work mode" waited 18-26 ms inside quick() while Hermes' usage tracking locked, read and wrote its file,
+        before anything happened. It's kept all the same, just not on the turn."""
+        routine = {"dir": "focus", "plan": {"steps": [{"do": "volume", "to": "mute"}], "say": "Focus time."}}
+        kept = threading.Event()
+
+        def used(name):
+            time.sleep(0.3)  # the file lock held by the curator a moment
+            kept.set()
+        with mock.patch.object(siri, "routines", lambda: [("enter focus mode", routine)]), \
+                mock.patch.object(siri.skills, "used", used):
+            t = time.time()
+            self.assertEqual(self.quick("enter focus mode")["steps"], [{"do": "volume", "to": "mute"}])
+            self.assertLess(time.time() - t, 0.2)
+            self.assertTrue(kept.wait(2))
 
 
 class Messages(Routing):

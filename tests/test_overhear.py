@@ -1,7 +1,11 @@
 """Talking over her: a request, her name or "stop" stops her mid-line, other words turn her down a moment, and once
 she's stopped the rest of her turn isn't said. Nothing here plays a sound."""
 import queue
+import random
+import sys
+import threading
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -46,6 +50,53 @@ class Verdicts(unittest.TestCase):
         self.assertIsNone(siri.barge("opening notepad for you now and closing chrome", True))
 
 
+LINES = ["Tokyo is the capital of Japan, and with about fourteen million people it is also the biggest city there.",
+         "Here's what Ravi said on WhatsApp: he'll be at the station by six, and asks if you could pick up some milk.",
+         "The weather in Hyderabad today is thirty one degrees and sunny, with a light breeze in the evening.",
+         "The top stories: the monsoon has reached Kerala early this year, markets closed higher, and India won.",
+         "Should I send it to Mum on WhatsApp? It says: running late, will be home by eight, don't wait for dinner.",
+         "Iron Man 2 came out in 2010, with Robert Downey Junior, Gwyneth Paltrow, Don Cheadle and Scarlett Johansson.",
+         "Here's a short summary of the page: it explains how to set up a Python virtual environment on Windows.",
+         "That's the second video on the page, a review of the new phone, about twelve minutes long."]
+
+
+class Echo(unittest.TestCase):
+    """echo_of: her own voice heard back, told apart from you without a difflib match for every letter she said."""
+
+    def setUp(self):
+        siri.HER_SAID.clear()
+        self.addCleanup(siri.HER_SAID.clear)
+        for line in LINES:
+            siri.HER_SAID.append((time.time(), line))
+
+    def test_a_few_words_after_a_long_answer_are_quick_to_tell_apart(self):
+        """After a long answer, six words over her slid a SequenceMatcher across all she'd said a letter at a time:
+        90-120 ms on every word update while she talked (barge), and twice more before the turn (act_on)."""
+        made = []
+
+        class Counted(siri.difflib.SequenceMatcher):
+            def __init__(self, *args, **kw):
+                made.append(1)
+                super().__init__(*args, **kw)
+        with mock.patch.object(siri.difflib, "SequenceMatcher", Counted):
+            self.assertFalse(siri.echo_of("okay now open notepad and write hello please"))
+            self.assertFalse(siri.echo_of("okay now open notepad and write hello please"))  # act_on's second look
+            self.assertTrue(siri.echo_of("The weather in Hyderabad today is thirty one degrees."))
+            self.assertTrue(siri.echo_of("send it to mum on whatsapp it says running late"))
+        self.assertLess(len(made), 30)  # it was 2,126 for these four
+
+    def test_the_answers_are_hermes_own(self):
+        rnd, words = random.Random(7), siri.words_of(" ".join(LINES)).split()
+        for _ in range(300):
+            st, k = rnd.randrange(len(words) - 12), rnd.randint(2, 12)
+            frag = words[st:st + k]
+            for _ in range(rnd.randint(0, 3)):  # a word or two misheard
+                frag[rnd.randrange(len(frag))] = rnd.choice(words)
+            a, b = " ".join(frag), " ".join(words[max(0, st - rnd.randint(0, 20)):][:rnd.randint(4, 30)])
+            with self.subTest(a=a, b=b):
+                self.assertEqual(siri.tts_echo(a, b), voice_bits.is_tts_echo(a, b, threshold=siri.ECHO_SURE))
+
+
 class Stopping(unittest.TestCase):
     def setUp(self):
         siri.HER.begin()
@@ -63,6 +114,39 @@ class Stopping(unittest.TestCase):
         siri.HER.cut("test")
         self.assertTrue(voice_bits.take_speech_interrupted())
         self.assertFalse(voice_bits.take_speech_interrupted())
+
+    def test_a_stopped_answers_queued_lines_arent_made_in_her_voice_on_this_pc(self):
+        """Her voice on this PC (Pocket): a streamed answer had three sentences queued, each line's voice already
+        on its way, and you talked over her with a new request. Playing them was skipped, but end() cleared stop, so
+        they were made in full anyway, one after another under the engine's one lock, and the next answer's first
+        word came 3 to 10 s late."""
+        made = []
+
+        class TTS:
+            def generate(self, text, config, callback):
+                time.sleep(0.15)  # about 0.5 s a sentence on the PC
+                made.append(text)
+                callback(np.zeros(100, np.float32), 1.0)
+                return types.SimpleNamespace(samples=np.zeros(100, np.float32))
+        engine = siri.pocket.Engine.__new__(siri.pocket.Engine)
+        engine.tts, engine.refs, engine.used, engine.lock = TTS(), {"p248": np.zeros(10, np.float32)}, 0.0, \
+            threading.Lock()
+        fake = types.SimpleNamespace(GenerationConfig=types.SimpleNamespace)
+        line = ORIGINAL["Line"]
+        with mock.patch.dict(sys.modules, {"sherpa_onnx": fake}), \
+                mock.patch.object(siri.pocket, "engine", lambda: engine):
+            queued = [line(f"Sentence number {i} of the answer.", "pocket:p248") for i in range(3)]
+            time.sleep(0.05)  # the first is being made
+            siri.HER.cut("a new request")
+            siri.HER.end()
+            t = time.time()
+            nxt = line("The next answer.", "pocket:p248")
+            while nxt.audio.get(timeout=2) is not None:
+                pass
+            waited = time.time() - t
+        self.assertEqual(made, ["Sentence number 0 of the answer.", "The next answer."])
+        self.assertLess(waited, 0.3)  # the one already being made, then this one
+        self.assertTrue(all(q.audio.get(timeout=1) is None for q in queued[1:]))
 
     def test_playing_stops_between_slices(self):
         written = []

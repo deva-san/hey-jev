@@ -49,12 +49,16 @@ class Encoder:
     """Sentence in, 384 numbers out, the mean of the last layer over its words, made length 1."""
 
     def __init__(self):
+        # one sentence at a time needs no pool of threads for its words: tokenizers started one for every CPU thread,
+        # 12 more threads idling in her process on this PC
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
         import onnxruntime as ort
         from tokenizers import Tokenizer
         d = os.path.join(speech.models_dir(), ENCODER)
         so = ort.SessionOptions()
         so.inter_op_num_threads, so.intra_op_num_threads = 1, 2  # leaves the rest to speech-to-text
         so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+        so.enable_cpu_mem_arena = False  # what a sentence needs is given back after it: 3 MB less off Windows
         self.session = ort.InferenceSession(os.path.join(d, "model_quint8_avx2.onnx"), sess_options=so,
                                             providers=["CPUExecutionProvider"])
         self.tokenizer = Tokenizer.from_file(os.path.join(d, "tokenizer.json"))
@@ -92,6 +96,8 @@ def predict(head, x):
 
 
 class Decider:
+    last = None  # (sentence, its numbers) last worked out, see encode
+
     def __init__(self):
         self.encoder, self.heads, self.lock = None, {}, threading.Lock()
         self.load()
@@ -109,10 +115,18 @@ class Decider:
         return head in self.heads and available()
 
     def encode(self, text):
+        """The sentence's numbers. The last one's are kept: without her name a turn's words went through twice, about
+        15 ms each, once to ask if it was for her (for_me) and again for the skills that fit (siri.relevant_skills)."""
+        text = str(text)
         with self.lock:
             if self.encoder is None:
                 self.encoder = Encoder()
-        return self.encoder(text)
+        last = self.last
+        if last is not None and last[0] == text:
+            return last[1]
+        v = self.encoder(text)
+        self.last = (text, v)
+        return v
 
     def decide(self, state, questions):
         """Jev's /v1/systemone shape: state {"said": ..., "kind": ...}, questions {"for_me": {"type": "noul"}}.

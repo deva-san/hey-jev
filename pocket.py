@@ -16,6 +16,7 @@ import threading
 import time
 
 import numpy as np
+import psutil
 
 import speech
 
@@ -60,6 +61,7 @@ class Engine:
             model=sherpa_onnx.OfflineTtsModelConfig(pocket=model, num_threads=THREADS, provider="cpu"),
             max_num_sentences=1)  # the callback gets each sentence as soon as it's made
         self.tts = sherpa_onnx.OfflineTts(config)
+        print(f"  her voice on this PC loaded, {psutil.Process().memory_info().rss / 2 ** 20:,.0f} MB in use")
 
     def _ref(self, voice):
         if voice not in self.refs:
@@ -74,9 +76,14 @@ class Engine:
 
     def make(self, text, voice=DEFAULT, on_audio=None, stop=None):
         """Say text in voice: on_audio(samples, float32 at RATE) gets it a sentence at a time. Returns all of it.
-        stop(): True to stop making it, as when she's been stopped mid-line."""
+        stop(): True to stop making it, as when she's been stopped mid-line. Asked before it starts too: a sentence
+        is made whole before stop is asked, so a line queued behind others was still made in full after a stop."""
+        if stop and stop():
+            return np.zeros(0, np.float32)
         import sherpa_onnx
         with self.lock:
+            if stop and stop():  # stopped while it waited for the line before it
+                return np.zeros(0, np.float32)
             if self.tts is None:
                 self._load()
             self.used = time.time()

@@ -292,7 +292,7 @@ class Bot:
     def _poll(self):
         """Listens until stopped. Returns why it stopped: the error's class name, or "" for a stop()."""
         try:
-            from telegram.ext import Application, CallbackQueryHandler, MessageHandler, filters
+            import telegram.ext  # noqa: F401
         except ImportError:
             print("[phone: python-telegram-bot isn't installed]")
             return "ImportError"
@@ -307,9 +307,7 @@ class Bot:
                 return ""
             self.loop = loop
         try:
-            self.app = Application.builder().token(token).post_init(self._ready).build()
-            self.app.add_handler(MessageHandler(filters.ChatType.PRIVATE, self._message))
-            self.app.add_handler(CallbackQueryHandler(self._tap))
+            self.app = self._app(token)
             print("[phone: listening on Telegram" + ("" if owner() else ", not paired yet: only /start is answered")
                   + "]")
             # Paired: what came in while she was off is dropped (drop_pending_updates), the rest by OLDEST. Not
@@ -335,6 +333,26 @@ class Bot:
                 loop.close()
             except Exception:
                 pass
+
+    def _app(self, token):
+        """The library's Application, with what it does with your messages, your taps and its errors."""
+        from telegram.ext import Application, CallbackQueryHandler, MessageHandler, filters
+        app = Application.builder().token(token).post_init(self._ready).build()
+        app.add_handler(MessageHandler(filters.ChatType.PRIVATE, self._message))
+        app.add_handler(CallbackQueryHandler(self._tap))
+        app.add_error_handler(self._error)
+        return app
+
+    async def _error(self, update, context):
+        """An error from Telegram in one line: with no handler of its own the library logged each with its whole
+        traceback, about 140 lines ("No error handlers are registered"), six times in a morning of network hiccups,
+        which it rides out by itself. Only the error's class, never its message, which can hold the token. Anything
+        else is a mistake in her own code here, and keeps its traceback."""
+        from telegram.error import TelegramError
+        if isinstance(context.error, TelegramError):
+            print(f"[phone: Telegram {type(context.error).__name__}, carrying on]")
+        else:
+            logging.getLogger(__name__).error("phone: a message from Telegram failed", exc_info=context.error)
 
     async def _ready(self, app):
         me = await app.bot.get_me()
