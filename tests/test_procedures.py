@@ -809,7 +809,10 @@ class Plans(Agent):
         screen, proc = {"do": "screen", "task": "turn on night light in Settings"}, {"do": "procedure", "name": "x"}
         for said in ("Turn on night light.", "Click chat messages", "Select smile emoji", "Turn the night light off"):
             self.assertIsNone(siri.needs_asking([screen, proc], said), said)
-        for said in ("It is automatic", "the blue button", "night light", "and then turn"):
+        # nor a sentence that starts like one, from a video on the speakers or two things at once
+        for said in ("It is automatic", "the blue button", "night light", "and then turn",
+                     "Click the link in the description below", "Click the subscribe button",
+                     "Select all and delete everything", "click on the thing that we saw on the TV yesterday"):
             self.assertEqual(siri.needs_asking([screen], said), screen, said)
             self.assertEqual(siri.needs_asking([proc], said), proc, said)
         self.assertEqual(siri.needs_asking([screen], "Click chat messages", read=True), screen)

@@ -1941,9 +1941,13 @@ ASKS_FOR = {"type": EDIT_WORDS, "keys": EDIT_WORDS, "close": re.compile(r"\b(?:c
             "send_screenshot": re.compile(r"\b(?:screen ?shot|screen|snap|picture|photo)", re.I)}
 # A task in an app the words ask for in so many words, after plain(): "Turn on night light", "Click chat messages",
 # "Select smile emoji". On 8 October 7 of the 17 "Should I look at your screen?" or "Should I ...?" asks were for
-# requests as plain as these. Room talk the model took for a task doesn't start like this, so it's still asked about
+# requests as plain as these. Room talk the model took for a task doesn't start like this, so it's still asked about.
+# Only a control's name after it, up to 4 words, not two things ("select all and delete it") nor what a video on the
+# speakers says ("click the link in the description", "click the subscribe button"): that's still asked about
 TASK_WORDS = re.compile(r"(?:click|double click|right click|tap|select|choose|toggle|tick|untick|uncheck|"
-                        r"turn (?:on|off)|switch (?:on|off)) \w.*|(?:turn|switch) (?:[\w'-]+ ){1,3}(?:on|off)")
+                        r"turn (?:on|off)|switch (?:on|off)) "
+                        r"(?!.*\b(?:and|then|subscribe|like|bell|link|description|below|comments?|channel)\b)"
+                        r"[\w'.-]+(?: [\w'.-]+){0,3}|(?:turn|switch) (?:[\w'-]+ ){1,3}(?:on|off)")
 # After reading the web or messages, only these go ahead without a yes, whatever the words: they show, play or look
 # things up, or ask for themselves later (a message, an install, a command's approval). Words can't count there:
 # "look up how to make biryani" would let a page's typing through, "make" being an edit word, and nothing would stop
