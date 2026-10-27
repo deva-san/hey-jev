@@ -483,35 +483,73 @@ class BrowserLaunch(unittest.TestCase):
 
 class NoConsoles(unittest.TestCase):
     """27 October, found while mapping: "open" needs no yes after a read (READ_SAFE), and only a live run kept to
-    agent.NO_OPEN, so a page read in the same turn could get PowerShell, cmd or the registry editor opened."""
+    agent.NO_OPEN, so a page read in the same turn could get PowerShell, cmd or the registry editor opened. Now a plan
+    opens one only when your own words name it."""
 
     def setUp(self):
-        self.tripped, self.said = len(TRIPPED), []
+        self.tripped, self.said, self.opened = len(TRIPPED), [], []
         self.addCleanup(lambda: self.assertEqual(TRIPPED[self.tripped:], []))  # nothing was started on the PC
         siri.HER.begin()
 
-    def run_planned(self, step):
+    def run_for(self, plan, words):
+        """plan run for these words of yours this turn: what failed."""
+        token = siri.agent.SAID.set(words)
+        try:
+            with mock.patch.object(siri, "say", lambda line, notify: self.said.append(line)), \
+                    mock.patch.object(siri.win, "open_app", self.opened.append), \
+                    mock.patch.object(siri, "open_page", lambda *a: self.opened.append(a)), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                return siri.run_plan(plan, None)[0]
+        finally:
+            siri.agent.SAID.reset(token)
+
+    def run_planned(self, step, words="read me this page"):
         """step as the planner planned it after reading a page, then run: (the plan, what failed)."""
-        plan = planned_after("read me this page", [step], looked=({"do": "read", "url": "https://example.com"},))
-        with mock.patch.object(siri, "say", lambda line, notify: self.said.append(line)), \
-                contextlib.redirect_stdout(io.StringIO()):
-            return plan, siri.run_plan(plan, None)[0]
+        plan = planned_after(words, [step], looked=({"do": "read", "url": "https://example.com"},))
+        return plan, self.run_for(plan, words)
 
     def test_a_page_cant_get_a_console_or_the_registry_editor_opened(self):
-        for app in ("PowerShell", "regedit", "cmd", "Command Prompt", "Registry Editor", "Windows Terminal", "Run"):
+        for app in ("PowerShell", "regedit", "cmd", "Command Prompt", "Registry Editor", "Windows Terminal", "Run",
+                    # and a command window's own program by name, which NO_OPEN's words missed (review, 27 October)
+                    "wt", "conhost", "powershell_ise", "regedt32", "Ubuntu", "WindowsTerminal.exe", "pwsh.exe"):
             with self.subTest(app=app):
                 plan, failed = self.run_planned({"do": "open", "app": app})
                 self.assertEqual(plan["steps"], [{"do": "open", "app": app}])  # not asked about: refused instead
                 self.assertEqual(failed, [siri.NO_OPEN_LINE])
         self.assertIn(siri.NO_OPEN_LINE, self.said[-1])
+        self.assertEqual(self.opened, [])
+
+    def test_one_your_own_words_name_still_opens(self):
+        """27 October, review: the refusal above refused you too. "Open Terminal" is on the fast path (apps.json),
+        said "Opening it now." and then that she doesn't open command windows."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            plan = siri.quick("open terminal")
+        self.assertEqual(plan["steps"], [{"do": "open", "app": "Terminal"}])
+        self.assertEqual(self.run_for(plan, "open terminal"), [])
+        self.assertEqual(self.opened, [siri.APP_SPECS["terminal"]])
+        for words, app in (("open command prompt", "cmd"), ("open PowerShell", "Windows PowerShell"),
+                           ("open the registry editor", "regedit"), ("open windows terminal", "wt")):
+            with self.subTest(words=words), mock.patch.object(siri.win, "App", lambda name: SimpleNamespace(name=name)):
+                self.assertEqual(self.run_for({"steps": [{"do": "open", "app": app}], "say": ""}, words), [])
+                self.assertEqual(self.opened[-1].name, app)
+        # each by name: Terminal asked for doesn't let a page have the registry editor opened alongside it
+        _, failed = self.run_planned({"do": "open", "app": "regedit"}, "read me this page and open terminal")
+        self.assertEqual(failed, [siri.NO_OPEN_LINE])
 
     def test_nor_a_page_in_one_as_its_browser(self):
-        """open_url starts the browser's own program with the address, and a ";" in it is a PowerShell command."""
+        """open_url starts the browser's own program with the address, and a ";" in it is a PowerShell command. Since
+        the review of 27 October one that isn't a browser opens it in the default browser, as one not in apps.json
+        did, and one that is a browser by its program's name ("Opera") in that browser."""
         step = {"do": "website", "url": "https://example.com/;calc", "browser": "Windows PowerShell"}
         plan, failed = self.run_planned(step)
-        self.assertEqual(plan["steps"], [step])
-        self.assertEqual(failed, ["Windows PowerShell isn't one of your browsers"])
+        self.assertEqual((plan["steps"], failed), ([step], []))
+        self.assertEqual(self.opened, [("https://example.com/;calc", None, None)])  # None: the default browser
         self.assertIs(siri.find_browser("Google Chrome"), siri.APP_SPECS["chrome"])  # hers still are
+        self.assertIsNone(siri.find_browser("default"))
+        opera = siri.find_browser("Opera")
+        self.assertEqual(opera.exes, {"opera.exe"})
+        self.assertTrue(opera.matches(r"C:\Opera\opera.exe"))
+        self.assertFalse(opera.matches(r"C:\x\powershell.exe"))
 
 
 SECRETS = "reading credentials, environment variables, and private keys is blocked"

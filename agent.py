@@ -102,10 +102,15 @@ CHAT_APPS = re.compile(r"whatsapp|telegram|signal|slack|discord|teams|skype|mess
 WEB_EXES = win.BROWSER_EXES | {"firefox.exe", "opera.exe", "vivaldi.exe", "arc.exe", "chromium.exe"}
 # Where typing and Enter start any program, which no model's steps may reach: command windows (siri.SHELLS), the Run
 # box, Start and its search, and File Explorer's address bar for anything but a folder. siri.press_keys never presses
-# the Windows key, but a live run can open apps by name, so these aren't opened either
+# the Windows key, but a live run can open apps by name, so these aren't opened either (no_open_names), nor by a
+# plan's open step unless your own words name them (siri.do_step)
 LAUNCHERS = {"searchhost.exe", "searchapp.exe", "searchui.exe", "startmenuexperiencehost.exe"}
-NO_OPEN = re.compile(r"\b(?:cmd|command prompt|powershell|pwsh|terminal|wsl|bash|run|regedit|registry editor|"
-                     r"task scheduler|group policy|computer management|services)\b", re.I)
+NO_OPEN = re.compile(r"\b(?:cmd|command prompt|powershell|pwsh|terminal|wsl|bash|ubuntu|run|regedit|regedt32|"
+                     r"registry editor|task scheduler|group policy|computer management|services)\b", re.I)
+# the same one by another name (no_open_names), as siri.KEY_NAMES for keys: "open command prompt" planned as cmd
+NO_OPEN_SAME = {"cmd": "command prompt", "pwsh": "powershell", "powershellise": "powershell",
+                "regedit": "registry editor", "regedt32": "registry editor", "wt": "terminal",
+                "windowsterminal": "terminal", "openconsole": "terminal"}
 FOLDER = re.compile(r"shell:[a-z][\w ]*", re.I)  # a shell folder by name: shell:Downloads, not shell:AppsFolder\x!App
 # A program, by its file's name, or by its type where Windows hides the name's ending ("setup", an Application):
 # opened from File Explorer, it runs, as an install would. A Python File too: the py launcher runs install.py there
@@ -639,14 +644,18 @@ def _note_run(r):
             s.update(ok=s.get("ok", 0) + 1, fails_in_row=0, last_ok=round(time.time()))
         elif r.outcome == "failed" and not r.env:
             s["fails_in_row"] = s.get("fails_in_row", 0) + 1
-        gone = s.get("fails_in_row", 0) >= FAILS_TO_ARCHIVE
+        failing = s.get("fails_in_row", 0) >= FAILS_TO_ARCHIVE
+        # its stats go only once it's archived: one that can't be (its SKILL.md held open by an editor or antivirus,
+        # so the folder can't be moved) is kept, never deleted, and without its sha in the stats it would sit there
+        # never running, never counted again. With them, it runs, and is tried again after its next failure
+        gone = failing and bool(skills.delete_skill(r.name).get("success"))
         if gone:
             data.pop(r.name)
         _save_stats(data)
-    if gone:
-        gone = bool(skills.delete_skill(r.name).get("success"))  # one that can't be archived is kept, never deleted
+    if failing:
         print(f"  procedure {r.name} failed {FAILS_TO_ARCHIVE} times in a row: "
-              f"{'archived' if gone else 'kept, as it could not be archived'}")
+              f"{'archived' if gone else 'kept, as it could not be archived, to be tried again'}")
+    if gone:
         host._skill_cache[0] = 0.0
     return gone
 
@@ -1064,6 +1073,17 @@ def opens_program(el):
     return not kind or bool(PROGRAM_TYPES.search(kind))
 
 
+def no_open_names(text):
+    """What in text no step opens unasked, each by one name (NO_OPEN_SAME): NO_OPEN's, and a command window's own
+    program by its name (siri.SHELLS), which those words missed: "wt", "conhost" and "powershell_ise" ("_" is part of
+    a word, so \\bpowershell\\b didn't match) each open one through winplatform.launch's os.startfile (27 October).
+    An empty set for an app that may be opened."""
+    t = host.key_of(re.sub(r"\.exe\b", "", str(text or ""), flags=re.I))
+    shells = {re.sub(r"[^a-z0-9]", "", e.removesuffix(".exe")) for e in host.SHELLS}
+    found = {m.lower() for m in NO_OPEN.findall(t)} | {w for w in t.split() if w in shells}
+    return {NO_OPEN_SAME.get(x, x) for x in found}
+
+
 def explorer_enter_runs(focus):
     """True if Enter in File Explorer could start a program: on a file that is one (opens_program), in the address
     bar on what isn't a folder, or on what it can't tell (no focus, or a list or button, where Enter opens what's
@@ -1104,7 +1124,7 @@ def gate(r, i, s, el=None, checked=False, trusted=()):
     if OFF_LIMITS.search(title) or OFF_LIMITS.search(site or "") or OFF_LIMITS.search(url_site or "") or \
             (do == "switch" and OFF_LIMITS.search(target)):
         return "stop", PRIVATE_LINE
-    if do == "open" and NO_OPEN.search(str(s.get("app") or "")):
+    if do == "open" and no_open_names(s.get("app")):
         return "stop", f"I don't open command windows or the Run box for a task, so {LEAVE_IT}."
     focus = el if do in ("ui", "click") else win.ui_focused() if do in ("type", "keys") else None
     if do == "type" and not focus:

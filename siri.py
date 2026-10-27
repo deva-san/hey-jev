@@ -4333,12 +4333,17 @@ def planned_clicks(steps):
     agent.ask reads its replies with this same parse_plan, but do_step has neither: the planner's {"do": "click"} was
     said as "I can't click yet". A click that names its control becomes the task on the screen "click Subscribe",
     which agent.quick_click presses by name with no model, through the same checks as those words said out loud
-    (_screen). A click by id or point (only a live run is shown those), one that types, and a wait are left out."""
+    (_screen). A switch's click, with the state it's to be left in, becomes "turn off Wi-Fi", which the live loop
+    does by reading the switch first: pressed by name, Wi-Fi already off was turned on. A click by id, or by point
+    with nothing naming it (only a live run is shown those), one that types, and a wait are left out."""
     out = []
     for s in steps:
         name = next((" ".join(s[k].split()) for k in CLICK_NAMES if isinstance(s.get(k), str) and s[k].strip()), "") \
             if s["do"] == "click" and s.get("text") is None else ""
-        if name:
+        state = str(s.get("state") or "").strip().lower()
+        if name and state in ("on", "off"):
+            out.append({"do": "screen", "task": f"turn {state} {name[:120]}"})
+        elif name and not state:
             how = "double " if s.get("double") else "right " if str(s.get("button")).lower() == "right" else ""
             out.append({"do": "screen", "task": f"{how}click {name[:120]}"})
         elif s["do"] in ("click", "wait"):
@@ -5189,20 +5194,28 @@ def find_app(name):
     return APP_SPECS[k] if k else win.App(name)
 
 
-# Opening one of agent.NO_OPEN's (a command window, the Run box, the registry editor...), the one list a live run
-# keeps to too. "open" is READ_SAFE, so a page read in the same turn could have had PowerShell or regedit opened with
-# no yes; typing into one was refused, opening it wasn't. Terminal work goes through command steps and their checks
-NO_OPEN_LINE = "I don't open command windows, the Run box or tools like the registry editor, so that's yours to open"
+# A command window, the Run box or the registry editor (agent.no_open_names, the list a live run keeps to too) is
+# opened by a plan only when your own words this turn name it, as risky keys are pressed (keys_said): "open" is
+# READ_SAFE, so a page read in the same turn could have had PowerShell or regedit opened with no yes, and what a page
+# says never gets into agent.SAID. "Open Terminal", said, still opens it. A routine's open of one doesn't, as its words
+# don't name it, the way routines() leaves out keys that send or delete. Typing into one is refused whoever asked
+NO_OPEN_LINE = "I only open command windows, the Run box or tools like the registry editor when you name one yourself"
 
 
 def find_browser(name):
-    """A step's "browser": one of hers in apps.json (BROWSERS), by any name she knows it by, never another app.
-    winplatform.open_url starts the browser's program with the address, and an address may hold ";": a model's
-    {"browser": "PowerShell"}, after a page asked for it, would have started PowerShell with that as its command."""
+    """A step's "browser": one of hers in apps.json (BROWSERS) by any name she knows it by, another browser by its
+    program's name (agent.WEB_EXES: "Opera", in its own window as before), else None, for the default one. Never
+    another app: winplatform.open_url starts the browser's program with the address, and an address may hold ";", so
+    a model's {"browser": "PowerShell"}, after a page asked for it, would have started PowerShell with that as its
+    command."""
     k = APP_LOOKUP.get(key_of(name))
-    if k not in BROWSERS:
-        raise RuntimeError(f"{name} isn't one of your browsers")
-    return APP_SPECS[k]
+    if k in BROWSERS:
+        return APP_SPECS[k]
+    exe = key_of(name).replace(" ", "") + ".exe"
+    if exe in agent.WEB_EXES:
+        return win.App(exe.removesuffix(".exe"), exe)  # its windows found by that program's name alone
+    print(f"  {name!r} isn't a browser she knows, so the default one opens it")
+    return None
 
 
 def front_browser():
@@ -5738,7 +5751,8 @@ def do_step(step):
     profile = str(step.get("profile") or "").strip() or None
     if do in ("open", "close", "minimise"):
         name = str(step.get("app") or "")
-        if do == "open" and agent.NO_OPEN.search(name):  # before any other way of opening it, by whoever planned it
+        # before any other way of opening it, whoever planned it: each one it names, your words this turn name too
+        if do == "open" and agent.no_open_names(name) - agent.no_open_names(agent.SAID.get()):
             raise RuntimeError(NO_OPEN_LINE)
         if do == "open" and key_of(name) in SITES:  # "open YouTube" means the website
             page = key_of(name)

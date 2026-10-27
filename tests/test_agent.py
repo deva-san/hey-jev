@@ -1040,6 +1040,28 @@ class Repair(Live):
         self.assertIn("I'll work it out afresh next time", self.said[-1])
         self.assertEqual(self.learned(), {})
 
+    def test_one_that_cant_be_archived_still_runs_and_is_tried_again(self):
+        """27 October: its stats went before the archive was tried, so one kept because it couldn't be archived (its
+        SKILL.md held open) sat there never running, "isn't as she wrote it", and was never counted again."""
+        self.learn_night_light(moved=True)
+        self.model()  # a model that never finds a way: no steps, each time
+        archive = skills.skill_usage.archive_skill
+        self.patch(skills.skill_usage, "archive_skill", lambda name: (False, "in use by another program"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            for _ in range(agent.FAILS_TO_ARCHIVE):
+                siri.handle(NIGHT)
+        self.assertIsNotNone(skills.find_skill("turn-on-night-light"))
+        self.assertNotIn("afresh", self.said[-1])  # it wasn't put away, so she doesn't say it was
+        self.assertIn("turn-on-night-light", self.learned())  # its sha still in the stats: it runs
+        self.assertEqual(agent.load_stats()["turn-on-night-light"]["fails_in_row"], agent.FAILS_TO_ARCHIVE)
+        self.patch(skills.skill_usage, "archive_skill", archive)  # free again: its next failure puts it away
+        with contextlib.redirect_stdout(io.StringIO()):
+            siri.handle(NIGHT)
+        self.assertIsNone(skills.find_skill("turn-on-night-light"))
+        self.assertIn("I'll work it out afresh next time", self.said[-1])
+        self.assertEqual(self.learned(), {})
+        self.assertNotIn("turn-on-night-light", agent.load_stats())
+
 
 class Vision(Live):
     """The screenshot: only when the controls aren't enough, at most AGENT_SHOTS a run, and a click on one kept by
@@ -1356,10 +1378,12 @@ class Safety(Live):
     def test_no_command_window_run_box_or_start_for_a_task(self):
         settings(self.app)
         self.app.show("settings")
-        self.model({"steps": [{"do": "open", "app": "Windows PowerShell"}]})
-        line, r = self.run_task("tidy my settings")
-        self.assertEqual((r.outcome, self.app.opened), ("refused", []))
-        self.assertIn("command windows or the Run box", line)
+        # and a command window's program by its name, which NO_OPEN's words missed (review, 27 October)
+        for app in ("Windows PowerShell", "wt", "powershell_ise", "conhost.exe"):
+            self.model({"steps": [{"do": "open", "app": app}]})
+            line, r = self.run_task("tidy my settings")
+            self.assertEqual((r.outcome, self.app.opened), ("refused", []), app)
+            self.assertIn("command windows or the Run box", line)
         run = self.app.window("run", "explorer.exe", "Run")
         run.controls = [Control("Open:", "combobox", value=""), Control("OK"), Control("Cancel"), Control("Browse..."),
                         Control("Help")]
@@ -1743,11 +1767,21 @@ class PlannedClick(Live):
 
     def test_a_click_by_id_or_point_one_that_types_and_a_wait_are_left_out(self):
         steps = [{"do": "wait", "seconds": 2}, {"do": "click", "id": 7}, {"do": "click", "x": 640, "y": 360},
-                 {"do": "click", "name": "Search", "text": "cats"}, {"do": "volume", "to": "up"}]
+                 {"do": "click", "name": "Search", "text": "cats"}, {"do": "click", "name": "Dark", "state": "half"},
+                 {"do": "volume", "to": "up"}]
         self.assertEqual(self.think(*steps)["steps"], [{"do": "volume", "to": "up"}])
         # a live run's replies still have them: they're its steps
         self.assertEqual([s["do"] for s in siri.parse_plan(json.dumps({"steps": steps}))["steps"]],
-                         ["wait", "click", "click", "click", "volume"])
+                         ["wait", "click", "click", "click", "click", "volume"])
+
+    def test_a_switchs_click_is_left_as_it_was_asked_for_not_pressed_blind(self):
+        """27 October, review: {"click", "state": "off"} for "turn Wi-Fi off" was "click Wi-Fi", pressed by name
+        with no look at the switch, so Wi-Fi already off was turned on, and she said "Clicked Wi-Fi."."""
+        plan = self.think({"do": "click", "name": "Wi-Fi", "state": "off"}, {"do": "click", "what": "Bluetooth",
+                                                                              "x": 10, "y": 20, "state": "ON"})
+        self.assertEqual(plan["steps"], [{"do": "screen", "task": "turn off Wi-Fi"},
+                                         {"do": "screen", "task": "turn on Bluetooth"}])
+        self.assertIsNone(agent.CLICK_TASK.fullmatch("turn off Wi-Fi"))  # the live loop's, never quick_click's
 
 
 class LateLine(unittest.TestCase):
