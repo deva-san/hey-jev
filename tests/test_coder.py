@@ -393,7 +393,7 @@ class Late(unittest.TestCase):
         said = queue.Queue()
 
         class Stopped:
-            def __init__(self, folder, task, ask=None, cancelled=None):
+            def __init__(self, folder, task, ask=None, cancelled=None, progress=None):
                 self.edited, self.ran, self.refused = ["app.py", "util.py"], [], []
 
             def run(self):

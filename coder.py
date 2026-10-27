@@ -194,10 +194,17 @@ def choose(options, allow):
     return None
 
 
+def edited(n):
+    """How far a job's got, for its row on the island: a count, never the files' names, which the model chose."""
+    return f"{n} file{'' if n == 1 else 's'} edited"
+
+
 class Job:
-    def __init__(self, folder, task, ask=None, cancelled=lambda: False, timeout=TIMEOUT):
-        """ask(question) -> True/False, or None when there's nobody to ask: then it's refused and reported."""
+    def __init__(self, folder, task, ask=None, cancelled=lambda: False, timeout=TIMEOUT, progress=None):
+        """ask(question) -> True/False, or None when there's nobody to ask: then it's refused and reported.
+        progress(n): told each time it edits a file, n of them so far."""
         self.folder, self.task, self.ask, self.cancelled, self.timeout = folder, task, ask, cancelled, timeout
+        self.progress = progress
         self.text, self.refused, self.ran, self.edited = [], [], [], []
         self.defined = False  # it edited a file that says what the project's test or build command runs
         self.changed = False  # it edited anything: a test file it rewrote runs as the project's own tests
@@ -209,6 +216,8 @@ class Job:
         raw = call.get("rawInput") or {}
         if kind == "edit":
             self.edited.append(title)
+            if self.progress is not None:
+                self.progress(len(self.edited))
             where = [title, raw.get("filePath"), raw.get("path")]
             where += [p.get("path") for p in call.get("locations") or [] if isinstance(p, dict)]
             self.defined = self.defined or any(defines(w) for w in where if w)

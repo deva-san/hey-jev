@@ -23,6 +23,7 @@ import threading
 import time
 from urllib.parse import parse_qsl, quote, unquote, urlsplit, urlunsplit
 
+import activity
 import vision
 import winplatform as win
 from hermes_memory import skills
@@ -309,6 +310,7 @@ def hold(r, i, question, verb, target=None, step=None, no="", focus=False, sendi
         ASK[0] = {"steps": [{"do": "agent_resume", "hold": HELD["id"], "verb": verb}], "say": "", "words": r.words,
                   "run": r.id, "question": question, "short": short}
     r.outcome = "held"
+    activity.update(activity.KEY.get(), state="waiting_yes", note="Waiting for your yes")  # its row on the island
     return question
 
 
@@ -1426,6 +1428,7 @@ def replay(r, start=0, notify=None):
         raw, began = steps[i], _clock()
         s = fill(raw, r.slots)
         do = s["do"]
+        activity.step(i + 1, len(steps), "The way she learned it")  # its row on the island, if it has one
         if stopped(r):
             return finish(r, "stopped")
         if do == "confirm":
@@ -1720,6 +1723,7 @@ def _rounds(r, notify=None):
                           + (f" after I {r.notes[-1]}." if r.notes else "."))
         r.seen, r.shot, r.acted = obs, shot, False
         host.emit(notify, "Looking" if shot is not None else "Doing it", r.goal)
+        activity.step(r.rounds + 1, AGENT_ROUNDS, round_note(r))  # its row on the island, if it has one
         reply = ask(r, obs, shot)
         if reply is None:
             return finish(r, "failed", "The model didn't answer in time, so I've stopped there.")
@@ -1741,6 +1745,17 @@ def _rounds(r, notify=None):
                 return done(r, reply)
         pause(settle(steps))
     return finish(r, "budget", "That's as far as I got" + (f": I {r.notes[-1]}." if r.notes else "."))
+
+
+DID = {"clicked": "clicked", "typed": "typed", "switched": "switched", "pressed": "pressed keys",
+       "opened": "opened an app", "went": "opened a page", "scrolled": "scrolled", "waited": "waited"}
+
+
+def round_note(r):
+    """"Round 3 of 30, typed": how far a live run's got, for the island. Only the verb of what she last did (note_of
+    starts with it), never what she typed or the name of what she clicked, which come from the screen."""
+    last = r.notes[-1].split()[0] if r.notes and r.notes[-1].split() else ""
+    return f"Round {r.rounds + 1} of {AGENT_ROUNDS}" + (f", {DID[last]}" if last in DID else "")
 
 
 def observe(r):

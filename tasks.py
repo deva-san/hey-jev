@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 
+import activity
 from winplatform import APPDATA_DIR, CREATE_NO_WINDOW, POWERSHELL
 
 DB_PATH = os.path.join(APPDATA_DIR, "tasks.db")
@@ -157,6 +158,8 @@ class Store:
             cur = con.execute("UPDATE tasks SET status='cancelled', updated=? WHERE id=? AND status IN "
                               "('queued','running','waiting_approval')", (time.time(), int(task_id)))
         WAKE.set()
+        if cur.rowcount:  # its row on the island goes too: the Tasks tab, her voice, the phone or the island did it
+            activity.finish(f"task:{int(task_id)}", "stopped")
         return bool(cur.rowcount)
 
     def approve(self, task_id):
@@ -171,6 +174,8 @@ class Store:
                               "status='waiting_approval'", (json.dumps(payload, ensure_ascii=False), time.time(),
                                                             time.time(), int(task_id)))
         WAKE.set()
+        if cur.rowcount:  # its row on the island waits its turn now, with no buttons left to press
+            activity.update(f"task:{int(task_id)}", state="queued", needs="", note="Approved")
         return bool(cur.rowcount)
 
     def claim_due(self, now=None, skip=()):
