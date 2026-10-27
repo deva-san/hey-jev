@@ -36,7 +36,7 @@ host = None  # siri, once bind() is called: her steps, voice, the yes and the tu
 
 def bind(module):
     """siri calls this as it's imported, with itself, so this module uses her steps and her voice without importing
-    siri, which is __main__ under "python siri.py" (get_fast_matcher does the same)."""
+    siri, which is __main__ under "python siri.py"."""
     global host
     host = module
 
