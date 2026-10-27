@@ -47,6 +47,9 @@ OLD_ASKS_FOR = {"type": siri.EDIT_WORDS.pattern, "keys": siri.EDIT_WORDS.pattern
 OLD_READ_WITH = {"web", "read", "news", "messages", "picture"}  # what made think's read true
 # the look-ups added with the registry, each a function she already had
 NEW_LOOKS = {"selected_files", "installed_apps", "top_apps", "where", "open_windows", "clipboard"}
+# a job of several parts and its own checklist (agent.task, 27 October): known to the planner, said first like a
+# task on the screen, and nothing else
+NEW_JOB = {"task", "todo_list"}
 
 
 class Golden(unittest.TestCase):
@@ -55,13 +58,13 @@ class Golden(unittest.TestCase):
     def test_the_gate_sets_are_what_they_were(self):
         for name, old in (("READ_SAFE", OLD_READ_SAFE), ("POWER_STEPS", OLD_POWER_STEPS),
                           ("ASKS_YES", OLD_ASKS_YES), ("ROUTINE_STEPS", OLD_ROUTINE_STEPS),
-                          ("SPEAK_FIRST", set(OLD_SPEAK_FIRST)), ("SAY_AFTER", OLD_SAY_AFTER)):
+                          ("SPEAK_FIRST", set(OLD_SPEAK_FIRST) | {"task"}), ("SAY_AFTER", OLD_SAY_AFTER)):
             with self.subTest(name):
                 self.assertEqual(set(getattr(siri, name)), old)
                 self.assertIsInstance(getattr(siri, name), frozenset)
 
     def test_the_planner_knows_the_same_steps_and_the_new_look_ups(self):
-        self.assertEqual(set(siri.KNOWN_STEPS), OLD_KNOWN_STEPS | NEW_LOOKS)
+        self.assertEqual(set(siri.KNOWN_STEPS), OLD_KNOWN_STEPS | NEW_LOOKS | NEW_JOB)
         self.assertEqual(set(siri.INFO), OLD_INFO | NEW_LOOKS)
         self.assertNotIn("agent_resume", siri.KNOWN_STEPS)  # only her own question makes one
         self.assertNotIn("watch_start", siri.KNOWN_STEPS)
