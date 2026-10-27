@@ -250,6 +250,7 @@
   {
    "to": "skills_guard.py",
    "from": "tools/skills_guard.py",
+   "note": "scan_skill obeys a .skillignore or .clawhubignore that the skill ships itself, and leaves the paths it lists out of both the structure check and the pattern scan, so a bundle can hide its own payload (scripts/ with curl | bash, an .exe) and scan as safe (checked 27 October 2026 at 1ae3c55e; Hermes' own installer strips neither file). Whoever installs skills from outside must delete every .skillignore and .clawhubignore in the quarantined bundle before calling scan_skill, or refuse a bundle that has one. It also misses the ClawHavoc lure written as prose only.",
    "rewrite": []
   },
   {
@@ -343,7 +344,7 @@
   },
   {
    "to": "todo_store.py",
-   "doc": "Hermes Agent's checklist for the agent's own work on a job of several parts (tools/todo_tool.py): TodoStore,\nits schema (which allows one item in progress at a time) and the tool's entry point, without the\ntool-registry entry and the transcript helpers, which need the rest of Hermes. Not todo.py, your list.",
+   "doc": "Hermes Agent's checklist for the agent's own work on a job of several parts (tools/todo_tool.py): TodoStore,\nits schema (which asks for one item in progress at a time; the store does not enforce it) and the tool's\nentry point, without the tool-registry entry and the transcript helpers, which need the rest of Hermes.\nNot todo.py, your list.",
    "imports": "import json\nfrom typing import Any, Dict, List, Optional\n\nfrom .tool_bits import tool_error",
    "extract": [
     {

@@ -3,8 +3,9 @@
 # Copied by sync_hermes.py; only the imports are changed, see UPSTREAM.json. Don't edit by hand.
 
 """Hermes Agent's checklist for the agent's own work on a job of several parts (tools/todo_tool.py): TodoStore,
-its schema (which allows one item in progress at a time) and the tool's entry point, without the
-tool-registry entry and the transcript helpers, which need the rest of Hermes. Not todo.py, your list."""
+its schema (which asks for one item in progress at a time; the store does not enforce it) and the tool's
+entry point, without the tool-registry entry and the transcript helpers, which need the rest of Hermes.
+Not todo.py, your list."""
 
 import json
 from typing import Any, Dict, List, Optional
