@@ -115,6 +115,20 @@ class Mixed(Job):
         self.assertEqual(self.learned(), {})
         self.assertIn("pages or messages", agent.unlearnable(agent.CURRENT[0]))
 
+    def test_a_click_into_the_box_after_a_read_isnt_asked_about_but_the_typing_is(self):
+        """27 October, run live: "the weather, into Notepad" asked "Should I press Text editor?", which tells you
+        nothing. Putting the cursor in a box is let through; what's typed there is asked about, word for word."""
+        box = self.notepad()
+        self.model({"steps": [{"do": "web", "query": "capital of Peru"}]},
+                   {"steps": [{"do": "open", "app": "Notepad"}]},
+                   {"steps": [{"do": "click", "id": 1}, {"do": "type", "text": "Lima"}]},
+                   {"steps": [], "done": True, "expect": {"title": "Notepad"}, "say": "Lima, and it's in Notepad."})
+        line, r = self.run_job("find the capital of Peru and type it into Notepad")
+        self.assertEqual(line, "Should I type “Lima”?")
+        self.assertEqual(box.value, "")
+        self.assertEqual(self.yes(), "Lima, and it's in Notepad.")
+        self.assertEqual(box.value, "Lima")
+
     def test_one_yes_is_one_step(self):
         box = self.notepad()
         self.model({"steps": [{"do": "web", "query": "capital of Peru"}]},

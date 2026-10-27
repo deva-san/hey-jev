@@ -1556,8 +1556,11 @@ def gate(r, i, s, el=None, checked=False, trusted=()):
         return None, ""
     # a job that read a page, a message or a window's titles (task, read), or was planned after one, asks before each
     # step outside siri.READ_SAFE, as think() asks before such a plan (needs_asking): what it read could be steering
-    # it. A wait does nothing, and keys that only move around (siri.SAFE_KEYS) are as safe as there
-    if r.task and r.read and not read_safe(s):
+    # it. A wait does nothing, and keys that only move around (siri.SAFE_KEYS) are as safe as there. Nor does a click
+    # that only puts the cursor in a box to type in: the typing after it asks, with what it would type. Run live on 27
+    # October, "the weather, into Notepad" asked "Should I press Text editor?", a question that tells you nothing
+    focus_only = do in ("ui", "click") and text is None and (el or {}).get("role") in EDITABLE
+    if r.task and r.read and not read_safe(s) and not focus_only:
         return "ask", "what I read could be steering this"
     # setup.exe in File Explorer, opened by a click on it (by id it's opened, as a double-click does) or by Enter, or
     # Enter in its address bar on what isn't a folder: it runs as from the Run box, an install with nobody asked
