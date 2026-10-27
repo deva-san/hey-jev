@@ -3,7 +3,7 @@ while she reads the screen, headphones while music plays, turn to hearts when yo
 nothing's happened for a while. Drawn with numpy as signed distances, a few hundred pixels round each eye, so a
 frame costs well under a millisecond; between blinks nothing is drawn at all.
 
-The shapes and glyphs the island's plugins use (a battery, play and pause, a progress ring) are here too.
+The shapes and glyphs the island's plugins use (a battery, play and pause, a progress ring, a tick) are here too.
 """
 import math
 import random
@@ -427,6 +427,15 @@ def skip_glyph(cv, cx, cy, s, forward, colour, a=1.0):
     bar = cx + d * s * 0.38
     cv.shape(lambda xs, ys: rbox(xs, ys, bar, cy, s * 0.06, s * 0.4, s * 0.05),
              (bar - s * 0.12, cy - s * 0.5, bar + s * 0.12, cy + s * 0.5), colour, a)
+
+
+def tick_glyph(cv, cx, cy, s, colour, a=1.0):
+    """A tick about s px across, for something done."""
+    w = max(1.2, s * 0.16)
+    (ax, ay), (bx, by), (ex, ey) = (cx - s * 0.36, cy + s * 0.02), (cx - s * 0.1, cy + s * 0.28), \
+        (cx + s * 0.38, cy - s * 0.26)
+    cv.shape(lambda xs, ys: np.minimum(segment(xs, ys, ax, ay, bx, by, w), segment(xs, ys, bx, by, ex, ey, w)),
+             (cx - s * 0.5 - w, cy - s * 0.4 - w, cx + s * 0.5 + w, cy + s * 0.4 + w), colour, a)
 
 
 def close_glyph(cv, cx, cy, s, colour, a=1.0):

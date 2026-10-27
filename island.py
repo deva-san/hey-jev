@@ -2,13 +2,15 @@
 blink, look about and react, the app you're in and dots that move with your voice while she listens, and what
 you're saying in a bar underneath, with the fillers and the words you put right struck out as you dictate.
 
-Its plugins (island_plugins.py, from MaterialYou Dynamic Island) use it when she isn't busy: a notification pops
-up from the apps you pick, what's playing shows with its cover and its controls when you point at it, the
-battery when you plug in or it runs low, and a running timer counts down. Light, dark and AMOLED (pure black)
-themes, its place, size and corners, and the plugins are all in the Island tab.
+Its plugins (island_plugins.py, from MaterialYou Dynamic Island) use it when she isn't busy: what she's working on
+stays live, step by step, and opens into a card with Stop, Approve and Deny when you point at it (or click it to
+keep it open); a notification pops up from the apps you pick, what's playing shows with its cover and its controls
+when you point at it, the battery when you plug in or it runs low, and a running timer counts down. Light, dark and
+AMOLED (pure black) themes, its place, size and corners, and the plugins are all in the Island tab.
 
 It's one layered window drawn with numpy, like bubble.Island: clicks go through it except while you point at its
-buttons, it never takes the focus, and it's left out of her screenshots. Between blinks nothing is drawn.
+buttons, it never takes the focus, and it's left out of her screenshots, so the model never sees Approve. Between
+blinks nothing is drawn, and a long job moves once a second.
 """
 import ctypes
 import math
@@ -55,6 +57,8 @@ JEV = {
 }
 MIC_STATES = {"listening", "read", "again", "dictating"}
 HINTS = ("Say \u201cstop", "Say \"stop", "Go ahead", "Let go")  # the window's hints, not words you said
+CLICKABLE = ("media", "notification", "card")  # what takes clicks while you point at it: all else lets them through
+REST = 0.5  # seconds the pointer rests on Approve before a click on it counts: an agent's click moves it there first
 
 
 class _ULWINFO(ctypes.Structure):
@@ -89,14 +93,16 @@ def _spread(part, i0, i1):
 
 class Layout:
     """What the island holds in one scene: its size, how to draw it, the words under it, and where to click.
-    eyes: her expression in it, if her eyes are in it; wander: they may look about."""
-    __slots__ = ("key", "kind", "w", "h", "radius", "draw", "cap", "hot", "eyes", "animated", "rate", "wander")
+    eyes: her expression in it, if her eyes are in it; wander: they may look about. press: for a card, what each
+    hot place does, (plugin, what, data, careful)."""
+    __slots__ = ("key", "kind", "w", "h", "radius", "draw", "cap", "hot", "eyes", "animated", "rate", "wander",
+                 "press")
 
     def __init__(self, key, kind, w, h, draw, radius=None, cap=None, hot=(), eyes=None, animated=False, rate=0,
-                 wander=True):
+                 wander=True, press=None):
         self.key, self.kind, self.w, self.h, self.draw, self.radius = key, kind, w, h, draw, radius
         self.cap, self.hot, self.eyes, self.animated, self.rate = cap, list(hot), eyes, animated, rate
-        self.wander = wander
+        self.wander, self.press = wander, dict(press or {})
 
 
 class Caption:
@@ -116,6 +122,7 @@ class DynamicIsland:
     FACE, WAVE, COMPACT_H = (118, 80), (176, 44), 34
     CARD_W, CAP_MAX_W, CAP_PAD_X, CAP_PAD_Y = 380, 700, 16, 11
     EYES, SMALL_EYES = 19, 13
+    CARD_PAD, ROW_GAP, BUTTON_H = 14, 9, 22  # a card's rows: round them, between them, and their buttons' height
 
     def __init__(self, root):
         self.root = root
@@ -129,6 +136,8 @@ class DynamicIsland:
         self.jev, self.you, self.hide_job, self.since = None, "", None, 0.0
         self.popups, self.popup, self.lives = [], None, {}
         self.hover, self.hover_at, self.away_at, self.hover_job, self.look_at = False, 0.0, 0.0, None, None
+        self.pinned = None  # the plugin whose card a click keeps open after the pointer's gone
+        self.rest_pos, self.rest_at = None, 0.0  # where the pointer is, and since when it's been there
         self.alpha, self.fade, self.visible_window = 0.0, 0, False
         self.layout = self.prev = None
         self.content = self.prev_alpha = 0.0
@@ -200,7 +209,10 @@ class DynamicIsland:
         self.f_small = Text(round(11.5 * s), 600)
         self.m = round(self.MARGIN * s)
         cap_h = 2 * self.CAP_PAD_Y * s + self.f_label.line + 2 * s + 3 * self.f_main.line
-        self.island_max_h = 140 * s
+        # tall enough for a card's rows (_card) from the start: building the window again each time you point at it
+        # would flicker, and the taller picture costs memory only (271 px for 140: 0.4 MB more at 100%, 0.8 MB at
+        # 150%, measured 27 October), never time: only what changed is sent (_push)
+        self.island_max_h = max(140 * s, self._tallest_card())
         self.cw = int(math.ceil(max(self.CAP_MAX_W, self.CARD_W) * s)) + 2 * self.m
         self.ch = int(math.ceil(self.m + self.island_max_h + self.GAP * s + cap_h + self.m))
         self.top = tk.Toplevel(self.root)
@@ -361,10 +373,11 @@ class DynamicIsland:
             elif kind == "live":
                 if event[2] is None:
                     self.lives.pop(event[1], None)
+                    if self.pinned == event[1]:
+                        self.pinned = None
                 else:
-                    old = self.lives.get(event[1])
                     self.lives[event[1]] = event[2]
-                    if old is None and event[2].mood:
+                    if event[2].mood:  # it came up, or something in it did: something done, or waiting on you
                         self.eyes.react(event[2].mood, time.time())
             elif kind == "busy":
                 self.busy = event[1]
@@ -400,9 +413,8 @@ class DynamicIsland:
                 return ("popup", head)
             self.popups.pop(0)
         self.popup = None
-        for pid in ("timers", "media", "battery"):
-            if pid in self.lives:
-                return ("live", self.lives[pid])
+        if self.lives:  # what stays while it lasts, the one that matters most (Plugin.priority): tasks, a timer, music
+            return ("live", self.lives[max(self.lives, key=plugins.priority)])
         if self.always and self.face_style == "eyes":
             return ("idle",)
         return None
@@ -424,6 +436,8 @@ class DynamicIsland:
             return self._battery(act)
         if act.kind == "timer":
             return self._timer(act)
+        if isinstance(act.data, dict) and (act.data.get("rows") or act.data.get("title")):  # any plugin's card
+            return self._card(act) if self.hover or self.pinned == act.plugin else self._compact(act)
         return self._idle()
 
     def _front_icon(self, size):
@@ -459,7 +473,8 @@ class DynamicIsland:
         expr, colour, mode, bars = JEV.get(state, JEV["listening"])
         colour = colour or th["muted" if state == "note" else "text"]
         cap = self._caption(state, text, bars)
-        key = ("jev", state, self.face_style)
+        badge = sum(int(a.data.get("badge") or 0) for a in self.lives.values() if isinstance(a.data, dict))
+        key = ("jev", state, self.face_style, badge)
         if self.face_style == "wave":
             W, H = self.WAVE[0] * k, self.WAVE[1] * k
             kind_, source, tint, _ = LOOKS.get(state, LOOKS["listening"])
@@ -507,8 +522,20 @@ class DynamicIsland:
                 dots_mode = "voice" if mode in ("voice", "her") else "busy" if mode == "busy" else "still"
                 face.dots_row(cv, x + r, row_y, n, step, r, colour, self.level if mode in ("voice", "her") else 0.0,
                               t, dots_mode if dots_mode != "still" else "voice", a * (0.75 if mode == "still" else 1))
+            if badge:  # how many tasks go on in the background meanwhile, in the corner
+                self._badge(cv, ox + Wn - 13 * k, oy + 13 * k, badge, a)
         return Layout(key, "jev", W, H, draw, cap=cap, eyes=expr, animated=state not in ("error", "note", "phone"),
                       wander=False)
+
+    def _badge(self, cv, cx, cy, n, a):
+        """A small grey pill with n in it, centred on cx, cy."""
+        th = self.theme()
+        words = str(n) if n < 10 else "9+"
+        cover = self.f_small.render(words)
+        r = max(7.5 * self.k, cover.shape[1] / 2 + 3 * self.k)
+        cv.shape(lambda xs, ys: face.rbox(xs, ys, cx, cy, r, 7.5 * self.k, 7.5 * self.k),
+                 (cx - r - 1, cy - 7.5 * self.k - 1, cx + r + 1, cy + 7.5 * self.k + 1), th["track"], a)
+        cv.text(cover, cx - cover.shape[1] / 2, cy - self.f_small.line / 2 - 0.5, th["text"], a)
 
     def _words(self, state, text):
         """(label, words, newest first, most rows, struck out) for the bar under the island."""
@@ -636,7 +663,7 @@ class DynamicIsland:
                 runs.append([(word, kept)])
         return runs
 
-    def _row(self, key, kind, expr, left=None, right=None, hot=(), wander=True, rate=0, animated=False):
+    def _row(self, key, kind, expr, left=None, right=None, hot=(), wander=True, rate=0, animated=False, press=None):
         """The small island: something on the left, her eyes, something on the right. left and right are
         (width, draw(cv, x, cy, a, now)) or None."""
         k, th = self.k, self.theme()
@@ -662,7 +689,7 @@ class DynamicIsland:
             if right:
                 right[1](cv, x, cy, a, now)
         return Layout(key, kind, W, H, draw, hot=hot, eyes=expr if eyes_w else None, animated=animated, rate=rate,
-                      wander=wander)
+                      wander=wander, press=press)
 
     def _idle(self):
         return self._row(("idle",), "idle", "open")
@@ -815,6 +842,154 @@ class DynamicIsland:
         return Layout(("note", d["app"], d["title"], d.get("text", ""), id(act)), "notification", W, H, draw,
                       radius=self.corner * k, hot=hot)
 
+    # ------------------------------------------------------------------ cards (island_plugins.Activity)
+    def _tallest_card(self):
+        """A card's height with every row at its tallest (buttons, two lines and a bar) and "+N more" under them."""
+        k = self.k
+        row = max(self.f_label.line, self.BUTTON_H * k) + 2 * k + 2 * self.f_small.line + 9 * k
+        return 2 * self.CARD_PAD * k + plugins.CARD_ROWS * (row + self.ROW_GAP * k) + self.f_small.line + 5 * k
+
+    @staticmethod
+    def _card_rows(d):
+        """A card's rows (its "rows", or the card itself as one) as many as show, and how many more there are."""
+        rows = list(d.get("rows") or [d])
+        return rows[:plugins.CARD_ROWS], int(d.get("more") or 0) + max(0, len(rows) - plugins.CARD_ROWS)
+
+    def _state_colour(self, state):
+        th = self.theme()
+        return {"waiting_yes": ORANGE, "done": GREEN, "failed": RED}.get(state, th["muted"])
+
+    def _glyph(self, cv, cx, cy, r, row, now, a):
+        """How a row's going, small: a ring for how far it's got, a light stepping along three dots once a second
+        when that isn't known, an orange ring while it waits on you, a tick once it's done, a cross if it wasn't."""
+        th = self.theme()
+        state, done = row.get("state") or "running", row.get("progress")
+        if state == "done":
+            face.tick_glyph(cv, cx, cy, 2.1 * r, GREEN, a)
+        elif state in ("failed", "stopped"):
+            face.close_glyph(cv, cx, cy, 2.4 * r, RED if state == "failed" else th["muted"], a)
+        elif state in ("waiting_yes", "queued") or done is not None:
+            part = 1.0 if state == "waiting_yes" else done or 0.0  # none yet: only its track, not a sliver at the top
+            face.ring(cv, cx, cy, r, 0.34 * r, part, ORANGE if state == "waiting_yes" else BLUE if part > 0 else
+                      th["track"], th["track"], a)
+        else:  # the light on dot int(now) % 3: once a second, never a frame for each step of it
+            step = 0.95 * r
+            face.dots_row(cv, cx - step, cy, 3, step, 0.3 * r, CYAN, 0.0, (int(now) % 3) / 3 / 1.6, "busy", a)
+
+    def _compact(self, act):
+        """A card's small island while you aren't pointing at it: how its first row's going (_glyph), her eyes, and
+        a few words: how far it's got, how long it's been going, or how many there are."""
+        k = self.k
+        d = act.data
+        rows, more = self._card_rows(d)
+        lead = rows[0] if rows else {}
+        font = self.f_compact
+        text = d.get("short") or lead.get("status") or ""
+        since = lead.get("since") if not text else None
+        if not text and since is None:
+            text = font.fit(str(lead.get("title") or ""), 150 * k)
+        colour = self._state_colour(lead.get("state")) if not d.get("short") and lead.get("state") != "running" \
+            else self.theme()["text"]
+        slot_w = font.measure("88:88") + 2 * k if since is not None else font.measure(text)
+
+        def glyph(cv, x, cy, a, now):
+            self._glyph(cv, x + 8 * k, cy, 7 * k, lead, now, a)
+
+        def words(cv, x, cy, a, now):
+            cv.text(font.render(text or _clock(max(0.0, now - since))), x - 2, cy - font.line / 2 - 1, colour, a)
+        expr = {"done": "happy", "failed": "sad", "waiting_yes": "surprised"}.get(lead.get("state"), "open")
+        live = any((r.get("state") or "running") == "running" for r in rows)
+        return self._row(("card-row", act.plugin, text, since is not None, repr(lead), len(rows) + more), "card",
+                         expr, (16 * k, glyph), (slot_w, words) if slot_w else None, hot=[("pin", 0, 0, 10000, 10000)],
+                         rate=1 if live else 0, press={"pin": (act.plugin, "pin", None, False)})
+
+    def _card(self, act):
+        """A plugin's card, open while you point at it or after a click on it: up to CARD_ROWS rows, each with how
+        it's going (_glyph), its title, a few words at its right, a line or two under it, a bar for how far it's got
+        and its buttons, then "+N more". The Tasks plugin's list is one; any plugin can show one without this file
+        knowing it (island_plugins.Activity). A clock that's running moves once a second, never every frame."""
+        k, th = self.k, self.theme()
+        rows, more = self._card_rows(act.data)
+        W = self.CARD_W * k
+        pad, gap = self.CARD_PAD * k, self.ROW_GAP * k
+        hot, press, parts, y = [], {}, [], pad
+        for row in rows:
+            h, draw_row = self._card_row(row, y, W, pad, act.plugin, hot, press)
+            parts.append(draw_row)
+            y += h + gap
+        tail = f"+{more} more" if more else ""
+        H = min(self.island_max_h, y - gap + pad + (self.f_small.line + 5 * k if tail else 0))
+        hot.append(("pin", 0, 0, W, H))  # anywhere else on it keeps it open, or lets it go again
+        press["pin"] = (act.plugin, "pin", None, False)
+
+        def draw(cv, ox, oy, Wn, Hn, a, now):
+            for draw_row in parts:
+                draw_row(cv, ox, oy, a, now)
+            if tail:
+                cv.text(self.f_small.render(tail), ox + pad + 27 * k - 2, oy + y - gap + 5 * k, th["muted"], a)
+        live = any((r.get("state") or "running") == "running" for r in rows)
+        return Layout(("card", act.plugin, repr(rows), more), "card", W, H, draw, radius=self.corner * k, hot=hot,
+                      rate=1 if live else 0, press=press)
+
+    def _card_row(self, row, y0, W, pad, plugin, hot, press):
+        """One row of a card from y0: (its height, draw(cv, ox, oy, a, now)). Its buttons go in hot and press."""
+        k, th = self.k, self.theme()
+        small, label = self.f_small, self.f_label
+        bh, bpad, bgap = self.BUTTON_H * k, 10 * k, 6 * k
+        buttons, x = [], W - pad
+        for b in reversed(row.get("buttons") or []):
+            words = str(b.get("label") or b.get("name") or "")
+            bw = small.measure(words) + 2 * bpad
+            buttons.insert(0, (b, words, x - bw, x))
+            x -= bw + bgap
+        right = x if buttons else W - pad  # where the words at its right end
+        status, since = row.get("status") or "", row.get("since")
+        since = since if not status else None
+        sw = small.measure(status) if status else small.measure("88:88") if since is not None else 0
+        tx = pad + 27 * k
+        title = label.fit(" ".join(str(row.get("title") or "").split()), max(20 * k, right - tx - sw - 8 * k))
+        lines = [small.fit(" ".join(str(t).split()), right - tx) for t in (row.get("lines") or [])[:2] if t]
+        done = row.get("progress")
+        h1 = max(label.line, bh if buttons else 0)
+        h = h1 + (2 * k + small.line * len(lines) if lines else 0) + (9 * k if done is not None else 0)
+        cy = y0 + h1 / 2
+        for b, words, bx0, bx1 in buttons:
+            name = f"b{len(press)}"
+            press[name] = (plugin, b.get("name"), b.get("data"), bool(b.get("careful", b.get("name") == "approve")))
+            hot.append((name, bx0 - 2 * k, cy - bh / 2 - 2 * k, bx1 + 2 * k, cy + bh / 2 + 2 * k))
+        state_colour = self._state_colour(row.get("state"))
+
+        def draw(cv, ox, oy, a, now):
+            self._glyph(cv, ox + pad + 9 * k, oy + cy, 7 * k, row, now, a)
+            cv.text(label.render(title), ox + tx - 2, oy + cy - label.line / 2 - 1, th["text"], a)
+            words = status or (_clock(max(0.0, now - since)) if since is not None else "")
+            if words:
+                cover = small.render(words)
+                cv.text(cover, ox + right - cover.shape[1] + 2, oy + cy - small.line / 2 - 1, state_colour, a)
+            for b, text, bx0, bx1 in buttons:
+                approve = b.get("name") == "approve"
+                fill, ink = (GREEN, (0.02, 0.02, 0.03)) if approve else \
+                    (th["track"], RED if b.get("name") == "stop" else th["text"])
+                bx, by, bw = ox + (bx0 + bx1) / 2, oy + cy, (bx1 - bx0) / 2
+                cv.shape(lambda xs, ys, bx=bx, by=by, bw=bw: face.rbox(xs, ys, bx, by, bw, bh / 2, bh / 2),
+                         (ox + bx0 - 1, by - bh / 2 - 1, ox + bx1 + 1, by + bh / 2 + 1), fill, a)
+                cover = small.render(text)
+                cv.text(cover, bx - cover.shape[1] / 2, by - small.line / 2 - 0.5, ink, a)
+            ly = oy + y0 + h1 + 2 * k
+            for line in lines:
+                cv.text(small.render(line), ox + tx - 2, ly, th["muted"], a)
+                ly += small.line
+            if done is not None:  # how far it's got, as the music's bar (_media_card)
+                x0, x1, by, lw = ox + tx, ox + right, ly + 4 * k, 3.2 * k
+                cv.shape(lambda xs, ys: face.rbox(xs, ys, (x0 + x1) / 2, by, (x1 - x0) / 2, lw / 2, lw / 2),
+                         (x0 - 1, by - lw, x1 + 1, by + lw), th["track"], a)
+                if done > 0:
+                    xe = x0 + (x1 - x0) * min(1.0, done)
+                    cv.shape(lambda xs, ys: face.rbox(xs, ys, (x0 + xe) / 2, by, max(lw / 2, (xe - x0) / 2), lw / 2,
+                                                      lw / 2), (x0 - 1, by - lw, xe + 1, by + lw),
+                             GREEN if row.get("state") == "done" else BLUE, a)
+        return h, draw
+
     # ------------------------------------------------------------------ the frames
     def _wake(self):
         """A frame now, even if the next was set for later (her eyes resting between blinks can wait seconds)."""
@@ -852,8 +1027,9 @@ class DynamicIsland:
             self._hover_poll()
         self.fade = 1
         old = self.layout
-        if old is not None and (new.key == old.key or old.kind == new.kind == "jev"):
-            self.layout = new  # the same scene with its words moved on, or her next step: straight away
+        if old is not None and (new.key == old.key or old.kind == new.kind == "jev" or
+                                (old.kind == new.kind == "card" and old.key[:2] == new.key[:2])):
+            self.layout = new  # the same scene with its words moved on, her next step, a card's: straight away
         elif old is None:
             self.layout, self.content, self.changed = new, 0.0, now
         else:
@@ -1096,7 +1272,9 @@ class DynamicIsland:
         x0, y0, x1, y1 = getattr(self, "island_rect", (0, 0, 0, 0))
         near = x0 - 6 <= x <= x1 + 6 and y0 - 6 <= y <= y1 + 6
         lay = self.layout
-        clickable = lay is not None and lay.kind in ("media", "notification")
+        clickable = lay is not None and lay.kind in CLICKABLE
+        if (px, py) != self.rest_pos:  # moved: Approve waits for it to rest again (_steady)
+            self.rest_pos, self.rest_at = (px, py), now
         if near:
             self.away_at = now
             if not self.hover and now - self.hover_at > 0.15:
@@ -1151,6 +1329,33 @@ class DynamicIsland:
             self._wake()
         elif lay.kind == "media" and name and not right:
             self.runner.do("media", name)
+        elif lay.kind == "card":
+            self._press(lay.press.get(name), right)
+
+    def _press(self, what, right):
+        """A click on a card: a right click, or one on the card itself, keeps it open or lets it go; a button is its
+        plugin's command, run on the plugins' thread. A careful one (Approve) only once the pointer has rested on it
+        and she isn't doing a task in an app (_steady)."""
+        if right or what is None or what[1] == "pin":
+            plugin = what[0] if what is not None else None
+            self.pinned = None if right or self.pinned else plugin
+            self.dirty = True
+            self._wake()
+            return
+        plugin, name, data, careful = what
+        if careful and not self._steady(time.time()):
+            print(f"  island: {name} not pressed, the pointer hadn't rested on it (or she's busy in an app)")
+            return
+        self.runner.do(plugin, name, data)
+
+    def _steady(self, now):
+        """True if the pointer's rested on the island REST seconds, where it is now, and she isn't doing a task in an
+        app: her clicks are real ones (winplatform.click moves the pointer there and clicks 80 ms later), so they
+        never press Approve, and neither does one landing while hers runs."""
+        agent = sys.modules.get("agent")
+        if agent is not None and (agent.ACT.locked() or agent.RUNNING.is_set()):
+            return False
+        return win.cursor_pos() == self.rest_pos and now - self.rest_at >= REST
 
 
 def _clock(secs):
