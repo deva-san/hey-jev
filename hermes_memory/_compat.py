@@ -64,13 +64,22 @@ def atomic_json_write(path, data, *, indent=None, sort_keys=False, **_) -> None:
     atomic_write_text(path, json.dumps(data, indent=indent, sort_keys=sort_keys, ensure_ascii=False))
 
 
-# agent/skill_utils.py: Hey Jev has one skills folder, no external ones, and nothing disabled
+# agent/skill_utils.py: Hey Jev's skills folder, then skills\imported, where the owner drops skills in by hand (27
+# October). Hermes treats a folder after the first as external: its curator never archives, patches or consolidates
+# a skill there (skill_usage.is_curation_eligible, _scan_local_skills), which is what a hand-dropped skill needs.
+# Nothing disabled.
 def get_all_skills_dirs():
-    return [HOME / "skills"]
+    return [HOME / "skills", HOME / "skills" / "imported"]
 
 
 def is_external_skill_path(path) -> bool:
-    return False
+    """True for a path in skills\\imported (see get_all_skills_dirs)."""
+    try:
+        inside = os.path.normcase(os.path.abspath(path))
+        root = os.path.normcase(os.path.abspath(HOME / "skills" / "imported"))
+        return inside == root or inside.startswith(root + os.sep)
+    except (TypeError, ValueError):
+        return False
 
 
 def get_disabled_skill_names(*_, **__):

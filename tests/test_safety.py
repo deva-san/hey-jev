@@ -190,6 +190,7 @@ class Routines(unittest.TestCase):
         folder.mkdir(parents=True)
         (folder / "SKILL.md").write_text("---\nname: movie-time\ndescription: Movies\ntriggers: movie time\n---\nDim it."
                                          "\n\n```json\n" + json.dumps(plan) + "\n```\n", encoding="utf-8")
+        skills.list_skills()  # written by hand, so scanned first (skills._blocked), which quick() doesn't wait for
         self.assertEqual(self.routine("movie time"), ["volume"])
 
     def test_an_example_in_the_notes_isnt_the_plan(self):
