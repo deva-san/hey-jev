@@ -47,6 +47,7 @@ import installer  # noqa: E402
 import messaging  # noqa: E402
 import opencode  # noqa: E402
 import siri  # noqa: E402
+import sysinfo  # noqa: E402
 import winplatform  # noqa: E402
 
 # Her Dictionary (vocabulary.json) and app list (apps.json) live next to the code, where own_data can't see them: a
@@ -79,6 +80,9 @@ WIN_ACTIONS = (
     "ui_snapshot", "screenshot",
     # and what a watch looks at (watchers.py): one window's picture, the windows open, what's playing
     "window_image", "open_windows", "media_sessions",
+    # and her look-ups of 27 October (siri.LOOK_STEPS): the files selected in the real File Explorer, and what's on
+    # the real clipboard, which may be a password just pasted
+    "selected_files", "clipboard_text",
 )
 WIN_ORIGINAL = {}  # the real ones, for a test of one that never lets it reach the PC (it patches what that calls)
 for _name in WIN_ACTIONS:
@@ -93,6 +97,8 @@ for _name in ("prepare", "install", "_run", "find"):
     if hasattr(installer, _name):
         setattr(installer, _name, tripwire(f"installer.{_name}"))
 opencode.chat = tripwire("opencode.chat")
+# what's using the real PC's processor and memory (the top_apps look-up), which samples the CPU for 0.5 s too
+sysinfo.top_apps = tripwire("sysinfo.top_apps")
 # finding your files asks Windows Search's real index, and opening one starts its app
 for _name in ("_ask_index", "open_found"):
     setattr(filesearch, _name, tripwire(f"filesearch.{_name}"))
