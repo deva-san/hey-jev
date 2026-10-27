@@ -4460,17 +4460,43 @@ ASKS_OVERHEARD = re.compile(r"\b(?:overhear(?:d|ing)?|over heard|without (?:my|y
 
 def meaning():
     """The decider's sentence encoder, for her history's recall by meaning (history.search, add_meaning), already
-    loaded to match skills (rank_skills). None without its model: recall then goes by words alone."""
-    return decider.get().encode if decider.available() else None
+    loaded to match skills (rank_skills). None without its model, or if it won't load: recall then goes by words
+    alone, and her 3-hourly look back (summarize_days) goes on. Decider.load lets some failures through: a heads.npz
+    cut off mid-save (train_decider.py) raises zipfile.BadZipFile on every call. Said once, not every recall."""
+    try:
+        return decider.get().encode if decider.available() else None
+    except Exception as exc:
+        if not MEANING_FAILED:
+            print(f"  couldn't load the decider to look by meaning: {exc!r}")
+            MEANING_FAILED.append(exc)
+        return None
+
+
+MEANING_FAILED = []  # meaning()'s first failure, so it says so once
 
 
 def remember_meaning(rowid):
     """What a turn she's just kept means, worked out off the voice thread once she's answered, about 16 ms, for
     recall by meaning later. Often free: when the model planned the turn, her decider worked out the same words a
     moment before, to match her skills (decider.Decider.encode keeps the last)."""
+    if not isinstance(rowid, int) or isinstance(rowid, bool) or rowid <= 0:  # only a turn history.add kept
+        return
     encode = meaning()
-    if rowid and encode is not None:
+    if encode is not None:
         threading.Thread(target=history.add_meaning, args=(rowid, encode), daemon=True).start()
+
+
+def overheard(hit):
+    """One turn recall found when you asked about talk she heard without her name: each turn of that marked so by
+    history ("heard"), and checked as the messages and pages are (untrusted), as anyone in the room or on the TV may
+    have said it. The turns either side the same way."""
+    near = [overheard(n) for n in hit.get("near") or []]
+    words = {k: v for k, v in hit.items() if k != "near"}
+    if words.get("heard"):
+        words = untrusted(words)
+        if "left out" in words:
+            words = {"when": hit["when"], "heard": hit["heard"], **words}
+    return {**words, "near": near} if near else words
 
 
 def run_info(steps, links=False):
@@ -4516,9 +4542,9 @@ def run_info(steps, links=False):
                 found = history.search(query, day, limit=25, after=s.get("after"), cold=cold, encode=meaning())
                 if not found and day:  # the words didn't match anything that day, so all of the day
                     found = history.search("", day, limit=25, cold=cold)
+                found = [{**f, "you": f["you"][:200], "jev": (f["jev"] or "")[:200]} for f in found[:12]]
                 result = {"recall": {"query": query, "day": day},
-                          "found": [{**f, "you": f["you"][:200], "jev": (f["jev"] or "")[:200]} for f in found[:12]]
-                          or "nothing"}
+                          "found": [overheard(f) for f in found] if cold and found else found or "nothing"}
                 summary = history.summary(day) if day else ""
                 if summary:
                     result["summary"] = summary

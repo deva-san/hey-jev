@@ -42,7 +42,14 @@ FEW = 3  # fewer turns than this found by their words, and search looks by meani
 # at zostel in goa" 0.43), and no other turn scored above 0.24, for those or for the 5 with none ("amazon order")
 ALIKE = 0.3
 FILL = 300  # turns kept before recall by meaning worked out per pass in the background, 16 to 21 ms each
+HEARD = "without my name, not you speaking"  # a turn heard without her name, as recall gives it back (search)
 _lock = threading.Lock()
+# The meanings kept as _loaded last read them, their numbers already float32, so a search converts only the records
+# kept since. Read and converted afresh every time, 27 October: 9.8 ms at 10,000 turns, 37 at 30,000, 55 at 50,000,
+# past the 50 ms a recall may take. Kept, a whole search that looks by meaning took 13 ms at 10,000, 17 at 30,000
+# and 25 at 50,000, the question's 16 to work out on top. 1.5 KB a turn while she runs, 15 MB for 10,000, only once a
+# recall has looked by meaning
+_kept = {}
 
 
 def _db():
@@ -63,6 +70,9 @@ def _db():
     for name, default in META:
         if name not in have:
             con.execute(f"ALTER TABLE turns_meta ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
+    # The turns heard without her name, which recall leaves out (NOT_COLD, _similar): read through the whole table,
+    # 27 October, 10.8 ms at 50,000 turns, 5,000 of them heard so; through this index of only those, 4
+    con.execute("CREATE INDEX IF NOT EXISTS turns_meta_cold ON turns_meta (id) WHERE gate = 'cold'")
     return con
 
 
@@ -134,8 +144,8 @@ def search(query="", day=None, limit=12, after=None, around=1, cold=False, encod
     them, then pieces of words (turns_tri). If those find fewer than FEW and encode is given (the decider's sentence
     encoder), then by meaning too (_similar). after: only since then ("7d", "24h", "2w" or a day). around: the turns
     either side of the best few hits, so a hit has what led to it. cold: turns heard without her name too, only when
-    you ask about those (siri.run_info); her day's summary never reads them. Returns [{"when", "you", "jev", "did",
-    "near"?}]."""
+    you ask about those (siri.run_info), each of them then marked "heard" (HEARD); her day's summary never reads them.
+    Returns [{"when", "you", "jev", "did", "heard"?, "near"?}]."""
     words = [w for w in re.findall(r"\w+", (query or "").lower()) if w not in STOP and len(w) > 1]
     since = _since(after)
     keep = "" if cold else NOT_COLD
@@ -161,15 +171,24 @@ def search(query="", day=None, limit=12, after=None, around=1, cold=False, encod
     with _lock:
         con = _db()
         try:
+            # Read back with turns heard without her name, each of those says so (HEARD): on 27 October, without
+            # it, the TV's "the flight to goa was cancelled again" came back as {"you": ...}, a thing you'd said
+            heard = {r[0] for r in con.execute(
+                f"SELECT id FROM turns_meta WHERE gate = 'cold' AND id IN ({','.join('?' * len(rows))})",
+                [r[0] for r in rows])} if cold and rows else set()
             out = []
             for i, (rowid, ts, said, did, reply) in enumerate(rows):
                 hit = {"when": _when(float(ts)), "you": said, "jev": reply, "did": did}
+                if rowid in heard:
+                    hit["heard"] = HEARD
                 if words and around and i < 3:
-                    near = con.execute("SELECT said, reply FROM turns t WHERE t.rowid BETWEEN ? AND ? AND t.rowid != ? "
+                    near = con.execute("SELECT t.said, t.reply, m.gate FROM turns t LEFT JOIN turns_meta m "
+                                       "ON m.id = t.rowid WHERE t.rowid BETWEEN ? AND ? AND t.rowid != ? "
                                        "AND abs(CAST(t.ts AS REAL) - ?) < 1800" + keep + " ORDER BY t.rowid",
                                        (rowid - around, rowid + around, rowid, float(ts))).fetchall()
                     if near:
-                        hit["near"] = [{"you": a[:120], "jev": (b or "")[:120]} for a, b in near]
+                        hit["near"] = [{"you": a[:120], "jev": (b or "")[:120], **({"heard": HEARD} if g == "cold"
+                                                                                    else {})} for a, b, g in near]
                 out.append(hit)
             return out
         finally:
@@ -237,29 +256,54 @@ def _by_meaning(query, encode, where, args, keep, most, seen):
 
 
 def _loaded():
-    """Every meaning kept (_meanings) and their numbers as float32 for the dot product, or None. Float16 to float32
-    is most of the time: 6 ms for 10,000, the file's read 3."""
+    """Every meaning kept, as (ids, times, numbers as float32 for the dot product), or None. Float16 to float32 was
+    most of a search's time, 6 ms for 10,000, the file's read 3, so they're kept (_kept) and only the records added
+    since are read and converted. The file is only ever added to, but clear() or a backup put back starts another:
+    then, or if its first record isn't the one kept, all of it is read again."""
     with _lock:  # clear() can't take the file away mid-read
-        found = _meanings()
-    return None if found is None else (found, found["v"].astype(np.float32))
+        path = _vectors_path()
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        n = stat.st_size // RECORD.itemsize
+        if not n:
+            return None
+        head = np.fromfile(path, RECORD, count=1)
+        same = (path, stat.st_ino, int(head["id"][0]), float(head["ts"][0]))
+        have = _kept["n"] if _kept.get("same") == same and _kept["n"] <= n else 0
+        if have < n:
+            new = np.fromfile(path, RECORD, count=n - have, offset=have * RECORD.itemsize)
+            parts = (new["id"], new["ts"], new["v"].astype(np.float32))
+            if have:
+                parts = tuple(np.concatenate((old, part)) for old, part in zip(_kept["found"], parts))
+            _kept.update(same=same, n=n, found=parts)
+        return _kept["found"]
 
 
-def _similar(con, found, numbers, wanted, where, args, keep, most, seen):
+def _similar(con, kept_ids, stamps, numbers, wanted, where, args, keep, most, seen):
     """The tier by meaning: up to `most` turns whose words mean much what was asked (wanted: its numbers), at least
-    ALIKE, best first, those already found (seen, rowids) left out. One dot product over every turn kept (found,
-    numbers: _loaded). A vector counts only for the turn it was worked out from, by id and time both, so one left
-    over from before clear() is never taken for the turn that has its id now."""
+    ALIKE, best first, those already found (seen, rowids) left out. One dot product over every turn kept (kept_ids,
+    stamps, numbers: _loaded). A vector counts only for the turn it was worked out from, by id and time both, so one
+    left over from before clear() is never taken for the turn that has its id now."""
     scores = numbers @ wanted
+    # Turns from other days, or heard without her name, are left out before the best are picked, not after: a
+    # recall of one day over a history asking the weather every day had its 200 best all from other days
+    if where:
+        allowed = [r[0] for r in con.execute("SELECT t.rowid FROM turns t WHERE " + " AND ".join(where) + keep, args)]
+        scores[~np.isin(kept_ids, allowed)] = -1.0
+    elif keep:
+        scores[np.isin(kept_ids, [r[0] for r in con.execute("SELECT id FROM turns_meta WHERE gate = 'cold'")])] = -1.0
     best = np.flatnonzero(scores >= ALIKE)
     best = best[np.argsort(-scores[best], kind="stable")][:200]
     if not len(best):
         return []
-    ids = [int(i) for i in found["id"][best]]
+    ids = [int(i) for i in kept_ids[best]]
     rows = {r[0]: r for r in con.execute(
         f"SELECT t.rowid, t.ts, t.said, t.did, t.reply FROM turns t WHERE t.rowid IN ({','.join('?' * len(ids))})"
         + keep + "".join(f" AND {w}" for w in where), [*ids, *args]).fetchall()}
     out = []
-    for rowid, ts in zip(ids, found["ts"][best].tolist()):
+    for rowid, ts in zip(ids, stamps[best].tolist()):
         row = rows.get(rowid)
         if row and rowid not in seen and abs(float(row[1]) - ts) < 1e-3:
             seen.add(rowid)
@@ -278,8 +322,10 @@ def _yours(said):
 def add_meaning(rowid, encode):
     """What one turn's words mean, worked out with encode (the decider's sentence encoder, 16 ms) and kept in
     the sidecar, for recall by meaning (search). Run off the voice thread once she's answered (siri.remember_meaning),
-    and the lock isn't held while it works it out. True if it was kept."""
+    and the lock isn't held while it works it out. True if it was kept. It goes beside the history.db the turn was
+    read from, not whichever that is once it's worked out (a second the first time, loading the model)."""
     with _lock:
+        path = _vectors_path()
         con = _db()
         try:
             row = con.execute("SELECT said, ts FROM turns WHERE rowid = ?", (rowid,)).fetchone()
@@ -294,7 +340,7 @@ def add_meaning(rowid, encode):
         print(f"  couldn't work out what a turn means: {exc!r}")
         return False
     with _lock:
-        with open(_vectors_path(), "ab") as f:
+        with open(path, "ab") as f:
             end = f.tell()
             if end % RECORD.itemsize:  # a write cut off before: what's whole stays, the next record lines up again
                 f.truncate(end - end % RECORD.itemsize)
@@ -374,6 +420,7 @@ def clear():
             con.execute("VACUUM")
         finally:
             con.close()
+        _kept.clear()
         try:
             os.remove(_vectors_path())
         except FileNotFoundError:

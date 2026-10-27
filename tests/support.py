@@ -101,6 +101,8 @@ for _name in ("speak", "fish", "fetch_tts", "warm_cache", "open_page", "see", "s
         setattr(siri, _name, tripwire(f"siri.{_name}"))
 # what the planner is told is in the window in front reads the real window: nothing, unless a test gives it one;
 # and a page opened in the tab in front would press keys in the real browser: a new tab, as open_page's tripwire has it
-for _name, _stub in (("screen_view", lambda: None), ("same_tab", lambda url: False)):
+# and the decider's encoder for recall by meaning is the real MiniLM where .env names the models (HEYJEV_MODELS): no
+# encoder, so no turn starts a thread that loads it, unless a test gives it one (FakeEncoder, tests/test_memory.py)
+for _name, _stub in (("screen_view", lambda: None), ("same_tab", lambda url: False), ("meaning", lambda: None)):
     ORIGINAL[_name] = getattr(siri, _name)
     setattr(siri, _name, _stub)
