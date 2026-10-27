@@ -31,6 +31,9 @@ DEFAULTS = {
     "vision": True,  # she may look at the screen when you ask about it, see siri.see()
     "heads_ups": True,  # she mentions what needs you: messages, a low battery, a nearly full drive, see watch.py
     "notifications": True,  # she may read Windows' notifications, for heads-ups and "any new messages?"
+    # a background task's progress on your phone (siri.progress_to): "asked", only for those asked from the phone, or
+    # "all", every one while you're paired, as one message each that's edited as it goes
+    "phone_progress": "asked",
     "learning": True,  # she looks back over turns to learn, Hermes Agent's learning loop, see siri.review()
     # no "Hey Jev" needed: anything said that could be a request goes to the answer model, which decides if it was
     # for her or for someone else in the room, see siri.route()

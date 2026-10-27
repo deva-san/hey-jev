@@ -739,19 +739,48 @@ class NotAWindow(watchers.CantWatch):
 
 class Said(str):
     """A line for tell_task, with heard set once she's said it out loud or it's gone to your phone: a watch's minute
-    to "cancel" starts then, not while a turn or a dictation held it back (power_later). cut: she was talked over."""
+    to "cancel" starts then, not while a turn or a dictation held it back (power_later). cut: she was talked over.
+    confirm: a plan a clear yes runs once it's said, for a running job's question (job_ask), else None."""
 
-    def __new__(cls, text):
+    def __new__(cls, text, confirm=None):
         line = super().__new__(cls, text)
-        line.heard, line.cut = threading.Event(), False
+        line.heard, line.cut, line.confirm = threading.Event(), False, confirm
         return line
 
 
 def said_out_loud(line):
-    """For a heads-up she's just said (main's tell): a Said line's heard, and whether she was stopped part way."""
+    """For a heads-up she's just said (main's tell): a Said line's heard, and whether she was stopped part way. One
+    that asks a running job's question, heard out, waits for your yes (ask_after)."""
     if isinstance(line, Said):
         line.cut = HER.stop.is_set()
         line.heard.set()
+        if line.confirm and not line.cut:
+            ask_after(line.confirm)
+
+
+def ask_after(confirm):
+    """A background job's question she's just said out loud ("Task 4: OpenCode wants to run npm install. Let it?"):
+    a clear yes in the next few seconds runs confirm, as a yes to her own questions does (PENDING, STRICT_YES's clear
+    yes for task_control). confirm names that one task's id, so the yes reaches only its question: approve() refuses
+    it once it's been answered another way. Never over a question of hers still waiting, whose yes it would take:
+    then it's "approve task N". Called inside tell, under busy. True if it waits for a yes."""
+    if voice_question_waiting():
+        return False
+    soon = time.time() + FOLLOW_UP + 8
+    PENDING.update(plan=confirm, soon=soon, until=soon, origin="voice", words="",
+                   id=hashlib.sha1(os.urandom(16)).hexdigest()[:12])
+    return True
+
+
+def refuse_job(plan):
+    """A no to a running job's question she said out loud (ask_after): that job's step is refused at once, rather
+    than wait out its JOB_WAIT. Only the task its plan names, and only while it's still asking. True if one was."""
+    refused = False
+    for step in (plan or {}).get("steps") or []:
+        if isinstance(step, dict) and step.get("do") == "task_control" and step.get("action") == "approve":
+            answer = tasking.ASKS.get(int(step.get("id") or 0))
+            refused = bool(answer is not None and answer(False)) or refused
+    return refused
 
 
 def grace_stop(words):
@@ -3668,7 +3697,12 @@ def save_note(title, text):
     name = time.strftime("%Y-%m-%d ") + (re.sub(r'[\\/:*?"<>|]+', "", title)[:60].strip() or "Note") + ".md"
     with open(os.path.join(NOTES_DIR, name), "a", encoding="utf-8") as f:
         f.write(f"# {title}\n\n{text}\n\n")
+    if NOTED.get() is not None:  # a background task's own note, to send your phone once it's done
+        NOTED.get().append(os.path.join(NOTES_DIR, name))
     return name
+
+
+NOTED = contextvars.ContextVar("noted", default=None)  # a list a background task's thread collects its notes in
 
 
 RESEARCH = """You're researching this for them in the background while they do other things. A first search is below. Look further with these steps, a few at a time, replying {"steps": [...], "say": ""}: you get the results back.
@@ -5049,7 +5083,10 @@ def task_answer(task_id):
     one still waiting, or cancel. Run on a thread the island's plugin starts for it (activity.press), never on its
     own: tasks.db's 5 s busy wait would hold up the music and the notifications."""
     def answer(yes):
-        return (not acting() and TASK_STORE.approve(task_id)) if yes else TASK_STORE.cancel(task_id)
+        if yes:
+            return not acting() and TASK_STORE.approve(task_id)
+        asked = tasking.ASKS.get(int(task_id))  # a running job's question: Deny refuses that step, the job goes on
+        return asked(False) if asked is not None else TASK_STORE.cancel(task_id)
     return answer
 
 
@@ -5079,6 +5116,155 @@ def settle_task(task):
         show_task(task, "failed", "Open Tasks for the details")
     else:  # queued again is a repeating one, done for now
         show_task(task, "stopped" if status == "cancelled" else "done")
+
+
+JOB_WAIT = 600.0  # seconds a running job's question waits for your answer: then its step is refused, the job goes on
+JOB_KEYS = {}  # a phone button's key -> answer(yes), for a running job's question asked there (job_ask)
+
+
+def job_ask(task, chat=None, wait=JOB_WAIT):
+    """The ask(question) a coding job's permission() calls for a command that needs your yes (coder.Job). Until 27
+    October a job started by voice had none, so every such command was refused and only listed in its report.
+
+    Now its row waits on you with the exact command, in a question written by code (Store.ask), and the island
+    shows it with Deny and Stop. It goes to your phone with Yes and No when the job was asked from there (chat),
+    else she says it once she's free. A yes is "approve task N", a clear yes to her saying it, the Tasks tab or the
+    phone's Yes: each reaches this job's question by its id only (Store.approve, JOB_KEYS), never another job's or
+    her own question's, and only once. A no, Deny, or no answer in wait seconds refuses the command and the job goes
+    on; Stop or "cancel task N" ends the job. tasks.command_policy has already been asked (coder.Job), and blocks
+    what it blocks. Waits on the job's own thread, never a turn's."""
+    tid = int(task["id"])
+
+    def ask(question):
+        question = tasking.redact(" ".join(str(question or "").split()))
+        answered, got, lock, key = threading.Event(), [], threading.Lock(), None
+
+        def answer(yes):
+            with lock:
+                if answered.is_set():  # answered already, or run out: a second yes is never a second command
+                    return False
+                got.append(bool(yes))
+                answered.set()
+                return True
+        if not TASK_STORE.ask(tid, question, answer):
+            return False
+        try:
+            show_task(task, "waiting_yes", question)
+            line = f"Task {tid}: {question}"
+            if chat is not None and chat == telegram_bot.owner() and PHONE["buttons"] is not None:
+                key = f"job{tid}-{os.urandom(4).hex()}"  # an old button can't answer this question
+                JOB_KEYS[key] = answer
+            if key is None or not PHONE["buttons"](chat, line, key):
+                ANNOUNCE.put(Said(line, {"steps": [{"do": "task_control", "action": "approve", "id": tid}],
+                                         "say": ""}))
+            end = time.time() + wait
+            while not answered.wait(0.5):
+                if time.time() >= end or TASK_STORE.is_cancelled(tid):
+                    break
+            with lock:
+                answered.set()  # anything after this is too late
+            return bool(got and got[0])
+        finally:
+            if key is not None:
+                JOB_KEYS.pop(key, None)
+            if TASK_STORE.resume(tid):
+                show_task(task, "running", "Allowed" if got and got[0] else "Not allowed, carrying on")
+    return ask
+
+
+PROGRESS_TO = {}  # activity key -> {"chat", "title", "shown"}: a background task whose progress goes to your phone
+PROGRESS_AFTER = 10.0  # seconds a task runs before its progress shows on the phone: a quick one only sends its result
+PROGRESS_LOOK = 2.0  # seconds between looks (progress_tick); the bot itself edits a message every 10 s at most
+PROGRESS_STATES = {"running": "Working", "waiting_yes": "Waiting for your yes", "queued": "Queued", "done": "Done",
+                   "failed": "Didn't work", "stopped": "Stopped"}
+
+
+def phone_for(task):
+    """The chat a background task's progress and report go to, or None: the phone's, for a task asked from there,
+    or yours for every one with Settings' phone_progress "all". Only while that chat is the one paired now."""
+    paired = telegram_bot.owner()
+    if paired is None:
+        return None
+    if ((task.get("payload") or {}).get("origin") or {}).get("phone") == paired:
+        return paired
+    return paired if settings.get("phone_progress") == "all" else None
+
+
+def progress_line(item, now=None):
+    """What a task's progress says on the phone, all of it written by code from its activity entry: its title, then
+    how it is, step i of n, its note ("Reading pages", "3 files edited") and for how long. Never output or a page."""
+    now = time.time() if now is None else now
+    bits = [PROGRESS_STATES.get(item["state"], item["state"])]
+    if item["state"] == "running" and item["total"]:
+        bits.append(f"step {item['step']} of {item['total']}")
+    if item["note"]:
+        bits.append(item["note"])
+    minutes = int((now - item["started"]) // 60)
+    if item["state"] == "running" and minutes >= 1:
+        bits.append(f"{minutes} min")
+    return f"{item['title']}\n" + " · ".join(bits)
+
+
+def progress_tick(now=None):
+    """One look at the background tasks whose progress goes to your phone (PROGRESS_TO): each one's message moved on
+    once it's run PROGRESS_AFTER seconds (the bot keeps it to one edit per 10 s), and a finished one's last word.
+    Reads activity's memory only, never tasks.db, so it costs nothing while nothing's going."""
+    if not PROGRESS_TO or PHONE["progress"] is None:
+        return
+    now = time.time() if now is None else now
+    items = {i["key"]: i for i in activity.snapshot()}
+    for key, to in list(PROGRESS_TO.items()):
+        item = items.get(key)
+        if to["chat"] != telegram_bot.owner():  # unpaired since: nothing more to that chat
+            PROGRESS_TO.pop(key, None)
+        elif item is None or item["state"] in activity.OVER:
+            if to["shown"]:  # a quick success goes from activity at once: "Done" all the same
+                PHONE["progress"](to["chat"], key, progress_line(item, now) if item else f"{to['title']}\nDone", True)
+            PROGRESS_TO.pop(key, None)
+        elif to["shown"] or now - item["started"] >= PROGRESS_AFTER:
+            if PHONE["progress"](to["chat"], key, progress_line(item, now), False):
+                to["shown"] = True
+
+
+def send_report(task, path, caption=""):
+    """A finished task's note or report as a file to the phone it was asked from (phone_for): research's note, a
+    coding job's report. The bot sends only one of her own notes (telegram_bot.confined). True if it went."""
+    chat = phone_for(task)
+    if chat is None or not path or PHONE["document"] is None:
+        return False
+    return bool(PHONE["document"](chat, path, caption))
+
+
+def coding_report(task, said, job, snap):
+    """A finished coding job's report, saved as one of her notes to send to your phone: what it was asked, what it
+    said it did, the files it edited, the commands it ran and those it wasn't let run, and how to undo it."""
+    lines = [f"Task {task['id']}: {task['description']}", "", f"Asked: {job.task}", "", f"It said: {said or 'nothing'}"]
+    for title, names in (("Files edited", job.edited), ("Commands run", job.ran), ("Not let run", job.refused)):
+        if names:
+            lines += ["", f"{title}:"] + [f"- {n}" for n in names[:50]]
+    lines += ["", coder.undo_line(snap)]
+    return os.path.join(NOTES_DIR, save_note(f"Coding job {task['id']}", tasking.redact("\n".join(lines))))
+
+
+PHONE_TASKS = re.compile(r"/?(?:tasks|jobs|progress|status)|what(?:'s| is| are you) (?:running|working on|doing)"
+                         r"(?: now| right now)?|what are you working on(?: now| right now)?")
+
+
+def tasks_said(now=None):
+    """The phone's "tasks": what she's working on now, from activity's memory, never tasks.db or a model: each
+    one's title and how it's getting on, the ones waiting on you first, with how to answer a task's."""
+    live = [i for i in activity.snapshot() if i["state"] not in activity.OVER]
+    if not live:
+        return "Nothing's running in the background right now."
+    lines = []
+    for i in live[:8]:
+        line = "• " + progress_line(i, now).replace("\n", ": ", 1)
+        if i["state"] == "waiting_yes" and i["key"].startswith("task:"):
+            line += f" (send approve task {i['key'][5:]} to let it)"
+        lines.append(line)
+    if len(live) > 8:
+        lines.append(f"and {len(live) - 8} more")
+    return "\n".join(lines)
 
 
 def prepare_task_steps(plan):
@@ -5134,11 +5320,14 @@ def prepare_task_steps(plan):
                 continue
             if do == "task_control":
                 task_id, action = int(step.get("id") or 0), str(step.get("action") or "").lower()
+                # a running job's question (job_ask) is answered, its job going on, not approved and queued
+                asking = action == "approve" and "asking" in ((TASK_STORE.get(task_id) or {}).get("payload") or {})
                 ok = TASK_STORE.approve(task_id) if action == "approve" else TASK_STORE.cancel(task_id) if action == "cancel" else False
                 if not ok:
                     raise RuntimeError(f"task {task_id} isn't waiting for that")
                 kept.append({"do": "task_queued", "id": task_id})
-                notices.append(f"Task {task_id} {'approved and queued' if action == 'approve' else 'cancelled'}.")
+                notices.append(f"Okay, task {task_id} can go ahead with that." if asking else
+                               f"Task {task_id} {'approved and queued' if action == 'approve' else 'cancelled'}.")
                 continue
         except (RuntimeError, ValueError) as exc:
             notices.append(f"I couldn't add that task: {exc}.")
@@ -5234,10 +5423,17 @@ def task_worker():
                 if not TASK_STORE.is_cancelled(task["id"]) and not (task["repeat"] and text == task.get("result")):
                     tell_task(task, _task_result_line(task, text))
             elif kind == "research":
-                ok, text = research(payload["topic"], announce=False)
+                noted = []
+                token = NOTED.set(noted)  # the note it saves, to send the phone it was asked from
+                try:
+                    ok, text = research(payload["topic"], announce=False)
+                finally:
+                    NOTED.reset(token)
                 TASK_STORE.finish(task["id"], text if ok else "", "" if ok else text)
                 if not TASK_STORE.is_cancelled(task["id"]):
                     tell_task(task, _task_result_line(task, text, ok))
+                    if ok and noted:
+                        send_report(task, noted[-1], f"Task {task['id']}: {task['description']}")
             elif kind == "code":
                 if not payload.get("approved"):
                     TASK_STORE.wait_for_approval(task["id"], "A coding job changes files; approve it to start")
@@ -5246,8 +5442,8 @@ def task_worker():
                     return
                 folder = coder.check_folder(payload["cwd"])
                 snap = coder.snapshot(folder)
-                chat = (payload.get("origin") or {}).get("phone")
-                ask = (lambda q: PHONE["ask"](chat, q)) if chat is not None and PHONE["ask"] else None
+                # its commands that need your yes are asked, on the phone it came from or out loud (job_ask)
+                ask = job_ask(task, (payload.get("origin") or {}).get("phone"))
                 job = coder.Job(folder, payload["task"], ask=ask, cancelled=lambda: TASK_STORE.is_cancelled(task["id"]),
                                 progress=lambda n: activity.update(f"task:{task['id']}", note=coder.edited(n)))
                 try:
@@ -5274,6 +5470,11 @@ def task_worker():
                                   "" if ok else "it stopped before it finished")
                 if not TASK_STORE.is_cancelled(task["id"]):
                     tell_task(task, _task_result_line(task, done + " " + coder.undo_line(snap), ok))
+                    if phone_for(task) is not None:  # the whole report, files and commands, as a file there
+                        try:
+                            send_report(task, coding_report(task, said, job, snap), f"Task {task['id']}'s report")
+                        except (OSError, RuntimeError) as exc:
+                            print(f"  couldn't send the coding job's report: {exc!r}")
         except Exception as exc:
             error = tasking.redact(str(exc))
             if TASK_STORE.is_cancelled(task["id"]):
@@ -5286,6 +5487,9 @@ def task_worker():
 
     def run_slow(task):
         show_task(task, "running")  # on the island while it runs, round by round for research (activity.step)
+        chat = phone_for(task)
+        if chat is not None:  # and on the phone it was asked from, as one message edited as it goes (progress_tick)
+            PROGRESS_TO[f"task:{task['id']}"] = {"chat": chat, "title": task["description"], "shown": False}
         token = activity.KEY.set(f"task:{task['id']}")
         try:
             run(task)
@@ -7228,8 +7432,9 @@ PENDING = {"plan": None, "until": 0.0, "soon": 0.0, "origin": "voice", "id": "",
 # said that it's for, so the yes turn's agent.SAID is still that and not "yes"
 REPLY_TO = contextvars.ContextVar("reply_to", default=None)  # a turn from your phone: her lines go here, not out loud
 PHONE_CHAT = contextvars.ContextVar("phone_chat", default=None)  # and the chat it came from, for a task's result
-PHONE = {"send": None, "ask": None, "photo": None}  # set by run_voice_assistant once Telegram is there: send(chat,
-# line), ask(chat, question), photo(chat, png bytes, caption)
+PHONE = {"send": None, "buttons": None, "photo": None, "progress": None, "document": None}  # set by
+# run_voice_assistant once Telegram is there: send(chat, line), buttons(chat, question, key) with Yes and No for a
+# running job's question, photo(chat, png bytes, caption), progress(chat, key, text, final) and document(chat, path)
 PHONE_SHOWN = ("A message from your phone", "Answered on your phone")  # all the PC shows of a phone turn
 TAPPED = contextvars.ContextVar("tapped", default=False)  # the phone's Yes button: the only yes for a phone question
 PHONE_PICTURES = {}  # chat -> ([pictures as data URLs], when): the last you sent from your phone, an album's together
@@ -7500,6 +7705,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         else:  # "Cancel", "never mind": the lookup's over too, nobody saved or asked for
             if found:
                 forget_found()
+            refuse_job(pending)  # a running job's question she said (job_ask): its step refused, the job goes on
             no = agent.drop()  # a step she held: what she says about leaving it, "Okay, it's left in your drafts."
             plan = make_plan(say=drop_staged() or no or say_line("confirm_no"))
     elif gate and sure < UNSURE and not answering:  # mumbling, another language or talk across the room, no name
@@ -9006,11 +9212,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                                  f"{it} to, like \u201csend {it} to Amma\u201d.")
                 return
         lines, tapped = [], isinstance(job, tuple)
-        entry = job_asks.get(job[2]) if tapped else None
-        if entry is not None:  # a running coding job's question, answered
-            entry[1] = job[1]
-            entry[0].set()
-            phone.settle(chat, job[3], "Yes." if job[1] else "No.")
+        if tapped and str(job[2]).startswith("job"):  # a running job's question (job_ask), by its button's own key
+            answer = JOB_KEYS.get(job[2])
+            ok = answer is not None and answer(job[1])
+            phone.settle(chat, job[3], ("Yes." if job[1] else "No.") if ok else "Expired, not run.")
             return
         to, tap, where = REPLY_TO.set(lines), TAPPED.set(tapped), PHONE_CHAT.set(chat)
         asked = None
@@ -9059,19 +9264,15 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                     rec.ask(CARRY if rec.wake and not rec.dictating else 0.0, True)
                 HER.end()
 
-    job_asks = {}  # a coding job's question on the phone: [answered, the answer]
-
-    def phone_ask(chat, question, wait=PHONE_WAITS):
-        """Asks on the phone with Yes and No buttons and waits for the tap: False if none comes in time."""
-        if chat != telegram_bot.owner():
-            return False
-        key = f"job{time.time_ns()}"
-        job_asks[key] = [threading.Event(), False]
-        if not phone.send(chat, question, ask=key):
-            job_asks.pop(key)
-            return False
-        job_asks[key][0].wait(wait)
-        return job_asks.pop(key)[1]
+    def phone_progress():
+        """Background tasks' progress to your phone (progress_tick), a look every PROGRESS_LOOK seconds: nothing but
+        a glance at an empty dict while none is going."""
+        while True:
+            time.sleep(PROGRESS_LOOK)
+            try:
+                progress_tick()
+            except Exception as exc:
+                print(f"  phone progress failed: {exc!r}")
 
     def pairing_news(state):
         """What Bot.open_pairing's answer means for you."""
@@ -9093,6 +9294,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             print("\n  (stopped her task in an app, from the phone)")
             phone.send(chat, "Stopping.")
             return
+        if not pictures and not files and chat == telegram_bot.owner() and \
+                PHONE_TASKS.fullmatch(" ".join(str(text or "").lower().replace("’", "'").split()).strip(" .!?")):
+            phone.send(chat, tasks_said())  # from memory at once: never behind the very task you're asking about
+            return
         phone_jobs.put(({"text": text, "pictures": pictures or [], "files": files or []} if pictures or files else text,
                         chat))
 
@@ -9107,8 +9312,11 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                                                             if why == "InvalidToken" else f"Telegram stopped ({why})"))
     threading.Thread(target=phone_turn, daemon=True).start()
     threading.Thread(target=telegram_bot.prune_files, daemon=True).start()  # a day on, what came from the phone goes
-    PHONE.update(send=lambda chat, line: phone.send(chat, line), ask=phone_ask,
-                 photo=lambda chat, picture, caption: phone.send_photo(chat, picture, caption))
+    threading.Thread(target=phone_progress, daemon=True).start()
+    PHONE.update(send=lambda chat, line: phone.send(chat, line),
+                 buttons=lambda chat, question, key: phone.send(chat, question, ask=key),
+                 photo=lambda chat, picture, caption: phone.send_photo(chat, picture, caption),
+                 progress=phone.progress, document=phone.send_document)
     # whenever a bot token is saved: paired, it's you; not yet, it only answers /start with how to pair
     phone.start()
 
