@@ -7,6 +7,7 @@ import io
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -22,6 +23,7 @@ class Home(unittest.TestCase):
     """A fresh Hermes home (skills, memories) and history for each test."""
 
     def setUp(self):
+        settle_used()  # one an earlier test of any kind left running mustn't land in this test's home
         root = tempfile.mkdtemp(prefix="heyjev-learning-")
         for target, name, value in ((history, "DB", os.path.join(root, "history.db")),
                                     (history, "DAYS_DIR", os.path.join(root, "days")),
@@ -37,6 +39,15 @@ class Home(unittest.TestCase):
         self.addCleanup(hermes_memory.set_memory_dir, old_mem)
         self.root = root
         siri._skill_cache[0] = 0.0
+        self.addCleanup(settle_used)  # last of the cleanups to be added, so it runs before the home is put back
+
+
+def settle_used(most=2.0):
+    """Waits for the skill uses counted on their own threads (siri.used_later) to land. One still running once the
+    next test has set its own home took the last home's usage lock and wrote the new one's file, so two writes to it
+    weren't kept in turn and a skill just saved lost its "she wrote this" mark (27 October: Slots failed 1 run in 4)."""
+    for thread in [t for t in threading.enumerate() if t.name == siri.USED_THREAD]:
+        thread.join(most)
 
 
 class Search(Home):

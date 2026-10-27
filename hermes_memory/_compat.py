@@ -4,6 +4,7 @@ subagent look-ups a finished-job notice makes. sync_hermes.py points their impor
 import json
 import os
 import tempfile
+import time
 from contextlib import suppress
 from pathlib import Path
 
@@ -43,6 +44,26 @@ def mkdir_under_hermes_home(path) -> None:
     Path(path).mkdir(parents=True, exist_ok=True)
 
 
+REPLACE_TRIES = 20  # times the rename is tried while another thread has the file open to read it
+REPLACE_PAUSE = 0.01  # seconds between them: a read of a usage or memory file takes well under a millisecond
+
+
+def replace_soon(tmp, path) -> None:
+    """os.replace, tried again for a moment while Windows says the file is in use. On Windows a file another thread
+    has open to read can't be replaced (PermissionError), and Hermes' usage and memory files are read without their
+    lock: on 27 October a skill she'd just saved lost its "she wrote this" mark (skill_usage's created_by) to a use
+    counted on another thread at that moment, was taken for one dropped in by hand and kept back for a scan, so its
+    routine didn't run. POSIX replaces an open file, so there the first try always does."""
+    for left in range(REPLACE_TRIES - 1, -1, -1):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if not left:
+                raise
+            time.sleep(REPLACE_PAUSE)
+
+
 def atomic_write_text(path, content: str, *, encoding: str = "utf-8", tmp_prefix: str = ".tmp_") -> None:
     """Write via a temp file in the same folder, fsync, then an atomic rename: never half-written."""
     path = Path(path)
@@ -53,7 +74,7 @@ def atomic_write_text(path, content: str, *, encoding: str = "utf-8", tmp_prefix
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        replace_soon(tmp, path)
     except BaseException:
         with suppress(OSError):
             os.unlink(tmp)

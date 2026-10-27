@@ -2799,6 +2799,9 @@ _skill_cache = [0.0, []]
 TURN_SKILLS = set()  # the skills this turn really used (used_later): kept with it in her history, counted after it
 
 
+USED_THREAD = "skill-used"  # used_later's and viewed_later's threads, by name, so a test can wait for them
+
+
 def used_later(name):
     """skills.used, off the turn: Hermes' bookkeeping locks, reads and writes its usage file, and "work mode" waited
     18-26 ms for it inside quick(), before anything happened. Only for real use, a routine run or a skill_view: the
@@ -2806,7 +2809,7 @@ def used_later(name):
     background are none of the turn's (27 October: its skill_view was counted as failed with your turn's steps)."""
     if agent.JOB.get() is None:
         TURN_SKILLS.add(str(name))
-    threading.Thread(target=skills.used, args=(name,), daemon=True).start()
+    threading.Thread(target=skills.used, args=(name,), name=USED_THREAD, daemon=True).start()
 
 
 TURN_WRITTEN = set()  # notes she wrote, written out in full for this turn (skills_block): viewed if it then acted
@@ -2816,7 +2819,7 @@ def viewed_later(names):
     """skills.viewed, off the turn, as used_later: a note that shaped what she did. Never counted as a run."""
     names = sorted({str(n) for n in names if n})
     if names:
-        threading.Thread(target=lambda: [skills.viewed(n) for n in names], daemon=True).start()
+        threading.Thread(target=lambda: [skills.viewed(n) for n in names], name=USED_THREAD, daemon=True).start()
 
 
 def routines():

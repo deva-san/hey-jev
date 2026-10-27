@@ -552,3 +552,32 @@ class MemoryPatch(Home):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplaceSoon(unittest.TestCase):
+    """27 October: on Windows a file another thread has open to read can't be replaced, and Hermes' usage and memory
+    files are read without their lock, so a save could be lost (a skill she'd just written lost its mark)."""
+
+    def test_a_busy_file_is_tried_again_and_written(self):
+        from hermes_memory import _compat
+        folder = tempfile.mkdtemp(prefix="heyjev-replace-")
+        path = os.path.join(folder, "usage.json")
+        busy = [PermissionError(13, "in use")] * 3
+        real = os.replace
+
+        def replace(src, dst):
+            if busy:
+                raise busy.pop()
+            real(src, dst)
+        with mock.patch.object(_compat.os, "replace", replace), mock.patch.object(_compat, "REPLACE_PAUSE", 0):
+            _compat.atomic_write_text(path, "{}")
+        self.assertEqual(open(path, encoding="utf-8").read(), "{}")
+        self.assertEqual(os.listdir(folder), ["usage.json"])  # no temp file left behind
+
+    def test_one_that_stays_busy_still_fails(self):
+        from hermes_memory import _compat
+        folder = tempfile.mkdtemp(prefix="heyjev-replace-")
+        with mock.patch.object(_compat.os, "replace", mock.Mock(side_effect=PermissionError(13, "in use"))), \
+                mock.patch.object(_compat, "REPLACE_PAUSE", 0), self.assertRaises(PermissionError):
+            _compat.atomic_write_text(os.path.join(folder, "usage.json"), "{}")
+        self.assertEqual(os.listdir(folder), [])
