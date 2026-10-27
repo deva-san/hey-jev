@@ -32,6 +32,18 @@ LATE = 120.0
 OUTPUT_LIMIT = 64 * 1024
 MAX_COMMAND = 1000
 WAKE = threading.Event()
+# task id -> answer(yes): a running job's question about one of its own steps (Store.ask), in this process only. A
+# row waiting with "asking" in its payload is a job still running, not one to queue again: approve() answers this
+ASKS = {}
+
+
+def asking(task_id, ask=None):
+    """The answer(yes) of the question task_id's running job asks now, or None. ask: only if it's still that very
+    question (its answer's .ask, set by siri.job_ask), not one asked since the first was answered another way."""
+    answer = ASKS.get(int(task_id or 0))
+    if answer is None or (ask is not None and getattr(answer, "ask", None) != ask):
+        return None
+    return answer
 
 
 def _json(value, fallback):
@@ -105,6 +117,18 @@ class Store:
                                 row["id"]))
                 else:
                     con.execute("UPDATE tasks SET status='queued', started=NULL, updated=? WHERE id=?", (now, row["id"]))
+            # A job that was asking about one of its steps when she stopped (ask) is gone with its question: the
+            # whole job is asked about again, never its old step's yes taken for a new run
+            for row in con.execute("SELECT id,kind,payload FROM tasks WHERE status='waiting_approval'").fetchall():
+                payload = _json(row["payload"], {})
+                if "asking" in payload:
+                    payload.pop("asking", None)
+                    payload.pop("approved", None)
+                    con.execute("UPDATE tasks SET payload=?, error=?, started=NULL, updated=? WHERE id=?",
+                                (json.dumps(payload, ensure_ascii=False),
+                                 f"Jev stopped while this {row['kind']} was asking about a step; approve it to retry",
+                                 now, row["id"]))
+        ASKS.clear()
         WAKE.set()
 
     @staticmethod
@@ -162,10 +186,17 @@ class Store:
             activity.finish(f"task:{int(task_id)}", "stopped")
         return bool(cur.rowcount)
 
-    def approve(self, task_id):
+    def approve(self, task_id, ask=None):
+        """A yes to a task waiting on you: queued to run, or a running job's question answered. ask: the one question
+        a yes was said to (asking), so a yes heard for one command never answers the next one the job asks."""
         self.init()
         task = self.get(task_id)
         if not task or task["status"] != "waiting_approval":
+            return False
+        if "asking" in task["payload"]:  # a running job's question (ask): answered, never the job queued twice
+            answer = asking(task_id, ask)
+            return bool(answer is not None and answer(True))
+        if ask is not None:  # a yes to a job's question that's gone: never the whole job's yes instead
             return False
         payload = dict(task["payload"])
         payload["approved"] = True
@@ -205,6 +236,40 @@ class Store:
         with self._db() as con:
             con.execute("UPDATE tasks SET status='waiting_approval', error=?, started=NULL, updated=? WHERE id=? AND "
                         "status='running'", (str(reason)[:500], time.time(), int(task_id)))
+
+    def ask(self, task_id, question, answer):
+        """A running job asks about one of its own steps, as a coding job does before a command that needs your yes
+        (siri.job_ask): its row waits on you with the question, written by code, as its reason, while the job itself
+        goes on waiting for answer(yes). approve() then answers it, by this id only, rather than queue the job again;
+        cancel() ends the job. False, and nothing asked, if the row isn't running (cancelled meanwhile)."""
+        self.init()
+        task = self.get(task_id)
+        if not task or task["status"] != "running":
+            return False
+        payload = {**task["payload"], "asking": str(question)[:500]}
+        with self._db() as con:
+            cur = con.execute("UPDATE tasks SET status='waiting_approval', payload=?, error=?, updated=? WHERE id=? "
+                              "AND status='running'", (json.dumps(payload, ensure_ascii=False), str(question)[:500],
+                                                       time.time(), int(task_id)))
+        if cur.rowcount:
+            ASKS[int(task_id)] = answer
+        return bool(cur.rowcount)
+
+    def resume(self, task_id):
+        """Its question answered, refused or run out: the job's row is running again. False if it was cancelled
+        meanwhile, or wasn't asking."""
+        ASKS.pop(int(task_id), None)
+        self.init()
+        task = self.get(task_id)
+        if not task or task["status"] != "waiting_approval" or "asking" not in task["payload"]:
+            return False
+        payload = dict(task["payload"])
+        payload.pop("asking")
+        with self._db() as con:
+            cur = con.execute("UPDATE tasks SET status='running', payload=?, error='', updated=? WHERE id=? AND "
+                              "status='waiting_approval'", (json.dumps(payload, ensure_ascii=False), time.time(),
+                                                            int(task_id)))
+        return bool(cur.rowcount)
 
     def finish(self, task_id, result="", error=""):
         self.init()

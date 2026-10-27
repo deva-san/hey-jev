@@ -201,8 +201,9 @@ def edited(n):
 
 class Job:
     def __init__(self, folder, task, ask=None, cancelled=lambda: False, timeout=TIMEOUT, progress=None):
-        """ask(question) -> True/False, or None when there's nobody to ask: then it's refused and reported.
-        progress(n): told each time it edits a file, n of them so far."""
+        """ask(question) -> True/False, or None when there's nobody to ask: then it's refused and reported. siri's
+        job_ask is the ask for every job, started by voice or from the phone: the job's row waits on you with the
+        command, and a no or no answer refuses it. progress(n): told each time it edits a file, n of them so far."""
         self.folder, self.task, self.ask, self.cancelled, self.timeout = folder, task, ask, cancelled, timeout
         self.progress = progress
         self.text, self.refused, self.ran, self.edited = [], [], [], []
