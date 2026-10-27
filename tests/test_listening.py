@@ -1168,6 +1168,39 @@ class MicTrouble(Case):
         self.assertIn("USB mic isn't there", a.out.getvalue())
 
 
+class IslandTap(Case):
+    """Approve or Deny on the island for her question (siri.island_answer): a turn of hers, started off the controls
+    loop, and ended in the audio as any turn is. 27 October, review: she said "Sent." with the mic listening, its
+    start was marked and her turn's end never was, so all said after, "Hey Jev" too, waited as said over her."""
+
+    def tap(self, a, says):
+        def answer(yes, ask, notify=None):
+            if says:
+                a.rec.marked = True  # say(): the mic kept listening, so her line's start was marked
+            return True
+        with mock.patch.object(siri, "island_answer", answer), contextlib.redirect_stdout(io.StringIO()):
+            a.threads["island_tap"](True, "q1")
+        return [b[1] for b in list(a.rec.blocks.queue)]
+
+    def test_the_controls_loop_starts_it(self):
+        a = self.assistant(commands=[("island tap", True, "q1")])
+        self.assertIn("island_tap", a.threads)
+
+    def test_a_tap_she_answers_out_loud_ends_her_turn_in_the_audio(self):
+        a = self.assistant(commands=[("island tap", True, "q1")])
+        a.rec.category = "speech"
+        self.assertTrue(a.rec.keeps)
+        marks = [m for m in self.tap(a, says=True) if isinstance(m, siri.Mark)]
+        self.assertEqual([(m.kind, m.secs, m.strict) for m in marks], [("ask", siri.CARRY, True)])
+        self.assertFalse(a.rec.marked)
+
+    def test_with_the_mic_deaf_while_she_talks_there_is_nothing_to_mark(self):
+        a = self.assistant(commands=[("island tap", True, "q1")])
+        a.rec.category = "raw"
+        self.assertFalse(a.rec.marking)
+        self.assertEqual([m for m in self.tap(a, says=False) if isinstance(m, siri.Mark)], [])
+
+
 
 # --------------------------------------------------------------------------- T2: checks/listen.py's report
 class ListenReport(Case):

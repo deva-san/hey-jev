@@ -11,6 +11,7 @@ import tkinter as tk
 import webbrowser
 from tkinter import messagebox, ttk
 
+import activity
 import hermes_memory
 import history
 import messaging
@@ -768,6 +769,16 @@ class AssistantWindow:
         if getattr(self, "current_tab", None) == "todo" and todo_stamp() != self.todo_seen:
             self._load_todo()
 
+    def _tasks_tick(self):
+        """While the Tasks tab is up, a task starting, moving on, finishing or waiting on you shows straight away:
+        looked at when anything she's working on changed (activity.version), and read again only when what the
+        island says of the tasks did, not for each round of a task in an app."""
+        if getattr(self, "current_tab", None) != "tasks" or activity.version == self.tasks_version:
+            return
+        self.tasks_version = activity.version
+        if activity.signature("task:") != self.tasks_seen:
+            self._load_tasks()
+
     # ------------------------------------------------------------------ tasks
     def _build_tasks(self):
         page = self._page("Background tasks", "Durable work and reminders. They survive a restart; commands that can "
@@ -786,9 +797,12 @@ class AssistantWindow:
                                                                                            padx=(self.px(6), 0))
         self.tasks_message = self._label(bar, "", self.f_small, MUTED)
         self.tasks_message.pack(side="left", padx=self.px(10))
+        self.tasks_seen = self.tasks_version = None  # the island's rows for tasks, and its version, last read
         return page
 
     def _load_tasks(self, message=None):
+        self.tasks_seen = activity.signature("task:")
+        live = {item["key"]: item for item in activity.snapshot()}  # how far each running one has got
         self.tasks_table.delete(*self.tasks_table.get_children())
         try:
             rows = self.task_store.list(80)
@@ -799,8 +813,11 @@ class AssistantWindow:
             due = tasking.describe_due(task["due"]) if task["status"] in ("queued", "waiting_approval") else "—"
             result = task.get("error") or task.get("result") or ""
             result = " ".join(str(result).split())
+            status = task["status"].replace("_", " ")
+            note = (live.get(f"task:{task['id']}") or {}).get("note") if task["status"] == "running" else ""
             self.tasks_table.insert("", "end", iid=str(task["id"]), values=(task["id"], task["description"],
-                                    task["status"].replace("_", " "), due, result[:100]))
+                                    f"{status}, {note[0].lower()}{note[1:]}" if note else status, due,
+                                    result[:100]))
         self.tasks_message.configure(text=message or f"{len(rows)} task{'s' if len(rows) != 1 else ''}", fg=MUTED)
 
     def _task_action(self, action):
@@ -1844,6 +1861,7 @@ class AssistantWindow:
             elif row.winfo_ismapped():
                 row.pack_forget()
         self._todo_tick()
+        self._tasks_tick()
         self.root.after(500, self._tick)
 
     def set_mode(self, mode):

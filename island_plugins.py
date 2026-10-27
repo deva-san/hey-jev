@@ -1,10 +1,11 @@
 """The island's plugins, the way MaterialYou Dynamic Island (github.com/Angel-Studio/MaterialYou-Dynamic-Island)
-has them: a popup when a notification comes in, from the apps you pick; what's playing, with its controls; the
-battery when you plug in or it runs low; and a running timer counting down. Each can be turned on and off, and has
-its own options, in the Island tab.
+has them: what she's working on, live, with Stop, Approve and Deny; a popup when a notification comes in, from the
+apps you pick; what's playing, with its controls; the battery when you plug in or it runs low; and a running timer
+counting down. Each can be turned on and off, and has its own options, in the Island tab.
 
-A plugin looks at what Windows already keeps, on one background thread, and tells the island what to show. Nothing
-here sends anything anywhere. To add one, subclass Plugin and put it in PLUGINS.
+A plugin looks at what Windows already keeps, or at what she keeps in memory (activity.py), on one background
+thread, and tells the island what to show. Nothing here sends anything anywhere. To add one, subclass Plugin and put
+it in PLUGINS: what it shows as a card (Activity) is drawn without island.py knowing it.
 """
 import asyncio
 import ctypes
@@ -16,6 +17,7 @@ import threading
 import time
 import winreg
 
+import activity
 import settings
 import watch
 import winplatform as win
@@ -24,9 +26,17 @@ FULL_SCREEN = {2, 3, 4, 7}  # SHQueryUserNotificationState: busy, a game, presen
 
 
 class Activity:
-    """What a plugin wants the island to show. kind: notification, media, battery or timer. live: it stays while
-    it lasts (music playing, a timer running), else it's a popup that shows for a few seconds. mood: how her eyes
-    react when it comes up (island_face.MOODS)."""
+    """What a plugin wants the island to show. kind: notification, media, battery, timer, or card for any other
+    plugin's. live: it stays while it lasts (music playing, a timer running), else it's a popup that shows for a few
+    seconds. mood: how her eyes react when it comes up, or changes (island_face.MOODS).
+
+    A card's data, drawn by island._card: a row {"title", "lines" (one or two of words under it), "status" (a few
+    words at its right, or "since", a time it counts up from), "state" (running, queued, waiting_yes, done, failed or
+    stopped, for its glyph), "progress" (0 to 1, or None), "buttons" [{"name", "label", "data", "careful"}]}, or
+    {"rows": [rows], "more": how many more there are} for a list, of which the first CARD_ROWS show. "short": the
+    few words of the small island it shows while you aren't pointing at it; "badge": a count for her own turn's.
+    A click on a button is the plugin's command(name, data); a careful one (Approve) counts only once the pointer has
+    rested on it, and never while she's doing a task in an app."""
     __slots__ = ("plugin", "kind", "data", "live", "mood", "at", "until", "seconds")
 
     def __init__(self, plugin, kind, data, live=False, mood=None, seconds=None):
@@ -45,6 +55,7 @@ class Plugin:
     every = 2.0
     options = ()  # (key, label, default) for the Island tab
     default_on = True
+    priority = 0  # which of the ones that stay shows when there are several: the highest
 
     def __init__(self, host):
         self.host = host
@@ -268,6 +279,7 @@ class Media(Plugin):
     id, name = "media", "Media"
     description = "What's playing, with its cover, and play, pause, next and back when you point at it."
     every = 1.0
+    priority = 10
     options = (("art", "Show the cover", True), ("paused", "Stay a while after it's paused", True))
     PAUSED_FOR = 25.0  # seconds it stays after a pause, so it can be played again from the island
 
@@ -469,6 +481,7 @@ class Timers(Plugin):
     id, name = "timers", "Timers"
     description = "A running timer counting down, with a ring for how much is left."
     every = 1.0
+    priority = 20  # a timer's about to go off: over the music
 
     def start(self):
         self.shown = None
@@ -493,7 +506,83 @@ class Timers(Plugin):
                                live=True))
 
 
-PLUGINS = (Notifications, Media, Battery, Timers)
+# --------------------------------------------------------------------------- tasks
+CARD_ROWS = 3  # rows a card shows at once; the rest are "+N more"
+SHORT = {"waiting_yes": "Needs you", "queued": "Next", "done": "Done", "failed": "Failed", "stopped": "Stopped"}
+MOODS = (("waiting_yes", "surprised"), ("failed", "sad"), ("done", "happy"))  # her eyes when one comes to this
+
+
+class Tasks(Plugin):
+    """What she's working on (activity.py), as a card: her plan step by step, a task in an app round by round, a
+    background command, install, research or coding job, and a question waiting on your yes. Read from memory only,
+    never tasks.db: its 5 s busy wait would stall the music and the notifications on this thread. A press goes to a
+    thread of its own (command) for the same reason."""
+    id, name = "tasks", "Tasks"
+    description = ("What she's working on, live: her plan step by step, a task in an app round by round and work in "
+                   "the background, with Stop. Point at it for the list.")
+    every = 0.5
+    priority = 30  # over a timer and the music: it may be waiting on you
+    options = (("approve", "Approve from the island too (the pointer rests on it a moment first)", True),)
+
+    def start(self):
+        self.data, self.states = None, {}
+
+    def poll(self, now):
+        items = activity.snapshot(now)
+        rows = [self.row(item) for item in items]
+        # her turn's own row (run_plan's step i of n, a task in an app round by round) while it runs: her face is up
+        # all that time and covered it, so its round and its Stop were never seen (27 October, review). The island
+        # shows how far it's got beside her dots and opens the card over her face while you point at it; first in it
+        turn = next((r for r in rows if r["key"].startswith("turn:") and r["state"] == "running"), None)
+        rows.sort(key=lambda r: r is not turn)
+        background = sum(item["origin"] == "task" and item["state"] not in activity.OVER for item in items)
+        data = {"rows": rows[:CARD_ROWS], "more": max(0, len(rows) - CARD_ROWS),
+                "short": f"{len(rows)} tasks" if len(rows) > 1 else None, "badge": background + (turn is not None),
+                "turn": turn}
+        states = {item["key"]: item["state"] for item in items}
+        came = {state for key, state in states.items() if self.states.get(key) != state}
+        self.states = states
+        if data == self.data:
+            return
+        self.data = data
+        mood = next((m for state, m in MOODS if state in came), None)
+        self.live(Activity(self.id, "card", data, live=True, mood=mood) if rows else None)
+
+    def row(self, item):
+        """One of hers as a card's row: its title, its note, how far it's got and its buttons."""
+        state, step, total = item["state"], item["step"], item["total"]
+        press = {"key": item["key"], "needs": item["needs"]}
+        buttons = []
+        if state == "waiting_yes" and item["needs"] and item["answers"]:
+            buttons.append({"name": "deny", "label": "Deny", "data": press})
+            if self.option("approve"):
+                buttons.append({"name": "approve", "label": "Approve", "data": press, "careful": True})
+        elif state in ("running", "queued") and item["stops"]:
+            buttons.append({"name": "stop", "label": "Stop", "data": press})
+        progress = 1.0 if state == "done" else max(0.0, min(1.0, (step - 1) / total)) \
+            if state == "running" and total and step else None
+        status = SHORT.get(state) or (f"{step}/{total}" if total and step else "")
+        return {"key": item["key"], "title": item["title"], "lines": [item["note"]] if item["note"] else [],
+                "status": status, "since": None if status else item["started"], "state": state,
+                "progress": progress, "buttons": buttons}
+
+    def command(self, what, data=None):
+        """Stop, Approve or Deny on a row (activity.press), on a thread of its own: a background task's goes through
+        tasks.db, and her question's through siri's controls loop."""
+        if what not in ("stop", "approve", "deny") or not isinstance(data, dict) or \
+                (what == "approve" and not self.option("approve")):
+            return
+        threading.Thread(target=activity.press, args=(data.get("key"), what, data.get("needs", "")),
+                         name="island-press", daemon=True).start()
+
+
+PLUGINS = (Tasks, Notifications, Media, Battery, Timers)
+
+
+def priority(plugin_id):
+    """How much what plugin_id keeps on the island matters next to the others' (Plugin.priority): tasks, then a
+    timer, then music, then the battery."""
+    return next((cls.priority for cls in PLUGINS if cls.id == plugin_id), 0)
 
 
 class Runner:

@@ -1,18 +1,30 @@
-"""Her island (island.py): what dictation strikes out, her eyes, the plugins' rules, which scene shows, and the
-drawing shortcuts that must give the same picture as the long way round."""
+"""Her island (island.py): what dictation strikes out, her eyes, the plugins' rules, which scene shows, the drawing
+shortcuts that must give the same picture as the long way round, and what she's working on: the Tasks plugin, read
+from memory only, its card with Stop, Approve and Deny, and the guards on Approve."""
+import contextlib
+import io
+import os
+import shutil
+import tempfile
+import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
 
-from tests.support import siri  # noqa: F401  temp APPDATA and the tripwires, before anything else
+from tests.support import needs_windows, siri  # temp APPDATA and the tripwires, before anything else
+from tests.test_watchers import until
 
+import activity
+import agent
 import dictation
 import island
 import island_face as face
 import island_plugins as plugins
 import settings
+import tasks
 
 
 class Dictation(unittest.TestCase):
@@ -159,9 +171,37 @@ def bare(**kw):
     isl.lives, isl.always, isl.face_style = {}, True, "eyes"
     isl.k, isl.cw, isl.ch, isl.border, isl.theme_name, isl.light, isl.shapes = 1.5, 1200, 300, False, "amoled", False, {}
     isl.eyes = face.Eyes()
+    isl.pinned, isl.rest_pos, isl.rest_at = None, None, 0.0
     for name, value in kw.items():
         setattr(isl, name, value)
     return isl
+
+
+FONTS = (("f_compact", 13.5, 600), ("f_label", 12, 600), ("f_main", 15, 500), ("f_title", 14.5, 700),
+         ("f_small", 11.5, 600))
+
+
+def fonted(test, **kw):
+    """bare(), with the island's words (bubble.Text, which Windows' GDI draws) and its window as tall as _build has
+    it, enough for a layout to be made and drawn."""
+    isl = bare(**kw)
+    for name, px, weight in FONTS:
+        setattr(isl, name, island.Text(round(px * isl.k), weight))
+        test.addCleanup(getattr(isl, name).close)
+    isl.corner, isl.t0, isl.texts, isl.eye = 22, time.time(), {}, ("open", 1.0, 0.0, 0.0, False)
+    isl.island_max_h = max(140 * isl.k, isl._tallest_card())
+    return isl
+
+
+def tasks_card(rows, more=0, short=None, badge=0):
+    return plugins.Activity("tasks", "card", {"rows": rows, "more": more, "short": short, "badge": badge}, live=True)
+
+
+def drawn(lay):
+    """lay drawn on a black patch its size: the patch, which must have something on it."""
+    col = np.zeros((int(lay.h) + 4, int(lay.w) + 4, 3), np.float32)
+    lay.draw(face.Canvas(col), 2, 2, lay.w, lay.h, 1.0, time.time())
+    return col
 
 
 class Scenes(unittest.TestCase):
@@ -204,6 +244,280 @@ class Scenes(unittest.TestCase):
         old = self.note()
         old.at -= 200
         self.assertEqual(bare(popups=[old])._scene(time.time()), ("idle",))
+
+    def test_what_shes_working_on_comes_before_a_timer_and_music(self):
+        """27 October: what stays was picked from a fixed list, a timer, then music, then the battery, and any other
+        plugin's never showed. Now each plugin says how much it matters (Plugin.priority), and her work comes first:
+        it may be waiting on you."""
+        now = time.time()
+        timer = plugins.Activity("timers", "timer", {"label": "Tea", "end": now + 60, "total": 60.0}, live=True)
+        music = plugins.Activity("media", "media", {"title": "Song", "playing": True}, live=True)
+        work = tasks_card([{"title": "Install VLC", "state": "running"}])
+        isl = bare(popups=[self.note()], lives={"media": music, "timers": timer, "tasks": work})
+        self.assertEqual(isl._scene(now)[0], "popup")  # a notification still has its 5 seconds over it
+        self.assertIs(isl._scene(now + 6)[1], work)
+        isl.lives.pop("tasks")
+        self.assertIs(isl._scene(now + 6)[1], timer)
+        self.assertGreater(plugins.priority("tasks"), plugins.priority("timers"))
+        self.assertGreater(plugins.priority("timers"), plugins.priority("media"))
+
+    def test_a_plugin_the_island_doesnt_know_still_shows(self):
+        weather = plugins.Activity("weather", "card", {"title": "Rain at 4"}, live=True)
+        self.assertIs(bare(lives={"weather": weather})._scene(time.time())[1], weather)
+
+
+@needs_windows
+class Cards(unittest.TestCase):
+    """A card (island_plugins.Activity): the Tasks plugin's list or any plugin's, small until you point at it, then
+    open with its rows, their bars and their buttons, and kept open by a click."""
+
+    def test_her_list_shows_three_rows_and_how_many_more(self):
+        rows = [{"title": f"Job {i}", "state": "running", "progress": 0.5, "lines": ["Searching"], "status": "4/6",
+                 "buttons": [{"name": "stop", "label": "Stop", "data": {"key": f"task:{i}", "needs": ""}}]}
+                for i in range(5)]
+        isl = fonted(self, hover=True)
+        lay = isl._make(("live", tasks_card(rows)), time.time())
+        self.assertEqual((lay.kind, lay.key[0]), ("card", "card"))
+        self.assertEqual([h[0] for h in lay.hot], ["b0", "b1", "b2", "pin"])
+        self.assertEqual(lay.press["b2"], ("tasks", "stop", {"key": "task:2", "needs": ""}, False))
+        self.assertGreater(drawn(lay).max(), 0.5)  # words, bars and buttons on it
+        self.assertEqual((lay.rate, lay.animated), (1, False))  # a long job moves once a second, never every frame
+
+    def test_the_tallest_card_fits_the_window(self):
+        row = {"title": "x" * 90, "lines": ["one", "two", "three"], "progress": 0.3, "state": "waiting_yes",
+               "buttons": [{"name": "deny", "label": "Deny"}, {"name": "approve", "label": "Approve"}]}
+        isl = fonted(self, hover=True)
+        lay = isl._card(tasks_card([row] * 3, more=4))
+        self.assertLessEqual(lay.h, isl._tallest_card())
+        self.assertEqual([lay.press[f"b{i}"][3] for i in range(6)], [False, True] * 3)  # only Approve is careful
+        drawn(lay)
+
+    def test_any_plugin_can_show_a_card_without_the_island_knowing_it(self):
+        act = plugins.Activity("weather", "card", {"title": "Rain at 4", "lines": ["Take an umbrella"],
+                                                   "buttons": [{"name": "open", "label": "Open"}]}, live=True)
+        isl = fonted(self)
+        small = isl._make(("live", act), time.time())
+        self.assertEqual((small.kind, small.key[0]), ("card", "card-row"))
+        drawn(small)
+        isl.hover = True
+        big = isl._make(("live", act), time.time())
+        self.assertEqual(big.press["b0"], ("weather", "open", None, False))
+        drawn(big)
+
+    def test_a_click_keeps_it_open_and_another_lets_it_go(self):
+        isl = fonted(self, hover=True, runner=mock.Mock())
+        isl._wake = lambda: None
+        act = tasks_card([{"title": "Install VLC", "state": "running", "since": time.time() - 75}])
+        lay = isl._make(("live", act), time.time())
+        isl._press(lay.press["pin"], False)
+        self.assertEqual(isl.pinned, "tasks")
+        isl.hover = False
+        self.assertEqual(isl._make(("live", act), time.time()).key[0], "card")  # the pointer's gone: still open
+        isl._press(lay.press["pin"], False)
+        self.assertIsNone(isl.pinned)
+        small = isl._make(("live", act), time.time())
+        self.assertEqual((small.key[0], small.rate), ("card-row", 1))  # its clock, 1:15, moves once a second
+        drawn(small)
+        isl.runner.do.assert_not_called()
+
+    def test_her_turn_shows_how_many_go_on_in_the_background(self):
+        busy = tasks_card([{"title": "Install VLC", "state": "running"}], badge=1)
+        isl = fonted(self, jev={"state": "doing", "text": "Opening Settings"}, you="", since=time.time(), level=0.0,
+                     lives={"tasks": busy})
+        isl._front_icon = lambda size: None
+        lay = isl._jev()
+        self.assertEqual(lay.key[3], 1)
+        drawn(lay)
+        isl.lives = {}
+        self.assertEqual(isl._jev().key[3], 0)
+
+    def test_her_turns_own_work_shows_live_over_her_face(self):
+        """27 October, review: her face is up for her whole turn, so run_plan's "step 2 of 5" and a task in an app's
+        "Round 5 of 30", with their Stop, were only ever seen as done for 3 s after it. Now how far it's got shows
+        beside her dots, it counts in the badge, and pointing at her opens the card with Stop."""
+        stop = {"name": "stop", "label": "Stop", "data": {"key": "turn:1", "needs": ""}}
+        row = {"key": "turn:1", "title": "Night light on", "state": "running", "status": "5/30", "progress": 4 / 30,
+               "buttons": [stop], "lines": ["Round 5 of 30, clicked"]}
+        act = plugins.Activity("tasks", "card", {"rows": [row], "more": 0, "short": None, "badge": 1, "turn": row},
+                               live=True)
+        isl = fonted(self, jev={"state": "doing", "text": "Turning on night light"}, you="", since=time.time(),
+                     level=0.0, lives={"tasks": act})
+        isl._front_icon = lambda size: None
+        self.assertEqual(isl._scene(time.time()), ("jev",))
+        face_ = isl._make(("jev",), time.time())
+        self.assertEqual((face_.kind, face_.key[3], face_.key[4]), ("jev", 1, ("5/30", 4 / 30)))
+        drawn(face_)
+        isl.hover = True
+        card = isl._make(("jev",), time.time())
+        self.assertIn(card.kind, island.CLICKABLE)
+        self.assertEqual(card.press["b0"], ("tasks", "stop", {"key": "turn:1", "needs": ""}, False))
+        drawn(card)
+        row["buttons"] = []  # one that can't be stopped (a phone turn's): her face stays, pointed at or not
+        self.assertEqual(isl._make(("jev",), time.time()).kind, "jev")
+        isl.hover, isl.pinned = False, "tasks"  # nor does a card pinned before her turn cover her face
+        row["buttons"] = [stop]
+        self.assertEqual(isl._make(("jev",), time.time()).kind, "jev")
+
+
+class Clicks(unittest.TestCase):
+    """Approve on the island counts only once the pointer has rested on it half a second, and never while she's
+    doing a task in an app: her clicks are real ones, and winplatform.click moves the pointer there 80 ms before it
+    clicks. Stop and Deny go at once. And clicks go through the island except while you point at it."""
+
+    def island(self):
+        isl = bare(runner=mock.Mock(), rest_pos=(500, 20), rest_at=time.time(), look_at=None)
+        isl._wake = lambda: None
+        return isl
+
+    def press(self, isl, careful=True, at=(500, 20)):
+        with mock.patch.object(island.win, "cursor_pos", lambda: at), contextlib.redirect_stdout(io.StringIO()):
+            isl._press(("tasks", "approve" if careful else "deny", {"key": "ask", "needs": "q1"}, careful), False)
+
+    def test_approve_counts_only_once_the_pointer_has_rested_on_it(self):
+        isl = self.island()
+        self.press(isl)  # it came there just now, as an agent's click does
+        isl.rest_at -= island.REST
+        self.press(isl, at=(501, 20))  # and it's moved since the island last looked
+        isl.runner.do.assert_not_called()
+        self.press(isl)
+        isl.runner.do.assert_called_once_with("tasks", "approve", {"key": "ask", "needs": "q1"})
+
+    def test_never_while_she_does_a_task_in_an_app(self):
+        isl = self.island()
+        isl.rest_at -= 5
+        with agent.ACT:
+            self.press(isl)
+        agent.RUNNING.set()
+        try:
+            self.press(isl)
+        finally:
+            agent.RUNNING.clear()
+        isl.runner.do.assert_not_called()
+
+    def test_stop_and_deny_go_at_once(self):
+        isl = self.island()
+        self.press(isl, careful=False)
+        isl.runner.do.assert_called_once_with("tasks", "deny", {"key": "ask", "needs": "q1"})
+
+    def test_a_card_takes_clicks_only_while_you_point_at_it(self):
+        isl = self.island()
+        isl.visible_window, isl.origin, isl.island_rect = True, SimpleNamespace(x=0, y=0), (400, 8, 600, 60)
+        isl.hover_at = isl.away_at = time.time() - 1
+        isl.layout = island.Layout(("card",), "card", 200, 52, None)
+        isl.root, isl.top, isl.hwnd = mock.Mock(), mock.Mock(), 1
+        through = []
+        with mock.patch.object(island.win, "set_click_through", lambda hwnd, on: through.append(on)):
+            for at in ((500, 20), (900, 500)):
+                with mock.patch.object(island.win, "cursor_pos", lambda at=at: at):
+                    isl._hover_poll()
+                isl.away_at -= 1  # and the pointer's been away a while
+        self.assertEqual(through, [False, True])
+        self.assertEqual(isl.rest_pos, (900, 500))
+
+
+class TasksPlugin(unittest.TestCase):
+    """What she's working on, as the island's card, read from memory (activity.py) and never from tasks.db: on the
+    plugins' thread its 5 s busy wait would stall the music and the notifications."""
+
+    def setUp(self):
+        activity.clear()
+        self.addCleanup(activity.clear)
+        self.host = mock.Mock()
+        self.plugin = plugins.Tasks(self.host)
+        self.plugin.start()
+
+    def posted(self):
+        return [c.args[0] for c in self.host.post.call_args_list]
+
+    def test_rows_their_buttons_and_how_many_more(self):
+        activity.publish("ask", title="Send the message?", kind="ask", state="waiting_yes", needs="q1",
+                         answer=lambda yes: True)
+        for i in range(4):
+            activity.publish(f"task:{i}", title=f"Job {i}", origin="task", step=2 if i == 0 else 0,
+                             total=6 if i == 0 else 0, stop=lambda: True)
+        self.plugin.poll(time.time())
+        kind, pid, act = self.posted()[-1]
+        self.assertEqual((kind, pid, act.kind, act.mood), ("live", "tasks", "card", "surprised"))
+        d = act.data
+        self.assertEqual((len(d["rows"]), d["more"], d["short"], d["badge"]), (3, 2, "5 tasks", 4))
+        ask, first, second = d["rows"]
+        self.assertEqual([(b["name"], b.get("careful", False)) for b in ask["buttons"]],
+                         [("deny", False), ("approve", True)])
+        self.assertEqual((ask["status"], ask["buttons"][1]["data"]), ("Needs you", {"key": "ask", "needs": "q1"}))
+        self.assertEqual((first["status"], first["progress"], [b["name"] for b in first["buttons"]]),
+                         ("2/6", 1 / 6, ["stop"]))
+        self.assertEqual((second["status"], second["progress"]), ("", None))  # how far isn't known: a clock counts
+        self.assertIsNotNone(second["since"])
+
+    def test_with_approve_off_in_the_island_tab_only_deny(self):
+        activity.publish("ask", title="Send the message?", state="waiting_yes", needs="q1", answer=lambda yes: True)
+        with mock.patch.dict(settings._load(), {"island_plugin_options": {"tasks": {"approve": False}}}), \
+                mock.patch.object(plugins.threading, "Thread") as thread:
+            self.plugin.poll(time.time())
+            self.plugin.command("approve", {"key": "ask", "needs": "q1"})  # an old card's button
+        self.assertEqual([b["name"] for b in self.posted()[-1][2].data["rows"][0]["buttons"]], ["deny"])
+        thread.assert_not_called()
+
+    def test_it_posts_only_what_changed_and_goes_once_all_is_over(self):
+        activity.publish("task:1", title="Install VLC", origin="task")
+        self.plugin.poll(time.time())
+        self.plugin.poll(time.time())
+        self.assertEqual(len(self.posted()), 1)
+        activity.drop("task:1")
+        self.plugin.poll(time.time())
+        self.assertEqual(self.posted()[-1], ("live", "tasks", None))
+
+    def test_her_eyes_react_when_one_finishes_or_fails(self):
+        with mock.patch.object(activity, "QUICK", -1.0):
+            activity.publish("task:1", title="Install VLC")
+            activity.publish("task:2", title="Install Zoom")
+            self.plugin.poll(time.time())
+            activity.finish("task:1", "done")
+            self.plugin.poll(time.time())
+            happy = self.posted()[-1][2].mood
+            activity.finish("task:2", "failed")
+            self.plugin.poll(time.time())
+            sad = self.posted()[-1][2].mood
+        self.assertEqual((happy, sad), ("happy", "sad"))
+
+    def test_her_turns_row_goes_first_and_counts_in_the_badge(self):
+        """Her turn's own row, step by step, is what the island shows over her face (DynamicIsland._turn): first in
+        the card even behind three others, and in the badge on her face, which before counted only the background."""
+        for i in range(3):
+            activity.publish(f"task:{i}", title=f"Job {i}", origin="task", stop=lambda: True)
+        activity.publish("turn:1", title="Night light on", kind="turn", total=30, origin="voice", stop=lambda: True)
+        activity.step(5, 30, "Round 5 of 30, clicked", key="turn:1")
+        self.plugin.poll(time.time())
+        d = self.posted()[-1][2].data
+        self.assertEqual((d["turn"]["key"], d["rows"][0]["key"], d["badge"], d["more"]), ("turn:1", "turn:1", 4, 1))
+        self.assertEqual((d["turn"]["status"], [b["name"] for b in d["turn"]["buttons"]]), ("5/30", ["stop"]))
+        activity.finish("turn:1", "done")
+        self.plugin.poll(time.time())
+        d = self.posted()[-1][2].data
+        self.assertEqual((d["turn"], d["badge"]), (None, 3))  # done: its tick shows in the card, not over her face
+
+    def test_it_reads_memory_never_tasks_db(self):
+        """Its poll reads activity.snapshot(), and a press goes to a thread of its own: Deny on a task waiting here
+        cancels it in tasks.db from there, never from the plugins' thread."""
+        folder = tempfile.mkdtemp(prefix="heyjev-island-")
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        store = tasks.Store(os.path.join(folder, "tasks.db"))
+        task = store.create("Install VLC", "install", {"id": "VideoLAN.VLC"}, status="waiting_approval")
+        opened, real = [], tasks.sqlite3.connect
+
+        def connect(*args, **kwargs):
+            opened.append(threading.current_thread())
+            return real(*args, **kwargs)
+        with mock.patch.object(siri, "TASK_STORE", store):
+            siri.show_task(store.get(task), "waiting_yes")
+            with mock.patch.object(tasks.sqlite3, "connect", connect):
+                self.plugin.poll(time.time())
+                self.plugin.command("deny", {"key": f"task:{task}", "needs": str(task)})
+                self.assertTrue(until(lambda: any(i["key"] == f"task:{task}" and i["state"] == "stopped"
+                                                  for i in activity.snapshot())))
+        self.assertNotIn(threading.current_thread(), opened)  # the thread that polled and pressed
+        self.assertIn("island-press", [t.name for t in opened])
+        self.assertEqual(store.get(task)["status"], "cancelled")
 
 
 class Drawing(unittest.TestCase):

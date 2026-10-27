@@ -8,7 +8,7 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows without
 import subprocess
 import numpy as np, psutil, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
-import agent, coder, decider, fast_intent, filesearch, hermes_memory, history, installer, messaging, opencode, pocket, settings, shortcuts, telegram_bot, todo, speech, sysinfo, tasks as tasking, vision, voiceid, watch, watchers, web, winplatform as win
+import activity, agent, coder, decider, fast_intent, filesearch, hermes_memory, history, installer, messaging, opencode, pocket, settings, shortcuts, telegram_bot, todo, speech, sysinfo, tasks as tasking, vision, voiceid, watch, watchers, web, winplatform as win
 from hermes_memory import curator, hermes_bits, skills, voice_bits
 from hermes_memory.threat_patterns import INVISIBLE_CHARS, first_threat_message
 from secrets_store import get_secret, missing_secrets
@@ -3701,6 +3701,7 @@ def _research(topic, announce):
                                                 f"for you): {first}"}]
         plan, read, nudged = {}, 0, False
         for round_ in range(6):
+            activity.step(round_ + 1, 6, "Reading pages" if read else "Searching")  # its row on the island, if any
             raw, plan, usage, model = ask_plan(messages, deadline=40, hedge_after=20, cap=35)
             info = [s for s in plan["steps"] if s["do"] in ("web", "read", "news", "weather")]
             print(f"  research {model}: {json.dumps(plan, ensure_ascii=False)[:200]}")
@@ -4930,6 +4931,53 @@ def tell_task(task, line):
     ANNOUNCE.put(line)  # said by heads_ups once she's free, which sets a Said line's heard
 
 
+TASK_DOING = {"command": "Running it", "install": "Installing", "research": "Looking into it",
+              "code": "OpenCode is on it"}  # what a background task's row says while it runs
+
+
+def acting():
+    """True while she's doing a task in an app: its clicks are real ones (winplatform.click), so nothing approves
+    anything from the island meanwhile, not even a click that seems to be yours."""
+    return agent.RUNNING.is_set() or agent.ACT.locked()
+
+
+def task_answer(task_id):
+    """What Approve and Deny on the island do for a background task waiting on you: Store.approve, which only takes
+    one still waiting, or cancel. Run on a thread the island's plugin starts for it (activity.press), never on its
+    own: tasks.db's 5 s busy wait would hold up the music and the notifications."""
+    def answer(yes):
+        return (not acting() and TASK_STORE.approve(task_id)) if yes else TASK_STORE.cancel(task_id)
+    return answer
+
+
+def show_task(task, state, note=None):
+    """A background task's row on the island (activity), by its id: with Stop while it runs, Approve and Deny while
+    it waits on you. Only work that takes minutes (SLOW_TASKS): a reminder or a look is over at once, and a watch
+    waits for hours. Its title is its description, never its output."""
+    key, tid = f"task:{task['id']}", task["id"]
+    if state in activity.OVER:
+        return activity.finish(key, state, note)
+    if task["kind"] not in SLOW_TASKS:
+        return False
+    waiting = state == "waiting_yes"
+    note = note if note is not None else f"Or say approve task {tid}" if waiting else TASK_DOING.get(task["kind"], "")
+    activity.publish(key, title=task["description"], kind=task["kind"], state=state, note=note, origin="task",
+                     needs=str(tid) if waiting else "", stop=lambda: TASK_STORE.cancel(tid), answer=task_answer(tid))
+    return True
+
+
+def settle_task(task):
+    """Its row once its run is over, by how tasks.db has it now: done, failed or cancelled, or waiting on your yes
+    (an approval it found it needed). Never its result or error: those are for the Tasks tab."""
+    status = (TASK_STORE.get(task["id"]) or {}).get("status")
+    if status == "waiting_approval":
+        show_task(task, "waiting_yes")
+    elif status == "failed":
+        show_task(task, "failed", "Open Tasks for the details")
+    else:  # queued again is a repeating one, done for now
+        show_task(task, "stopped" if status == "cancelled" else "done")
+
+
 def prepare_task_steps(plan):
     """Turn command/schedule model steps into durable rows before run_plan. Returns a plan with harmless markers."""
     kept, notices, ask = [], [], None
@@ -4940,6 +4988,8 @@ def prepare_task_steps(plan):
                 payload = {**background_payload({**step, "kind": "code"}), "origin": asked_from()}
                 task_id = TASK_STORE.create(step.get("description") or payload["task"], "code", payload,
                                             status="waiting_approval")
+                show_task({"id": task_id, "kind": "code", "description": step.get("description") or payload["task"]},
+                          "waiting_yes")
                 kept.append({"do": "task_queued", "id": task_id})
                 ask = (f"OpenCode will {payload['task'][:160].rstrip('.')}, in "
                        f"{os.path.basename(payload['cwd'])}. Should I start it?", task_id)
@@ -4950,6 +5000,9 @@ def prepare_task_steps(plan):
                 status = "waiting_approval" if level == "confirm" else "queued"
                 task_id = TASK_STORE.create(step.get("description") or payload["command"], "command", payload,
                                             status=status)
+                if status == "waiting_approval":
+                    show_task({"id": task_id, "kind": "command",
+                               "description": step.get("description") or payload["command"]}, "waiting_yes")
                 kept.append({"do": "task_queued", "id": task_id})
                 if status == "waiting_approval" and origin() == "phone":  # on the phone: Yes and No buttons
                     ask = (f"Should I run {payload['command'][:160]}?", task_id)
@@ -5016,6 +5069,9 @@ def task_worker():
     a reminder due during a 30 minute install was said when the install finished."""
     TASK_STORE.init()
     TASK_STORE.recover()
+    for row in TASK_STORE.list(80, active=True):  # waiting on your yes from before she started: on the island too
+        if row["status"] == "waiting_approval":
+            show_task(row, "waiting_yes")
     print("[tasks: ready]")
     slow = threading.Event()  # set while a command, install or research runs
     # Hermes' late rule is for work that came due while the PC was off or asleep, never for a task that only waited
@@ -5089,7 +5145,8 @@ def task_worker():
                 snap = coder.snapshot(folder)
                 chat = (payload.get("origin") or {}).get("phone")
                 ask = (lambda q: PHONE["ask"](chat, q)) if chat is not None and PHONE["ask"] else None
-                job = coder.Job(folder, payload["task"], ask=ask, cancelled=lambda: TASK_STORE.is_cancelled(task["id"]))
+                job = coder.Job(folder, payload["task"], ask=ask, cancelled=lambda: TASK_STORE.is_cancelled(task["id"]),
+                                progress=lambda n: activity.update(f"task:{task['id']}", note=coder.edited(n)))
                 try:
                     ok, said = job.run()
                 except Exception as exc:  # out of time, OpenCode stopped, or you cancelled it: what it changed stays,
@@ -5125,10 +5182,14 @@ def task_worker():
                 tell_task(task, _task_result_line(task, "Open Tasks for the details.", False))
 
     def run_slow(task):
+        show_task(task, "running")  # on the island while it runs, round by round for research (activity.step)
+        token = activity.KEY.set(f"task:{task['id']}")
         try:
             run(task)
         finally:
+            activity.KEY.reset(token)
             slow.clear()
+            settle_task(task)
             tasking.WAKE.set()  # the next command, install or research may go now
 
     while True:
@@ -5151,6 +5212,7 @@ def task_worker():
                                                      f"late; approve it to run it now")
             tell_task(task, f"Task {task['id']} was due {tasking.describe_due(task['due'])}, so I didn't run it late: "
                             f"{task['description']}. Say approve task {task['id']} to run it now.")
+            show_task(task, "waiting_yes")
             continue
         if task["kind"] == "watch":  # a look takes a moment (a window's picture to the model, up to 30 s), and
             threading.Thread(target=run, args=(task,), daemon=True).start()  # several watches look at once
@@ -6117,6 +6179,18 @@ def playing_after(steps):
     return media_playing()
 
 
+FELL_SHORT = {"failed", "stuck", "budget", "refused", "gone"}  # how a task in an app ends without being done
+
+
+def stop_turn(turn):
+    """Stop on the island for her plan's row: as "stop" said over her, or, for a phone turn's (turn None), as "stop"
+    sent from the phone. turn: her turn it was for (HER.turn), so a row left from one that's over stops nothing now."""
+    if turn is None:
+        agent.STOP.set()
+        return True
+    return HER.cut("Stop on the island", turn)
+
+
 def run_plan(plan, notify):
     """Do the steps while she says her line, or once the ones it reports are done (SAY_AFTER), and only if they
     worked. A screen step looks at the screen and acts on it (see), a procedure does a task she's done before, and a
@@ -6140,6 +6214,7 @@ def run_plan(plan, notify):
     if REPLY_TO.get() is None:
         HER.asking = bool(plan.get("confirm"))  # a yes or no over her question is for after it, it doesn't stop her
     reported = threading.Event()  # the steps her line reports on are done
+    key = None  # her plan's row on the island (activity), when it has one
     if plan.get("said") is not None and not steps:  # said as the model wrote it (LiveSay)
         spoken, voice_error, line = list(plan["said"]), plan.get("voice_error"), ""
 
@@ -6170,8 +6245,22 @@ def run_plan(plan, notify):
             tell_task({"payload": {"origin": asked_from()}}, said)
 
     def work():
+        token = activity.KEY.set(key)  # a task in an app reports its rounds to the plan's row
+        try:
+            do_steps()
+        finally:
+            activity.KEY.reset(token)
+            if key is not None and agent.asking():  # her question about a step she held: a row of its own (handle)
+                activity.drop(key)
+            elif key is not None:  # how it went, by what failed and how each task in an app ended
+                ends = {r.outcome for r in agent.TURN.get().runs}
+                activity.finish(key, "failed" if failed or ends & FELL_SHORT else "stopped" if "stopped" in ends or
+                                (HER.stop.is_set() and REPLY_TO.get() is None) else "done")
+
+    def do_steps():
         opened = []  # the steps that opened an app or a site, done: where a task on the screen after them starts
         for i, step in enumerate(steps):
+            activity.step(i + 1, len(steps), "")
             try:
                 if step["do"] in agent.DISPATCH:
                     # your words are this step's alone if the rest only opened its app: else what's learned from it
@@ -6218,8 +6307,15 @@ def run_plan(plan, notify):
                 time.sleep(WAIT_AFTER.get(step["do"], 0.1))
 
     if steps:  # the window and the popup show these: a screen task in a few words, never the model's whole task
-        emit(notify, "Doing it", describe([{**s, "task": agent.task_words(s.get("task")) or "on the screen"}
-                                           if s["do"] == "screen" else s for s in steps]))
+        doing = describe([{**s, "task": agent.task_words(s.get("task")) or "on the screen"}
+                          if s["do"] == "screen" else s for s in steps])
+        emit(notify, "Doing it", doing)
+        if len(steps) > 1 or task is not None:  # and the island, step by step, with Stop: one quick step shows itself
+            key = f"turn:{time.time_ns()}"  # titled by its task in an app, in a few words, when it has one
+            title = doing if task is None else "The step you said yes to" if task["do"] == "agent_resume" else \
+                (agent.task_words(looks) if task["do"] == "screen" else looks) or doing
+            activity.publish(key, title=title, kind="turn", total=len(steps), origin=origin(),
+                             stop=lambda turn=(HER.turn if REPLY_TO.get() is None else None): stop_turn(turn))
     if first and line:
         voice_error, line = talk(line), ""
     turn = agent.Turn()  # the runs these steps start, all ended with this turn (agent.close)
@@ -7421,6 +7517,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         plan = make_plan(say=say_line("not_caught" if origin() == "voice" else "not_worked_out"))
     if PENDING["origin"] == origin():
         old, PENDING["plan"] = PENDING["plan"], None  # answered, or something else asked for instead
+        activity.drop("ask")
         if old is not None and plan is not old and not plan.get("confirm") and (STAGED["ready"] or {}).get("files") \
                 and any(s.get("do") == "message_send" for s in old.get("steps") or []):
             drop_staged()  # passed over: files aren't left in WhatsApp's preview, one Enter from going
@@ -7457,6 +7554,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         PENDING.update(plan=plan["confirm"], soon=soon, until=max([soon] + waits), origin=origin(),
                        id=hashlib.sha1(os.urandom(16)).hexdigest()[:12],  # an old button can't match a new question
                        words=str((own and plan["confirm"].get("words")) or agent.SAID.get() or words or text))
+        show_ask(plan["confirm"])
     # what she said, also when it came from the screen: the next turn's "play the third one" needs what she saw.
     # What a procedure writes is kept as its length only (agent.redact). With a task in an app, the planner's line
     # was never said (agent.intro), so it isn't kept as hers either
@@ -7485,6 +7583,45 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     # right chat before I do.": the window stayed shut, and the yes without her name was let go
     return "chat" if gate and not kept["steps"] and not plan.get("confirm") and \
         not kept["say"].rstrip().endswith("?") else True
+
+
+ASK_TITLES = {"message_send": "Send the message?", "install_run": "Install it?", "contact_found": "Is that them?",
+              "watch_start": "Start the watch?", "shutdown": "Shut down the PC?", "restart": "Restart the PC?"}
+CONTROLS = [None]  # the window's controls queue (run_voice_assistant): the island's Approve and Deny go in it
+
+
+def show_ask(confirm):
+    """Her question at the PC on the island (activity "ask"), until it runs out: what it's for in a few words of
+    code's, never the message read back, with Approve and Deny that answer it as the phone's buttons do (island_tap).
+    A coding job or a command waiting on your yes has a row of its own already (show_task), and a question asked on
+    the phone is answered only there: none for those."""
+    steps = [s for s in confirm.get("steps") or [] if isinstance(s, dict)]
+    if PENDING["origin"] != "voice" or any(s.get("do") == "task_control" for s in steps):
+        activity.drop("ask")
+        return
+    ask = PENDING["id"]
+    title = confirm.get("short") or next((ASK_TITLES[s["do"]] for s in steps if s.get("do") in ASK_TITLES),
+                                         "Should I go ahead?")
+    activity.publish("ask", title=title, kind="ask", state="waiting_yes", note="Or just say yes", needs=ask,
+                     origin="voice", until=PENDING["until"],
+                     answer=lambda yes: CONTROLS[0] is not None and (CONTROLS[0].put(("island tap", yes, ask)) or True))
+
+
+def island_answer(yes, ask, notify=None):
+    """Approve or Deny on the island for her question at the PC, answered the way the phone's buttons answer one
+    (phone_turn): only the question still waiting, asked out loud, before it ran out, and never while she's doing a
+    task in an app, whose clicks are real ones. The caller holds busy, as for any turn. True if it was answered."""
+    live = PENDING["origin"] == "voice" and PENDING["plan"] is not None and str(PENDING["id"]) == str(ask) and \
+        time.time() < PENDING["until"] and not acting()
+    if not live:
+        print("  (island: that question isn't waiting any more, so nothing's done)")
+        return False
+    tap = TAPPED.set(True)  # as clear a yes as there is: STRICT_YES's verbs needn't be said
+    try:
+        handle("yes" if yes else "no", None, None, notify)
+    finally:
+        TAPPED.reset(tap)
+    return True
 
 
 MIC = [None]  # the Recorder, so the mic pauses only while she talks, see say
@@ -8771,6 +8908,26 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             PHONE_CHAT.reset(where)
         phone.send(chat, "\n".join(lines) or "Done.", ask=asked)
 
+    def island_tap(yes, ask):
+        """Approve or Deny on the island (island_answer): a turn of hers like any other, under busy, so it never
+        overlaps one you're having with her. Ended in the audio as run_turn ends one: she says "Sent." with the mic
+        listening, so her line's start is marked, and unmarked the always-listening loop parked all you said after,
+        "Hey Jev" too, as said over her until a timer or a heads-up marked one (27 October, review). "okay, and ..."
+        right after carries on, strictly, as after a timer (CARRY): a tap isn't a question back."""
+        with busy:
+            HER.begin()
+            shown[0] = None  # the turn sets the window's text from here
+            try:
+                island_answer(yes, ask, notify)
+            except Exception as exc:
+                print(f"\n  island tap failed: {exc!r}")
+                emit(notify, "Something went wrong", str(exc))
+            finally:
+                if rec.marking:
+                    next_window[0], window_ask[0] = 0.0, None
+                    rec.ask(CARRY if rec.wake and not rec.dictating else 0.0, True)
+                HER.end()
+
     job_asks = {}  # a coding job's question on the phone: [answered, the answer]
 
     def phone_ask(chat, question, wait=PHONE_WAITS):
@@ -8845,6 +9002,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         threading.Thread(target=welcome, args=(False,), daemon=True).start()
     if controls is None:
         controls = queue.Queue()
+    CONTROLS[0] = controls
     # the keyboard hook only drops a note in the queue, Windows drops hooks that take too long
     win.start_ptt_listener(lambda: controls.put("press"), lambda: controls.put("release"))
     print("ready. ctrl+c to quit.")
@@ -8858,6 +9016,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 set_mode(command[1])
             elif isinstance(command, tuple) and command[0] == "mic":
                 rec.set_device(command[1])
+            elif isinstance(command, tuple) and command[0] == "island tap":  # off this loop, which right Alt needs
+                threading.Thread(target=island_tap, args=command[1:3], daemon=True).start()
             elif command in ("pair phone", "phone token"):  # Settings > Phone > Pair, or a bot token saved in Keys
                 if command == "phone token":
                     phone.restart()  # with the new token, once the old one's stopped: not waited for here
