@@ -1606,6 +1606,41 @@ def session_locked():
         wtsapi32.WTSFreeMemory(buf)
 
 
+class LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", UINT), ("dwTime", DWORD)]
+
+
+_sig(user32.GetLastInputInfo, [ctypes.POINTER(LASTINPUTINFO)])
+_sig(kernel32.GetTickCount, [], DWORD)
+
+
+def idle_seconds():
+    """Seconds since the last key or mouse input anywhere in this session (GetLastInputInfo): how a job in the
+    background knows you've stopped typing before it takes the screen (agent.screen). 0.0 if Windows won't say, so
+    it waits rather than go. Input she sends herself counts too, which only makes a job wait longer."""
+    info = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
+    if not user32.GetLastInputInfo(ctypes.byref(info)):
+        return 0.0
+    return ((kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000.0  # the tick count wraps after 49 days
+
+
+def window_of(hwnd):
+    """(hwnd, exe, title) of a window, as foreground() gives the one in front: a job's own window, read whether it's
+    in front or not. (None, "", "") once it's gone."""
+    if not hwnd or not user32.IsWindow(hwnd):
+        return None, "", ""
+    return hwnd, os.path.basename(window_exe(hwnd)).lower(), window_title(hwnd)
+
+
+def window_rect(hwnd):
+    """Where a window is, (left, top, right, bottom) in real pixels, or None: for a picture of it (vision.of_window)."""
+    r = RECT()
+    with _real_pixels():
+        if not hwnd or not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+            return None
+    return r.left, r.top, r.right, r.bottom
+
+
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"  # what starts when you sign in, also in Task Manager
 
 

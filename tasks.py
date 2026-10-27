@@ -24,8 +24,10 @@ from winplatform import APPDATA_DIR, CREATE_NO_WINDOW, POWERSHELL
 
 DB_PATH = os.path.join(APPDATA_DIR, "tasks.db")
 STATUSES = {"queued", "running", "waiting_approval", "completed", "failed", "cancelled"}
-KINDS = {"command", "reminder", "lookup", "research", "install", "code", "watch"}  # watch: see watchers.py
-CHANGES_PC = {"command", "install", "code"}  # never re-run by themselves after Jev stopped part-way: they ask again
+# watch: see watchers.py. agent: a job of several parts done in the background (27 October, siri.run_job), which may
+# work in apps, so it changes the PC as a command does
+KINDS = {"command", "reminder", "lookup", "research", "install", "code", "watch", "agent"}
+CHANGES_PC = {"command", "install", "code", "agent"}  # never re-run by themselves after Jev stopped part-way: asked again
 # Hermes Agent's cron rule (cron/jobs.py): a one-off job that comes due more than 2 minutes late, as after the PC was
 # off or asleep, doesn't run late by itself. One that changes the PC asks again; a reminder says when it was for
 LATE = 120.0
@@ -86,6 +88,10 @@ class Store:
                     updated REAL NOT NULL
                 )""")
                 con.execute("CREATE INDEX IF NOT EXISTS task_due ON tasks(status, due)")
+                # added on 27 October for a job's progress ("Part 2 of 4", "Using the screen"): a tasks.db from before
+                # gets the column here, nullable, so no row of it changes
+                if "progress" not in {row["name"] for row in con.execute("PRAGMA table_info(tasks)")}:
+                    con.execute("ALTER TABLE tasks ADD COLUMN progress TEXT")
             self._ready = True
 
     def recover(self):
@@ -99,10 +105,11 @@ class Store:
                 if row["kind"] in CHANGES_PC:
                     payload = _json(row["payload"], {})
                     payload.pop("approved", None)
+                    payload.pop("hold", None)  # a job's held step was in memory: approved now, it starts again
                     con.execute("UPDATE tasks SET payload=?, status='waiting_approval', error=?, started=NULL, "
                                 "updated=? WHERE id=?", (json.dumps(payload, ensure_ascii=False),
-                                f"Jev stopped while this {row['kind']} was running; approve it to retry", now,
-                                row["id"]))
+                                f"Jev stopped while this {'job' if row['kind'] == 'agent' else row['kind']} was "
+                                f"running; approve it to retry", now, row["id"]))
                 else:
                     con.execute("UPDATE tasks SET status='queued', started=NULL, updated=? WHERE id=?", (now, row["id"]))
         WAKE.set()
@@ -162,10 +169,15 @@ class Store:
             activity.finish(f"task:{int(task_id)}", "stopped")
         return bool(cur.rowcount)
 
-    def approve(self, task_id):
+    def approve(self, task_id, hold=None):
+        """A task waiting on your yes queued again, approved. hold: the id of the very step a job held for it
+        (wait_for_approval), which must still be the one waiting: a yes to an old question of the job's, or to
+        another job's, releases nothing. None approves the task as it waits, as "approve task 3" does."""
         self.init()
         task = self.get(task_id)
         if not task or task["status"] != "waiting_approval":
+            return False
+        if hold is not None and str((task["payload"] or {}).get("hold") or "") != str(hold):
             return False
         payload = dict(task["payload"])
         payload["approved"] = True
@@ -200,11 +212,32 @@ class Store:
         finally:
             con.close()
 
-    def wait_for_approval(self, task_id, reason):
+    def wait_for_approval(self, task_id, reason, hold=None):
+        """A running task waits on your yes. hold: the id of the step a job held (agent.JOB_HELD), kept in its
+        payload so only a yes to that step approves it (approve), and any approval it had is used up: one yes, one
+        action."""
+        self.init()
+        if hold is None:
+            with self._db() as con:
+                con.execute("UPDATE tasks SET status='waiting_approval', error=?, started=NULL, updated=? WHERE id=? "
+                            "AND status='running'", (str(reason)[:500], time.time(), int(task_id)))
+            return
+        payload = dict((self.get(task_id) or {}).get("payload") or {})
+        payload.pop("approved", None)
+        payload["hold"] = str(hold)
+        with self._db() as con:
+            con.execute("UPDATE tasks SET status='waiting_approval', error=?, payload=?, started=NULL, updated=? "
+                        "WHERE id=? AND status='running'",
+                        (str(reason)[:500], json.dumps(payload, ensure_ascii=False), time.time(), int(task_id)))
+
+    def update_progress(self, task_id, text):
+        """How far a running job has got, for the Tasks tab ("Part 2 of 4", "Using the screen"): only while it runs,
+        so a late word from one that finished or was cancelled meanwhile changes nothing. True if it was kept."""
         self.init()
         with self._db() as con:
-            con.execute("UPDATE tasks SET status='waiting_approval', error=?, started=NULL, updated=? WHERE id=? AND "
-                        "status='running'", (str(reason)[:500], time.time(), int(task_id)))
+            cur = con.execute("UPDATE tasks SET progress=?, updated=? WHERE id=? AND status='running'",
+                              (str(text or "")[:200], time.time(), int(task_id)))
+        return bool(cur.rowcount)
 
     def finish(self, task_id, result="", error=""):
         self.init()

@@ -14,6 +14,7 @@ asks the model what to do next, does it, and looks again, a screenshot going to 
 controls aren't enough. Once it's done and checked on the screen, code keeps what she did as a procedure (learn), so
 next time it's done without the model; and when a step of one stops working, she works that bit out live again from
 where it stopped (repair). Steps of a procedure and of a live run pass the same gate."""
+import contextlib
 import contextvars
 import hashlib
 import json
@@ -28,7 +29,7 @@ import outcomes
 import toolbox
 import vision
 import winplatform as win
-from hermes_memory import skills, tool_bits
+from hermes_memory import goal_bits, interrupt, skills, tool_bits
 from hermes_memory._compat import atomic_write_text
 from hermes_memory.iteration_budget import IterationBudget
 from hermes_memory.threat_patterns import INVISIBLE_CHARS, first_threat_message
@@ -197,6 +198,193 @@ _sleep, _clock = time.sleep, time.monotonic  # swapped for a fake clock in the t
 _warned = set()  # procedures already said in the log to have been changed, so it's said once
 _stats_lock = threading.Lock()
 
+# A job in the background (27 October, siri.run_job): the owner asked that every task can go on while they keep
+# talking to her. It runs on a worker of siri's agent lane, never in a turn: it never holds busy, never sets RUNNING
+# (every voice turn would then hear only her name or "stop", and timers would wait for it), and never uses a turn's
+# single slots (STOP, HELD, ASK, CURRENT). It has its own stop (Job.stop, Hermes' per-thread interrupt), so "stop"
+# said to her, or stopping another job, leaves it be; its own held step, kept by its task id (JOB_HELD) and asked
+# about through tasks.db, so a yes to job 3 releases only job 3's step, the one it was for; and its own window
+# (Run.pin), read by UI Automation and a picture of that window, and pressed by Invoke, Toggle and Value, which need
+# no screen. Keys, typing, a click at a point, a scroll, opening and switching take the screen (screen): with no
+# question first (the owner's call on 27 October), after a lull in your typing, never while a turn of yours acts or
+# the PC is locked, one job at a time, the focus given back after
+BACKGROUND = [0, threading.Lock()]  # jobs going now: never RUNNING, so a turn's strictness and timers don't change
+JOB = contextvars.ContextVar("job", default=None)  # the job this thread works for, None in a turn
+JOBS = {}  # task id: its Job, while it runs or waits on a yes
+JOB_HELD = {}  # task id: the step it holds for your yes, as HELD has a turn's
+SCREEN = threading.Lock()  # held by the one job using the screen
+PLAN_ACTING = [0, threading.Lock()]  # her plans' steps running in a turn now (siri.run_plan): a job keeps off then
+# Seconds: of no key or mouse input before a job takes the screen; waited at most before it goes anyway, if you're
+# not typing that moment (TYPING); a job's question waits this long for its yes (as Hermes' approvals and her
+# questions on the phone do); and one go of a job, which no turn cuts off at siri.SCREEN_WAIT
+LULL, LULL_MOST, TYPING, JOB_HOLD_FOR, JOB_SECONDS = 2.0, 30.0, 0.6, 300.0, 600.0
+JUDGE_MOST = 3  # goes Hermes' goal judge may send a job on for (its /goal allows 20 turns; a voice job is shorter)
+# Steps that need the screen: what goes to the window in front (keys, typing at the cursor, a scroll), a click at a
+# point (click with no id), and what puts a window in front. A click by id is done on the job's own window by UI
+# Automation, with the screen left to you
+SCREEN_STEPS = {"type", "keys", "scroll", "open", "website", "switch"}
+NO_SCREEN = "I'd need the screen for that and didn't have it, so I've left it."
+DONE_ENDS = {"done", "looked", "unverified"}  # how a job's go ends that says it did what it could
+LEFT_ENDS = {"refused", "chat", "sensitive", "gone"}  # left to you: nothing another go of it would change
+
+
+class Yielded(Exception):
+    """A turn of yours started acting while a job had the screen: it lets go and looks again (_rounds)."""
+
+
+class Job:
+    """A job in the background, by its task id: its goal; your words, pinned when you asked (words, named), so
+    nothing said later widens who it may write to or what it may type (lately_said isn't read for it); where it was
+    asked from; its budget of model calls across every go and yes of it; its runs; the question it's waiting on
+    (asked); and its own stop."""
+
+    def __init__(self, task_id, goal, words="", named=False, origin=None):
+        self.id, self.goal, self.words, self.named = int(task_id), str(goal), str(words or goal), bool(named)
+        self.origin = dict(origin or {})
+        self.budget, self.runs, self.continued = IterationBudget(TASK_ROUNDS), [], 0
+        self.tid, self.leased, self.asked = None, False, None
+        # from a run handed over to it (siri.hand_over): the window it worked on, what it got done, whether it read
+        # someone else's words; and where to tell how far it's got (the Tasks tab's progress)
+        self.pin, self.hints, self.read, self.on_progress = None, "", False, None
+        self._stop = threading.Event()
+
+    def progress(self, text):
+        """How far it's got, for the Tasks tab (tasks.db's progress), never in the way of the job."""
+        try:
+            if self.on_progress is not None:
+                self.on_progress(text)
+        except Exception as exc:
+            print(f"  couldn't keep job {self.id}'s progress: {exc!r}")
+
+    def stop(self):
+        """This job stops, and no other: its own flag, and Hermes' interrupt bit for the thread it's on."""
+        self._stop.set()
+        if self.tid is not None:
+            interrupt.set_interrupt(True, self.tid, reason="stopped")
+
+    def cancelled(self):
+        return self._stop.is_set() or interrupt.is_thread_interrupted(self.tid)
+
+
+def job_for(task_id, goal="", words="", named=False, origin=None):
+    """The Job of task_id: the one going or waiting on your yes, else a new one."""
+    job = JOBS.get(int(task_id))
+    if job is None:
+        job = JOBS[int(task_id)] = Job(task_id, goal, words, named, origin)
+    return job
+
+
+def stop_job(task_id):
+    """Stops job task_id, only it, and forgets the step it held. True if there was one going or waiting."""
+    job = JOBS.pop(int(task_id), None)
+    JOB_HELD.pop(int(task_id), None)
+    if job is not None:
+        job.stop()
+    return job is not None
+
+
+def forget_job(task_id):
+    """A job that's over: its held step and its Job go."""
+    JOB_HELD.pop(int(task_id), None)
+    JOBS.pop(int(task_id), None)
+
+
+def _count(cell, n):
+    with cell[1]:
+        cell[0] = max(0, cell[0] + n)
+        return cell[0]
+
+
+def background_jobs():
+    """How many jobs are going now."""
+    return BACKGROUND[0]
+
+
+def plan_acting(n):
+    """One more of her plans acting in a turn (1) or one fewer (-1), siri.run_plan's steps. One more is counted
+    holding ACT: a job's action under way finishes first, and none starts after it (act), so a job's keys never land
+    between a turn's."""
+    got = ACT.acquire(timeout=10) if n > 0 else False
+    try:
+        _count(PLAN_ACTING, n)
+    finally:
+        if got:
+            ACT.release()
+
+
+def turn_acting():
+    """True while a turn of yours acts: a task in an app (RUNNING) or her plan's steps (PLAN_ACTING)."""
+    return RUNNING.is_set() or PLAN_ACTING[0] > 0
+
+
+def needs_screen(s):
+    """True if step s of a job's needs the screen (SCREEN_STEPS, or a click at a point)."""
+    return s.get("do") in SCREEN_STEPS or (s.get("do") == "click" and s.get("id") is None)
+
+
+def front(r=None):
+    """(hwnd, exe, title) of the window run r works on: the one in front, or for a job its own (pin), whether it's
+    in front or not; (None, "", "") for a job that has none yet, never what you have in front."""
+    if r is None or r.job is None:
+        return win.foreground()
+    return win.window_of(r.pin) if r.pin else (None, "", "")
+
+
+def pin(r):
+    """The window a job's look-ups for a control go to, None (the one in front) for a turn's run."""
+    return r.pin if r is not None and r.job is not None else None
+
+
+def site_in(r, exe):
+    """The site run r's window shows: the address bar in front for a turn's run, the job's last read of its own."""
+    if r is not None and r.job is not None:
+        return (r.seen or {}).get("site") if r.pin else None
+    return win.browser_site() if exe in win.BROWSER_EXES else None
+
+
+def _lull(r):
+    """Waits till a job may take the screen: no turn of yours acting, the PC not locked, and no key or mouse input for
+    LULL seconds, or, after LULL_MOST seconds of waiting, none for TYPING (you're not typing that moment)."""
+    began = _clock()
+    while True:
+        if stopped(r):
+            raise Halted()
+        if not turn_acting() and win.session_locked() is not True:
+            idle = win.idle_seconds()
+            if idle >= LULL or (_clock() - began >= LULL_MOST and idle >= TYPING):
+                return
+        _sleep(0.2)
+
+
+@contextlib.contextmanager
+def screen(r):
+    """The screen for job run r, for a burst of steps that need it: one job at a time (SCREEN), after a lull (_lull),
+    its own window brought in front, shown on its row on the island as "Using the screen" (where Stop stops it), and
+    the window you had in front given back after."""
+    while not SCREEN.acquire(timeout=0.2):
+        if stopped(r):
+            raise Halted()
+    try:
+        _lull(r)
+        yours = win.front_window()
+        r.job.leased = True
+        activity.update(activity.KEY.get(), note="Using the screen")
+        r.job.progress("Using the screen")
+        try:
+            if r.pin and win.window_exists(r.pin):
+                win.bring_to_front(r.pin)
+            yield
+        finally:
+            r.job.leased = False
+            activity.update(activity.KEY.get(), note="Working on it")
+            try:
+                if yours and yours != r.pin and win.window_exists(yours):
+                    win.bring_to_front(yours)
+            except Exception as exc:  # the focus not given back is no reason to lose what the job did
+                print(f"  couldn't give the screen back: {exc!r}")
+    finally:
+        SCREEN.release()
+
 
 class Hold(Exception):
     """A step waits for your yes. The message is her question about it."""
@@ -249,6 +437,9 @@ class Run:
         self.task = self.looked = self.own_did = self.nudged = self.skipped = False  # see task and screen_off
         self.budget = self.todo = self.guard = self.skills = None
         self.found, self.warn = [], []
+        self.job, self.pin = JOB.get(), None  # a job in the background's, and the window it works on (front)
+        if self.job is not None:  # your words when you asked for it, never the turn's on this thread
+            self.words, self.named, self.pin = self.job.words, self.job.named, self.job.pin
 
 
 # What a run carried on after your yes (resume) keeps of the one that asked. A job's budget, checklist and guardrail
@@ -256,7 +447,7 @@ class Run:
 CARRIED = ("goal", "name", "proc", "slots", "read", "words", "named", "typed", "before", "base", "base_i", "base_name",
            "hints", "rec", "notes", "trusted", "rounds", "shots", "calls", "full", "did_any", "seen", "shot",
            "before_act", "first", "hwnd", "finishing", "tainted", "alone", "task", "looked", "own_did", "nudged",
-           "budget", "todo", "guard", "skills", "found", "warn", "skipped")
+           "budget", "todo", "guard", "skills", "found", "warn", "skipped", "pin")
 
 
 def start(fresh=True, like=None, **kw):
@@ -266,12 +457,19 @@ def start(fresh=True, like=None, **kw):
     the plan's next task clearing it went on and did that task in full after "Stopping.". One started after its turn
     is over is over from the start, and never becomes the latest run (CURRENT): it can't ask, so it mustn't take the
     place of the one that just did. Not fresh: a run started from inside another (a repair), where a stop said a
-    moment ago still counts. like: the run it carries on from, after your yes."""
+    moment ago still counts. like: the run it carries on from, after your yes. A job's run (JOB) is none of the turn's:
+    it's its job's, clears no stop said to her and never becomes CURRENT, and a go of it has JOB_SECONDS."""
+    job = JOB.get()
+    if job is not None:
+        kw.setdefault("seconds", JOB_SECONDS)
     r = Run(**kw)
     if like is not None:
         for k in CARRIED:
             v = getattr(like, k)
             setattr(r, k, list(v) if isinstance(v, list) else set(v) if isinstance(v, set) else v)
+    if job is not None:
+        job.runs.append(r)
+        return r
     turn = TURN.get()
     with ACT:
         if turn is not None:
@@ -285,7 +483,10 @@ def start(fresh=True, like=None, **kw):
 
 
 def stopped(r):
-    """True once r can't act: its turn is over, she was stopped, or there's no run at all."""
+    """True once r can't act: its turn is over, she was stopped, or there's no run at all. A job's run only by its
+    own stop: "stop" said to her, or another job stopped, leaves it be."""
+    if r is not None and r.job is not None:
+        return r.over or r.job.cancelled()
     return r is None or r.over or STOP.is_set() or (host.HER.stop.is_set() and host.REPLY_TO.get() is None)
 
 
@@ -305,10 +506,14 @@ def close(turn):
 
 
 def act(fn, *args, **kw):
-    """fn(*args, **kw) as an action of this thread's run: holding ACT, and only while the run may act."""
+    """fn(*args, **kw) as an action of this thread's run: holding ACT, and only while the run may act. A job with the
+    screen lets go of it (Yielded) once a turn of yours acts, rather than press keys between its steps."""
     with ACT:
-        if stopped(RUN.get()):
+        r = RUN.get()
+        if stopped(r):
             raise Halted()
+        if r is not None and r.job is not None and r.job.leased and turn_acting():
+            raise Yielded()
         return fn(*args, **kw)
 
 
@@ -334,20 +539,27 @@ def hold(r, i, question, verb, target=None, step=None, no="", focus=False, sendi
     again (target), the question put in ASK for handle(). focus: target is the control with the focus, for keys or
     typing, which must still have it after the yes (still_there). sending: for a send, what outgoing read back, which
     must be what it sends still after the yes. Nothing if r can't act any more: a run still going when you'd moved on
-    asks nothing (what it typed stays, as a draft would). Returns the question, or None."""
+    asks nothing (what it typed stays, as a draft would). A job's step is kept by its task id (JOB_HELD), never in
+    HELD or ASK, and asked about through tasks.db (siri.run_job). Returns the question, or None."""
     with ACT:
         if stopped(r):
             r.steps.append({"do": "hold", "ok": False, "why": "late"})
             return None
-        hwnd, exe, title = win.foreground()
-        HELD.clear()
-        HELD.update(id=os.urandom(6).hex(), run=r, i=i, hwnd=hwnd, exe=exe, title=title, step=step, no=no, verb=verb,
+        hwnd, exe, title = front(r)
+        held = dict(id=os.urandom(6).hex(), run=r, i=i, hwnd=hwnd, exe=exe, title=title, step=step, no=no, verb=verb,
                     focus=bool(focus), sending=sending if sending and sending.get("send") else None,
                     target={k: (target or {}).get(k) for k in ("name", "role", "aid")} if target else None,
-                    until=time.time() + (host.PHONE_WAITS if host.origin() == "phone" else HOLD_FOR))
-        short = f"Should I {verb.split('|')[0]} it?"  # kept in her history in place of the read-back
-        ASK[0] = {"steps": [{"do": "agent_resume", "hold": HELD["id"], "verb": verb}], "say": "", "words": r.words,
-                  "run": r.id, "question": question, "short": short}
+                    until=time.time() + (JOB_HOLD_FOR if r.job is not None else
+                                         host.PHONE_WAITS if host.origin() == "phone" else HOLD_FOR))
+        if r.job is not None:
+            JOB_HELD[r.job.id] = held
+            r.job.asked = {"hold": held["id"], "question": question, "verb": verb}
+        else:
+            HELD.clear()
+            HELD.update(held)
+            short = f"Should I {verb.split('|')[0]} it?"  # kept in her history in place of the read-back
+            ASK[0] = {"steps": [{"do": "agent_resume", "hold": HELD["id"], "verb": verb}], "say": "",
+                      "words": r.words, "run": r.id, "question": question, "short": short}
     r.outcome = "held"
     activity.update(activity.KEY.get(), state="waiting_yes", note="Waiting for your yes")  # its row on the island
     return question
@@ -395,12 +607,12 @@ def still_there(held, r):
         return "I waited too long for that yes, so I've not done it."
     if (held.get("step") or {}).get("do") in OWN_STEPS:  # a fact for her memory: in no window, so none to check
         return ""
-    _, exe, title = win.foreground()
+    _, exe, title = front(r)
     if exe != held["exe"] or not _same_title(title, held["title"]):
         return GONE
     target = held.get("target")
     if target and target.get("name"):
-        if win.find_ui(target["name"], target.get("role"), target.get("aid"), wait=1.0) is None:
+        if win.find_ui(target["name"], target.get("role"), target.get("aid"), hwnd=pin(r), wait=1.0) is None:
             return GONE
     # keys or typing go wherever the focus is when they're done: Enter held with Send focused went to Delete once the
     # focus had moved there, so the control your yes was for must have it still, whatever it's called. With none
@@ -433,17 +645,33 @@ def resume(step, notify=None):
     if time.time() >= host.SEND_OK["until"]:
         return "I only do that after you say yes to my question about it.", []
     host.SEND_OK["until"] = 0.0  # one yes, one action
+    return _resume(held, notify)
+
+
+def resume_job(job, hold, notify=None):
+    """A job's held step, after tasks.db took your yes to it (siri.run_job): only the step that yes was for, by its
+    id, which no other job's yes can carry. None if it's not waiting any more (Jev restarted meanwhile, or another
+    question took its place): the job starts again, and asks again."""
+    held = JOB_HELD.get(job.id)
+    if not held or str(held["id"]) != str(hold):
+        return None
+    JOB_HELD.pop(job.id, None)
+    return _resume(held, notify)
+
+
+def _resume(held, notify=None):
+    """The held step done, then on from there (resume). A job's step that needs the screen is done holding it."""
     live = held.get("step") is not None  # a step she planned live, done here: no later step of hers is approved
     r = start(like=held["run"], approved=-1 if live else held["i"])
     token = RUN.set(r)
     try:
-        why = still_there(held, r)
-        if why:
-            return finish(r, "gone", why), []
-        if live:
-            line = do_held(r, held)
-            if line is not None:
-                return line, _did(r)
+        if r.job is not None and live and needs_screen(held["step"]):
+            with screen(r):
+                line = _yes_step(r, held, live)
+        else:
+            line = _yes_step(r, held, live)
+        if line is not None:
+            return line, _did(r)
         if r.proc is not None:  # a procedure: on from the step after a look step's, or from the held step itself
             return replay(r, held["i"], notify), _did(r)
         # that was the last of it: is it done? Not a job with parts of its checklist still open: on with those
@@ -453,8 +681,19 @@ def resume(step, notify=None):
         return _go(r, notify), _did(r)
     except Halted:
         return finish(r, "stopped"), []
+    except Yielded:  # you started a turn as it went to do it: not done, and it'll ask again if it comes to it
+        return finish(r, "gone", "You were using the PC, so I've not done that."), []
     finally:
         RUN.reset(token)
+
+
+def _yes_step(r, held, live):
+    """The step your yes was for, if it's still what you said yes to (still_there): what she says if that ended the
+    run, else None to go on."""
+    why = still_there(held, r)
+    if why:
+        return finish(r, "gone", why)
+    return do_held(r, held) if live else None
 
 
 def _did(r):
@@ -474,7 +713,7 @@ def do_held(r, held):
         return None
     try:
         if do == "click":
-            el = win.find_ui(target.get("name"), target.get("role"), target.get("aid"))
+            el = win.find_ui(target.get("name"), target.get("role"), target.get("aid"), hwnd=pin(r))
             if el is None:
                 return finish(r, "gone", GONE)
             act(win.ui_act, el, s.get("text"), s.get("state"))
@@ -496,7 +735,7 @@ def do_held(r, held):
                 return finish(r, "gone", GONE)
             act(win.ui_act, focus["el"], str(s.get("text") or ""), caret=True)
             note_typed(s.get("text"))
-    except Halted:
+    except (Halted, Yielded):
         raise
     except Exception as exc:  # the app went away under it, or UI Automation gave up: it may have gone through
         print(f"  held step failed: {exc!r}")
@@ -947,7 +1186,8 @@ def _window_part(r, scope, typed):
     # already: a compose address's "to, subject and body" in one, its To a chip by then
     there = set(re.findall(r"\w+", " ".join([value for _, value in boxes] + chips).lower()))
     texts = [value for _, value in boxes] + [t for t in typed if not set(re.findall(r"\w+", t.lower())) <= there]
-    heard = f"{r.words} {lately_said()}"
+    # a job's own words only, pinned when you asked for it: a turn since can't add who it may send to
+    heard = r.words if r.job is not None else f"{r.words} {lately_said()}"
     stray = None if REPLYING.search(str(r.words or "")) else next((a for a in to if not allowed_email(a, heard)), None)
     return {"send": True, "texts": texts, "to": to, "stray": stray, "el": scope, "typed": typed}
 
@@ -989,7 +1229,8 @@ def read_back(r, s, el=None, out=None):
     said = " ".join(" ".join(t.split()) for t in out["texts"])
     parts = [f"It says: \u201c{said}\u201d."] if said and s.get("text") is None else []
     parts += [f"To {spoken(a)}." for a in out["to"]]
-    site = win.browser_site()
+    # a job's own window's site, never the one you have in front
+    site = site_in(r, front(r)[1]) if r.job is not None else win.browser_site()
     parts.append(f"Should I {_what(s, el)}{' on ' + site if site else ''}?")
     return " ".join(parts)
 
@@ -1170,8 +1411,8 @@ def gate(r, i, s, el=None, checked=False, trusted=()):
     passed. trusted: sites the procedure itself goes to, and the run opened."""
     do, text = s.get("do"), s.get("text")
     trusted = set(trusted) | r.trusted
-    _, exe, title = win.foreground()
-    site = win.browser_site() if exe in win.BROWSER_EXES else None
+    _, exe, title = front(r)  # a job's own window, wherever it is
+    site = site_in(r, exe)
     url_site = win.site_of(s.get("url")) if do == "website" else None
     target = str(s.get("app") or s.get("to") or "") if do in ("open", "switch") else ""  # a window by name
     if chat_in_front(exe, title, site) or CHAT_SITES.search(str(s.get("url") or "")) or CHAT_APPS.search(target):
@@ -1357,11 +1598,11 @@ def _seen(s, r=None):
     """True if the screen shows what expect step s is for: the app, the site, the title, a control there with a value
     in it or switched on or off, a control gone. Gone only on a clean read of the window run r last acted in, or of
     the one in front once that's closed (Outlook's new mail closes on Send)."""
-    hwnd, exe, title = win.foreground()
+    hwnd, exe, title = front(r)  # a job's own window, in front or not
     if s.get("exe") and exe != str(s["exe"]).lower():
         return False
     if s.get("site"):
-        site = win.browser_site() or ""
+        site = (site_in(r, exe) if r is not None and r.job is not None else win.browser_site()) or ""
         if site != s["site"] and not site.endswith("." + s["site"]):
             return False
     if s.get("title") and str(s["title"]).lower() not in title.lower():
@@ -1369,7 +1610,7 @@ def _seen(s, r=None):
     if s.get("has"):
         # any control by that name that shows it, not just the first: Settings' Night light card is named like its
         # switch, and comes before it, so a switch turned on was checked on the card and taken as not done
-        if not any(_holds(s, el) for el in win.find_all_ui(s["has"], s.get("role"))):
+        if not any(_holds(s, el) for el in win.find_all_ui(s["has"], s.get("role"), hwnd=pin(r))):
             return False
     if s.get("gone"):
         # another window in front has no Send in it either: Outlook's "couldn't send" box in front of the new mail
@@ -1379,7 +1620,7 @@ def _seen(s, r=None):
         if worked and hwnd != worked and win.window_exists(worked):
             return False
         try:  # only a clean read says it went: a timed-out one passed a Send Gmail had refused as a sent mail
-            if win.find_ui(s["gone"], s.get("role"), unique=False, strict=True) is not None:
+            if win.find_ui(s["gone"], s.get("role"), hwnd=pin(r), unique=False, strict=True) is not None:
                 return False
         except Exception as exc:
             print(f"  couldn't read the window: {exc!r}")
@@ -1684,9 +1925,10 @@ def task(step, notify=None, before=(), alone=True):
     there's no screen to work on. before, alone: see look. Returns (what to say, what was done)."""
     goal = " ".join(str(step.get("goal") or step.get("task") or "").split())
     r = start(goal=goal, read=step.get("read"), before=[s for s in before if s.get("do") in ("open", "website")],
-              alone=alone)
+              alone=alone, hints=" ".join(str(step.get("hints") or "").split())[:300])  # a hand-over's, code's
     r.task, r.full = True, bool(before)
-    r.budget, r.todo = IterationBudget(TASK_ROUNDS), TodoStore()
+    # a job in the background has one budget for all its goes and yeses (Job.budget), the judge's calls included
+    r.budget, r.todo = r.job.budget if r.job is not None else IterationBudget(TASK_ROUNDS), TodoStore()
     # hard stops on: nobody watches each call as on Hermes' own command line. Look-ups are its read-only calls
     # (a 5th identical result is blocked), steps on the screen and her own things the ones that change something
     r.guard = ToolCallGuardrailController(ToolCallGuardrailConfig(hard_stop_enabled=True,
@@ -1733,6 +1975,93 @@ def dispatch(step, notify=None, before=(), alone=True):
         return look(step, notify, before, alone)
     finally:
         _busy(-1)
+
+
+def background(job, hold=None, notify=None):
+    """A go of job, on its worker's thread (siri.run_job): from the step your yes was for (hold, its id, as tasks.db
+    approved it: resume_job) or from the start, then judged (_judged). Never holds busy, never sets RUNNING: it's
+    counted in BACKGROUND. Returns (what she says, how it ended: done, held, stopped, blocked or failed)."""
+    token = JOB.set(job)
+    job.tid = threading.get_ident()
+    interrupt.set_interrupt(False)  # a bit left on this pooled thread by a job stopped before is no stop of this one
+    _count(BACKGROUND, 1)
+    try:
+        if job.cancelled():
+            return "", "stopped"
+        got = resume_job(job, hold, notify) if hold is not None else None
+        if got is None:
+            JOB_HELD.pop(job.id, None)  # a yes to a step that's gone: it starts again, and asks again
+            got = task({"do": "task", "goal": job.goal, "hints": job.hints, "read": job.read}, notify)
+        return _judged(job, got[0], notify)
+    except Halted:
+        return "", "stopped"
+    finally:
+        _count(BACKGROUND, -1)
+        interrupt.set_interrupt(False)
+        job.tid = None
+        JOB.reset(token)
+
+
+def _judged(job, line, notify=None):
+    """How a job's go ended, put to Hermes' goal judge (judge) when that's in doubt: done stays done (agent.done
+    checked it on the screen, and only then learned from it), blocked ends it, continue sends it on, up to JUDGE_MOST
+    times while its budget lasts. A step held for your yes, a stop, or what it left to you (LEFT_ENDS) isn't judged.
+    Returns (what she says, done, held, stopped, blocked or failed)."""
+    while True:
+        r = job.runs[-1] if job.runs else None
+        out = r.outcome if r is not None else "failed"
+        if out == "held":
+            return line, "held"
+        if out == "stopped" or job.cancelled():
+            return line, "stopped"
+        ended = "done" if out in DONE_ENDS else "failed"
+        if out in LEFT_ENDS or job.continued >= JUDGE_MOST or job.budget.remaining <= 0:
+            return line, ended
+        verdict = judge(job, r, line)
+        if verdict == "blocked":
+            return line, "blocked"
+        if verdict != "continue":
+            return line, ended
+        job.continued += 1
+        print(f"  job {job.id}: the judge sent it on ({job.continued} of {JUDGE_MOST})")
+        line = carry_on(job, r, notify)
+
+
+def judge(job, r, line):
+    """Hermes' goal judge, one text-only call (its JUDGE_SYSTEM_PROMPT and JUDGE_USER_PROMPT_TEMPLATE, goal_bits): is
+    the goal done, blocked, or is there a next step to take? Told what she'd say and what code noted she did. A wait
+    is taken as continue; no answer, or no budget for it, as done: nothing more is tried."""
+    if not job.budget.consume():
+        return "done"
+    said = " ".join([str(line or "")] + (["Done so far: " + "; ".join(r.notes[-8:]) + "."] if r.notes else [])
+                    + [f"(It ended: {r.outcome}.)"])
+    ask = goal_bits.JUDGE_USER_PROMPT_TEMPLATE.format(
+        goal=job.goal, response=goal_bits._truncate(said, goal_bits._JUDGE_RESPONSE_SNIPPET_CHARS),
+        background_block="", current_time=time.strftime("%A %d %B %Y, %H:%M"))
+    try:
+        raw, _, _ = host.ask_alone([{"role": "system", "content": goal_bits.JUDGE_SYSTEM_PROMPT},
+                                    {"role": "user", "content": ask}], deadline=20.0, cap=15.0)
+    except Exception as exc:
+        print(f"  job {job.id}: the judge didn't answer ({exc!r})")
+        return "done"
+    verdict, why, _, _ = goal_bits._parse_judge_response(raw)
+    print(f"  job {job.id}: judged {verdict} ({why[:100]})")
+    return "continue" if verdict == "wait" else verdict
+
+
+def carry_on(job, r, notify=None):
+    """Another go of job from where run r left it, told Hermes' line for carrying on toward a goal: its checklist,
+    notes, what it found and its window carried over, its rounds counted afresh. Returns what she says."""
+    nxt = start(like=r)
+    nxt.rounds, nxt.stuck, nxt.finishing, nxt.nudged = 0, 0, None, False
+    nxt.hints = goal_bits.CONTINUATION_PROMPT_TEMPLATE.format(goal=job.goal)
+    token = RUN.set(nxt)
+    try:
+        return _go(nxt, notify)
+    except Halted:
+        return finish(nxt, "stopped")
+    finally:
+        RUN.reset(token)
 
 
 # --------------------------------------------------------------------------- A task done live: look, think, act
@@ -1888,25 +2217,42 @@ def _rounds(r, notify=None):
                 return done(r, reply)
             if r.task and (worked or reply.get("done")):  # its checklist or a note written: on to the next part
                 continue
-            if r.look or not obs["full"]:  # to see the window in front, or a screenshot of it
+            # to see the window in front, or a screenshot of it. A job with no window of its own has nothing more to
+            # see: it was told so (screen_text), and no steps is its answer
+            if (r.look or not obs["full"]) and (obs["full"] or not obs.get("own")):
                 r.full = True
                 continue
             return finish(r, "stuck", host.tidy(reply.get("say")) or "I couldn't see how to do that, so I've stopped.")
-        for n, s in enumerate(steps):
-            line, before = guard_before(r, s), len(r.steps)
-            if line is not None:
-                return line
-            ok = do_one(r, s, obs, shot, reply if n == len(steps) - 1 and reply.get("done") else None)
-            line = guard_after(r, s, r.steps[before:])
-            if line is not None:
-                return line
-            if not ok:
-                break  # the window changed: look again before anything else
-        else:
-            if reply.get("done") and not not_yet(r):
-                return done(r, reply)
-        pause(settle(steps))
+        try:  # a job's steps that need the screen are done holding it, the round's together, and settle there too
+            with screen(r) if r.job is not None and any(needs_screen(s) for s in steps) else contextlib.nullcontext():
+                line = act_round(r, steps, obs, shot, reply)
+        except Yielded:  # a turn of yours started acting: it lets go of the screen, and looks again
+            r.notes.append("let go of the screen as you were using the PC")
+            continue
+        if line is not None:
+            return line
     return finish(r, "budget", "That's as far as I got" + (f": I {r.notes[-1]}." if r.notes else "."))
+
+
+def act_round(r, steps, obs, shot, reply):
+    """A round's steps, each through the guardrail and done on the window she saw (do_one), then the screen let
+    settle. A job's window is what's in front once it opened or switched to one. Returns what she says if that ended
+    the run, else None."""
+    for n, s in enumerate(steps):
+        line, before = guard_before(r, s), len(r.steps)
+        if line is not None:
+            return line
+        ok = do_one(r, s, obs, shot, reply if n == len(steps) - 1 and reply.get("done") else None)
+        line = guard_after(r, s, r.steps[before:])
+        if line is not None:
+            return line
+        if not ok:
+            break  # the window changed: look again before anything else
+    else:
+        if reply.get("done") and not not_yet(r):
+            return done(r, reply)
+    pause(settle(steps))
+    return None
 
 
 # --------------------------------------------------------------------------- A job's own: look-ups, notes, checklist
@@ -2138,6 +2484,8 @@ def progress(r):
         return False
     at = min(len(items), sum(i["status"] == "completed" for i in items) + 1)
     activity.step(at, len(items), f"Part {at} of {len(items)}")
+    if r.job is not None:  # and in the Tasks tab, for a job in the background
+        r.job.progress(f"Part {at} of {len(items)}")
     return True
 
 
@@ -2177,15 +2525,21 @@ def observe(r):
     when UI Automation was too slow for the window: a screenshot will do. Controls giving her orders taint the run,
     which she then never learns from. A job (task) reads only the title till it opens something or asks to look:
     one with no app in it is done with no controls read and no screenshot; one that reads a page is a run that read
-    (r.read)."""
-    hwnd, exe, title = win.foreground()
-    site = win.browser_site() if exe in win.BROWSER_EXES else None
+    (r.read). A job in the background reads only its own window (front, Run.pin), in front or not, never yours: with
+    none yet, nothing at all (own), till it opens one."""
+    own = r.job is not None
+    hwnd, exe, title = front(r)
+    if own and hwnd is None:
+        r.pin = None  # closed: it opens or switches to what it needs again
+    site = None if own else win.browser_site() if exe in win.BROWSER_EXES else None
     obs = {"hwnd": hwnd, "exe": exe, "title": title, "site": site, "items": None, "focus": None, "total": None,
-           "focused": None, "cut": False, "full": r.full or (not r.task and sees_window(r, exe, title, site))}
+           "focused": None, "cut": False, "own": own,
+           "full": hwnd is not None if own else r.full or (not r.task and sees_window(r, exe, title, site))}
     if obs["full"]:
         r.full = True
         r.looks += 1
-        host.LAST_SCREEN[0] = time.time()  # "now click the second one" carries on without her name
+        if not own:
+            host.LAST_SCREEN[0] = time.time()  # "now click the second one" carries on without her name
         snap = win.ui_snapshot(hwnd)
         if snap is not None:  # total and focused: what's past the controls she reads changes too (unchanged); cut:
             # some left out, so a name once in items may be twice in the window (_twins)
@@ -2249,8 +2603,8 @@ def wants_shot(r, obs):
 def capture(r):
     """A screenshot of the screen in front for this round's model call: never kept, only sent. None if Windows
     wouldn't give one (a lock screen, a UAC prompt), and she goes by the controls."""
-    try:
-        shot = vision.capture()
+    try:  # a job's own window, as it looks behind others too: never the screen you're using
+        shot = vision.of_window(r.pin) if r.job is not None else vision.capture()
     except Exception as exc:
         print(f"  no screenshot: {exc!r}")
         return None
@@ -2280,12 +2634,15 @@ def unchanged(r, obs, shot):
 def ask(r, obs, shot, task=None):
     """The model's next steps for what she sees: its reply (siri.parse_plan's, with look, done, expect and say), or
     None if it didn't answer in time. A round with a screenshot gets vision's slower timing, and siri.ask_model the
-    model that sees; a text round Ling's quick one. Neither longer than the run has left."""
+    model that sees; a text round Ling's quick one. Neither longer than the run has left. A job in the background
+    asks quietly (siri.ask_alone): never hedged, never while a turn thinks, backing off a model told to wait."""
     left = r.deadline - time.time()
     timing = {"deadline": min(45.0, left), "hedge_after": 20, "cap": 40} if shot is not None else \
         {"deadline": min(14.0, left), "hedge_after": 4, "cap": 12}
     began = time.time()
     r.rounds += 1
+    if r.job is not None:  # in the background: one try at a time on its own thread, after a turn's (siri.ask_alone)
+        timing["quiet"] = True
     try:
         _, reply, usage, model = host.ask_plan(messages(r, obs, shot, task), **timing)
     except Exception as exc:  # out of time, or the model isn't answering
@@ -2371,6 +2728,10 @@ def screen_text(obs, shot=None):
     if not obs["full"] and SENSITIVE.search(title):
         title = "a sign-in or payment page"
     where = f"In front: {_masked(title)} ({obs['exe'] or 'no program'}{', ' + obs['site'] if obs['site'] else ''})."
+    if obs.get("own"):  # a job in the background: its own window, whatever's in front of you
+        where = "Your window: " + where.removeprefix("In front: ")
+        if not obs["full"]:
+            return "You have no window open yet: open or switch to what the task needs, or no steps if it needs none."
     if not obs["full"]:
         return where + " Its controls aren't shown: open what the task needs, or no steps to see this window."
     if obs["items"] is None:
@@ -2418,8 +2779,15 @@ def do_one(r, s, obs, shot, finishing=None, at=-1):
     title changed (a new tab, a page that loaded), False, to look again first. Its control is as it is now, not as the
     snapshot had it; it passes the gate (gate_vision) and is done holding ACT (act), then kept for learning (record).
     finishing: the reply this is the last step of, which said the task's done, kept for after your yes if it's held.
-    at: see gate_vision. True once done."""
-    hwnd, _, title = win.foreground()
+    at: see gate_vision. True once done. A job's step on its own window, in front or not; one that needs the screen
+    only while it has it (screen), never else (NO_SCREEN), and only with its window still in front: you may have
+    taken the focus back meanwhile."""
+    screens = r.job is not None and needs_screen(s)
+    if screens and not r.job.leased:
+        raise Refused(NO_SCREEN)
+    hwnd, _, title = front(r)
+    if screens and s["do"] not in OPENS and win.front_window() != hwnd:
+        return False
     if hwnd != obs["hwnd"] or title != obs["title"]:
         # she looks again, and the model sees what's in front now. A window that wasn't the one she'd looked at,
         # twice, used to stop her with "You're using the PC, so I've stopped": on 22 to 25 October it was every time
@@ -2459,7 +2827,7 @@ def do_one(r, s, obs, shot, finishing=None, at=-1):
     twins = _twins(obs, el) if do in ("click", "type") else None  # before she acts: a Send's gone after it
     try:
         result = pause(s.get("seconds") or 1) if do == "wait" else act(perform, s, el, point)
-    except Halted:
+    except (Halted, Yielded):
         raise
     except Exception as exc:  # RuntimeError: why, as she'd say it; else the app or UI Automation gave up on it
         print(f"  agent step failed: {exc!r}")
@@ -2468,6 +2836,9 @@ def do_one(r, s, obs, shot, finishing=None, at=-1):
         return False
     r.finishing, r.acted, r.did_any, r.full = None, True, True, True  # from here on, the window she's working in
     r.hwnd = None if do in OPENS else obs["hwnd"]  # what opened is a window she's yet to read
+    if r.job is not None and do in OPENS:  # what it opened or switched to, in front now, is its own window from here
+        pause(host.WAIT_AFTER.get(do, 0.5))
+        r.pin = win.front_window()
     text = s.get("text") if do in ("type", "click") else None
     if text is not None:
         note_typed(text)
@@ -2488,7 +2859,9 @@ def perform(s, el, point):
     or opening an app or a site (siri.do_step). Returns what ui_act says happened, or the step."""
     do = s["do"]
     if do == "click" and point is None:
-        if s.get("text") is not None:
+        # a job fills in a box of its own window by its Value, never at the cursor in yours: the gate judged its
+        # window's program already (a command window refused there), so what you have in front isn't in it
+        if s.get("text") is not None and (RUN.get() is None or RUN.get().job is None):
             host.not_into_shell()
         return win.ui_act(el["el"], s.get("text"), s.get("state") if s.get("state") in ("on", "off") else None)
     if do == "click":
@@ -3053,6 +3426,7 @@ def log(r):
                        "steps": steps,
                        "calls": r.calls, "shots": r.shots, "outcome": r.outcome, "tainted": r.tainted,
                        **({"job": True, "lookups": len(r.found), "read": r.looked} if r.task else {}),
+                       **({"background": r.job.id} if r.job is not None else {}),
                        "ms": int((time.time() - r.started) * 1000)}, ensure_ascii=False)
     path = win.log_path("agent.jsonl")
     try:

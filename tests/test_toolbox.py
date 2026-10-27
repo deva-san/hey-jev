@@ -48,8 +48,9 @@ OLD_READ_WITH = {"web", "read", "news", "messages", "picture"}  # what made thin
 # the look-ups added with the registry, each a function she already had
 NEW_LOOKS = {"selected_files", "installed_apps", "top_apps", "where", "open_windows", "clipboard"}
 # a job of several parts and its own checklist (agent.task, 27 October): known to the planner, said first like a
-# task on the screen, and nothing else
-NEW_JOB = {"task", "todo_list"}
+# task on the screen, and nothing else; and the same job in the background (siri.queue_job), made a task row before
+# anything runs, so it's in no other set
+NEW_JOB = {"task", "todo_list", "background"}
 
 
 class Golden(unittest.TestCase):

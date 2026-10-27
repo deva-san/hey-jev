@@ -83,6 +83,8 @@ WIN_ACTIONS = (
     # and her look-ups of 27 October (siri.LOOK_STEPS): the files selected in the real File Explorer, and what's on
     # the real clipboard, which may be a password just pasted
     "selected_files", "clipboard_text",
+    # and what a job in the background reads (27 October): its own window, where it is, and how long since you typed
+    "window_of", "window_rect", "idle_seconds",
 )
 WIN_ORIGINAL = {}  # the real ones, for a test of one that never lets it reach the PC (it patches what that calls)
 for _name in WIN_ACTIONS:
