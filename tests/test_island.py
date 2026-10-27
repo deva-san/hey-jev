@@ -587,12 +587,12 @@ class Capsule(unittest.TestCase):
         buf, (x0, y0, x1, y1) = painted(isl, isl._idle())
         self.assertTrue((buf[..., :3].max(-1) <= buf[..., 3]).all())  # premultiplied, as Windows needs
         cy = int((y0 + y1) / 2)
-        colour, a = straight(buf[cy, int(x1 - 5 * isl.k)])  # bare glass, right of the clock
+        colour, a = straight(buf[cy, int(x1 - 5 * isl.k)])  # bare glass, in the round end right of her eyes
         self.assertAlmostEqual(a, 0.78, delta=0.02)
         self.assertLess(np.abs(colour - 0.13).max(), 0.03)
         line, _ = straight(buf[int(y0), int((x0 + x1) / 2)])  # the top edge: the light hairline over the glass
         self.assertGreater(line.min(), colour.max() + 0.08)
-        self.assertEqual(buf[int(y0):int(y1), int(x0):int(x1), 3].max(), 255)  # her face and the time: solid
+        self.assertEqual(buf[int(y0):int(y1), int(x0):int(x1), 3].max(), 255)  # her eyes: solid
 
     def test_light_glass(self):
         isl = self.capsule(theme_name="light")
@@ -604,26 +604,28 @@ class Capsule(unittest.TestCase):
         line, _ = straight(buf[int(y0), int((x0 + x1) / 2)])
         self.assertLess(line.max(), colour.min() - 0.08)  # a dark hairline on light glass
 
-    def test_idle_is_her_eyes_and_the_time_and_waits_for_the_minute(self):
+    def test_idle_is_just_her_eyes_and_waits_for_her_next_blink(self):
+        """27 October: the owner asked for the time to go from the island; her eyes alone, in the middle."""
         isl = self.capsule()
         lay = isl._idle()
         self.assertEqual((lay.kind, lay.face, lay.eyes, lay.wander, lay.animated, lay.rate),
                          ("idle", True, "open", True, False, 0))
         col = drawn(lay)
         h, w = col.shape[:2]
-        self.assertGreater((col[:, :w // 3].min(-1) > 0.9).sum(), 20)  # her eyes on the left
-        self.assertGreater(col[:, w // 2:].max(), 0.9)  # the time on the right
+        lit = np.nonzero((col.min(-1) > 0.9).any(0))[0]  # the columns with the whites of her eyes
+        self.assertAlmostEqual((lit[0] + lit[-1]) / 2, w / 2, delta=2)  # in the middle: nothing beside them
+        self.assertLess(lay.w, 80 * isl.k)
         now = time.time()
         e = isl.eyes
         e.next_blink, e.next_look, e.blink_at, e.mood = now + 1000, now + 1000, None, None
         e.look, e.target, e.look_v = [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]
-        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), 60.02 - now % 60, places=3)  # nothing till then
+        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), 1000, places=3)  # nothing till then: no minute
         e.next_blink = now + 3
-        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), min(3, 60.02 - now % 60), places=3)  # a blink
+        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), 3, places=3)  # a blink
         e.next_look = now + 2
-        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), min(2, 60.02 - now % 60), places=3)  # a glance
+        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), 2, places=3)  # a glance
         isl.look_at = (0.5, 0.2)  # while the mouse moves her eyes, no glance of her own is waited for
-        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), min(3, 60.02 - now % 60), places=3)
+        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), 3, places=3)
         isl.look_at = None
         e.target = [0.9, 0.0]  # on her way to look somewhere: every frame till she's there
         self.assertEqual(isl._capsule_wait(now, lay, False), 0.016)

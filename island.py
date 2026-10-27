@@ -10,8 +10,8 @@ AMOLED (pure black) themes, its place, size and corners, and the plugins are all
 
 Two styles (27 October 2026): the glass capsule, the default, floats a little under the top of the screen, see-through
 with a hairline round it, and has her glowing eyes, the pill's own, looking at the mouse while it moves and glowing in
-the colour of what she's doing, with the time beside her when nothing's on; and the black pill it was before, drawn
-exactly as it was. A small cartoon face was tried in the capsule first and put away the same day: the owner found the
+the colour of what she's doing, and nothing else beside them when nothing's on; and the black pill it was before,
+drawn exactly as it was. A small cartoon face was tried in the capsule first and put away the same day: the owner found the
 eyes more alive.
 
 It's one layered window drawn with numpy, like bubble.Island: clicks go through it except while you point at its
@@ -1124,16 +1124,10 @@ class DynamicIsland:
                       wander=wander, press=press, face=True)
 
     def _capsule_idle(self):
-        """Nothing going on: her eyes, glancing about or at the mouse while it moves, and the time. Drawn again when
-        the minute changes, she blinks or glances, a reaction comes and goes or the mouse moves her eyes a pixel,
-        and never in between."""
-        k, th = self.k, self.theme()
-        font = self.f_compact
-
-        def clock(cv, x, cy, a, now):
-            cv.text(font.render(time.strftime("%H:%M", time.localtime(now))), x - 2, cy - font.line / 2 - 1,
-                    th["text"], a)
-        return self._capsule(("idle",), "idle", [self._face("open"), (font.measure("88:88") + k, clock)])
+        """Nothing going on: just her eyes, glancing about or at the mouse while it moves. Drawn again when she
+        blinks or glances, a reaction comes and goes or the mouse moves her eyes a pixel, and never in between. The
+        time was beside them till the owner asked for it to go (27 October)."""
+        return self._capsule(("idle",), "idle", [self._face("open")])
 
     def _ink(self, colour):
         """A colour for words on the glass: as it is on dark glass, darker on light glass, where amber "40%" was
@@ -1348,8 +1342,8 @@ class DynamicIsland:
     def _capsule_wait(self, now, lay, moving):
         """Seconds till the capsule's next frame: at once while it moves, she blinks or her eyes are on their way
         somewhere, 30 a second while the dots go with a voice or hearts beat, once a second for a long job, and
-        otherwise only at her next blink or glance about, when a reaction ends or the minute changes (the clock),
-        with the mouse moving her eyes by _follow in between. Never a frame for nothing."""
+        otherwise only at her next blink or glance about or when a reaction ends, with the mouse moving her eyes by
+        _follow in between. Never a frame for nothing."""
         e = self.eyes
         if moving or e.blink_at is not None or self._looking():
             return 0.016
@@ -1369,8 +1363,6 @@ class DynamicIsland:
             if lay.wander and self.look_at is None:  # and her next glance about, when the mouse isn't moving her
                 due = min(due, e.next_look)
             wait = min(wait, max(0.016, due - now))
-        if lay.kind == "idle":
-            wait = min(wait, 60.02 - now % 60)
         return wait
 
     def _follow(self, x, y, now):
