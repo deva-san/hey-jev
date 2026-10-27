@@ -24,6 +24,7 @@ import time
 from urllib.parse import parse_qsl, quote, unquote, urlsplit, urlunsplit
 
 import activity
+import outcomes
 import vision
 import winplatform as win
 from hermes_memory import skills
@@ -1908,6 +1909,9 @@ def messages(r, obs, shot, task=None):
     what was done and what didn't work), the last 8 things she did, a nudge when that changed nothing, and the window
     in front (screen_text), with the screenshot on a screenshot round."""
     lines = [f"Task: {task or r.goal}"] + ([r.hints] if r.hints else [])
+    lessons = host.lessons_for(obs.get("site") or obs.get("exe"))
+    if lessons:  # what her review learned from tasks that went wrong in this app before (siri.learn_lesson)
+        lines.append(f"Her own notes from earlier tries in this app, hints only: {lessons}")
     if r.notes:
         lines.append("Done so far: " + "; ".join(r.notes[-8:]) + ".")
     if r.stuck:
@@ -2535,9 +2539,18 @@ def _hash(text):
     return hashlib.sha1(str(text).encode("utf-8")).hexdigest()[:8]
 
 
+# How a run ends that a lesson can be learned from (siri.learn_lesson): stuck, out of rounds or time, refused, or
+# done but not seen to be. Not "failed", a step the code itself couldn't do (a window gone, an error), which a
+# procedure's repair handles; not "stopped" or "held", where you decided
+LESSON_ENDS = {"stuck", "budget", "refused", "unverified"}
+COUNTED_ENDS = {"done", "failed", "stuck", "budget", "unverified", "gone"}  # a procedure's run counted in outcomes
+LAST_FAILURE = {"app": "", "at": 0.0}  # the app of the last run that ended in LESSON_ENDS, for siri's learn_later
+
+
 def finish(r, outcome, line=""):
     """The end of a run: how it went, in its procedure's stats and in the log, once. Returns line, what she says,
-    with a procedure put away for failing again said so."""
+    with a procedure put away for failing again said so. Also in her outcomes (outcomes.py): a procedure's run,
+    and a run that ended in LESSON_ENDS with the app it was in, for her review to learn a lesson from."""
     if r.finished:
         return line
     r.outcome, r.finished = outcome, True
@@ -2549,8 +2562,40 @@ def finish(r, outcome, line=""):
         if r.archived:
             line = (line + " " if line else "") + \
                 "That's not worked a few times now, so I'll work it out afresh next time."
+    try:
+        _note_outcome(r, line)
+    except Exception as exc:  # bookkeeping: never in the way of what she says about the run
+        print(f"  couldn't keep how the task went: {exc!r}")
     log(r)
     return line
+
+
+def run_app(r):
+    """The app a run worked in: the site in front, else its program, from what she saw last, else first."""
+    seen, first = r.seen or {}, r.first or ("", "", None)
+    return seen.get("site") or seen.get("exe") or first[2] or first[0] or ""
+
+
+def _note_outcome(r, line):
+    """A procedure's run counted (outcomes.count), and a run that fell short of what you asked kept against its app
+    (outcomes.failed_run), for her review. Not one where the app was in the way (env, like Gmail signed out), as
+    _note_run has it, and only an untainted one that read nothing: a page or a message could have steered it there,
+    and its words aren't yours."""
+    if r.name and r.outcome in COUNTED_ENDS and not (r.env and r.outcome != "done"):
+        outcomes.count(r.name, r.outcome == "done")
+    app = run_app(r)
+    if r.outcome in LESSON_ENDS and app and not (r.tainted or r.read or r.env):
+        outcomes.failed_run(app, _logged_goal(r), r.outcome, line)
+        LAST_FAILURE.update(app=outcomes.app_key(app), at=time.time())
+
+
+def _logged_goal(r):
+    """The run's task as the log and her outcomes keep it: what it typed, and its slots, as their length only."""
+    goal = r.goal
+    for text in sorted({" ".join(t.split()) for t in r.typed if t.strip()} | {str(v) for v in r.slots.values() if v},
+                       key=len, reverse=True):  # a live run's task has what it typed in it, like a mail's words
+        goal = goal.replace(text, f"<{len(text)} chars>")
+    return goal
 
 
 def log(r):
@@ -2565,11 +2610,8 @@ def log(r):
         if "typed" in s:
             s["typed"] = f"{len(s['typed'])} chars {_hash(s['typed'])}"
         steps.append({k: v for k, v in s.items() if v not in (None, "")})
-    goal = r.goal
-    for text in sorted({" ".join(t.split()) for t in r.typed if t.strip()} | {str(v) for v in r.slots.values() if v},
-                       key=len, reverse=True):  # a live run's task has what it typed in it, like a mail's words
-        goal = goal.replace(text, f"<{len(text)} chars>")
-    line = json.dumps({"at": round(r.started), "goal": goal, "procedure": r.name or r.base_name or None, "steps": steps,
+    line = json.dumps({"at": round(r.started), "goal": _logged_goal(r), "procedure": r.name or r.base_name or None,
+                       "steps": steps,
                        "calls": r.calls, "shots": r.shots, "outcome": r.outcome, "tainted": r.tainted,
                        "ms": int((time.time() - r.started) * 1000)}, ensure_ascii=False)
     path = win.log_path("agent.jsonl")
