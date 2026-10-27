@@ -476,11 +476,11 @@ class MemoryPatch(Home):
 
     def setUp(self):
         super().setUp()
-        self.store = hermes_memory.MemoryStore()
+        self.store = hermes_memory.store()
         hermes_memory.memory_tool(self.store, "add", "user", "Lives in Hyderabad, drinks chai, works at CareerID.")
 
     def entries(self):
-        store = hermes_memory.MemoryStore()
+        store = hermes_memory.store()
         store.load_from_disk()
         return store._entries_for("user")
 
@@ -511,7 +511,7 @@ class MemoryPatch(Home):
         path = pathlib.Path(hermes_memory.get_memory_dir(), "USER.md")
         pasted = "Notes pasted from somewhere else, all one line. " * 50  # longer than the whole store may be
         path.write_text(path.read_text(encoding="utf-8") + "\n" + pasted, encoding="utf-8")
-        result = hermes_memory.memory_tool(hermes_memory.MemoryStore(2200, 1375), "replace", "user",
+        result = hermes_memory.memory_tool(hermes_memory.store(), "replace", "user",
                                            "Lives in Pune.", old_text="Hyderabad")
         self.assertFalse(result["success"])
         backup = pathlib.Path(result["drift_backup"])

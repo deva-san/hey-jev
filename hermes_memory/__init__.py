@@ -5,8 +5,8 @@ memory_store.py and threat_patterns.py are Hermes Agent's own code (MIT, see LIC
 memory_tool() below is Hermes' tools/memory_tool.py entry point at the same commit, without the parts that need the
 rest of Hermes: the write-approval gate, background-review rules and metrics. Since 1ae3c55e (26 October) Hermes'
 tool offers 'patch', which changes one span inside an entry and keeps the rest, and turns 'replace' away. Here
-'replace' (the whole entry) stays too: her planner's memory step and her learning review still ask for it, and the
-store still does it.
+'replace' (the whole entry) stays too: her planner's memory step, her learning review and its make-room batch
+still ask for it, and the store still does it.
 """
 import json
 from typing import Any, Dict, List, Optional
