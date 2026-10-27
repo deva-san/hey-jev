@@ -97,7 +97,7 @@ for _name in ("prepare", "install", "_run", "find"):
     if hasattr(installer, _name):
         setattr(installer, _name, tripwire(f"installer.{_name}"))
 opencode.chat = tripwire("opencode.chat")
-# what's using the real PC's processor and memory (the top_apps look-up), which samples it for 2.5 s too
+# what's using the real PC's processor and memory (the top_apps look-up), which samples the CPU for 0.5 s too
 sysinfo.top_apps = tripwire("sysinfo.top_apps")
 # finding your files asks Windows Search's real index, and opening one starts its app
 for _name in ("_ask_index", "open_found"):

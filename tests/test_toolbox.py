@@ -325,6 +325,14 @@ class Gated(unittest.TestCase):
             self.assertIn(siri.LOOK_STEPS, system, text)
             self.assertEqual(system.cache_at + 2, system.index(siri.LOOK_STEPS), text)  # just after the cache
         self.assertNotIn(siri.LOOK_STEPS, self.system("open notepad"))
+        # everyday turns that only share a word with them don't (review, 27 October)
+        for text in ("hang on, open Chrome", "open Windows settings", "play something slow", "close these windows",
+                     "ram the door shut in the game", "lag behind the leader"):
+            self.assertIsNone(siri.LOOK_WORDS.search(text), text)
+        for text in ("my laptop is running slow", "what's eating my RAM", "it keeps hanging", "which windows are open",
+                     "what apps do I have", "check the memory usage",
+                     "list my open windows"):
+            self.assertTrue(siri.LOOK_WORDS.search(text), text)
         recent = [(0, "what's open", json.dumps({"steps": [{"do": "open_windows"}], "say": ""}))]
         self.assertIn(siri.LOOK_STEPS, self.system("and the second one?", recent))
 
@@ -384,6 +392,56 @@ class SideBySide(unittest.TestCase):
                                        {"do": "read", "url": "https://x"}])
         self.assertLess(took, 1.0)
         self.assertTrue(any("too long" in str(o.get("error")) for o in out), out)
+
+    def test_research_reads_in_the_background_never_hold_up_her_turn(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+
+        def hung(*a, **k):
+            gate.wait(5)
+            return "page"
+        with mock.patch.object(siri.web, "read", hung), contextlib.redirect_stdout(io.StringIO()):
+            pages = [{"do": "read", "url": f"https://x/{n}"} for n in range(4)]
+            research = threading.Thread(target=siri.run_info, args=(pages,), kwargs={"pool": siri.RESEARCH_LOOKUPS},
+                                        daemon=True)
+            research.start()
+            time.sleep(0.1)  # every research worker is now reading
+            out, took = self.run_info([{"do": "web", "query": "a"}, {"do": "news", "topic": "b"},
+                                       {"do": "weather", "place": "Delhi"}])
+        self.assertLess(took, 0.9)
+        self.assertEqual([list(o)[0] for o in out], ["web", "news", "weather"])
+        self.assertFalse(any("error" in o for o in out), out)
+        self.assertTrue(all(n.startswith("lookup") for n in self.threads), self.threads)
+
+    def test_one_left_queued_runs_here_and_its_time_counts_from_when_it_starts(self):
+        gate = threading.Event()
+        hogged = [siri.LOOKUPS.submit(gate.wait, 5) for _ in range(4)]  # hung reads of an earlier round
+        self.addCleanup(lambda: [h.result() for h in hogged])
+        self.addCleanup(gate.set)  # cleanups run last first: free them, then wait for them
+        with mock.patch.object(siri, "LOOKUP_WAIT", 0.2):  # far less than the 0.4 s each takes once queued
+            out, took = self.run_info([{"do": "web", "query": "a"}, {"do": "news", "topic": "b"}])
+        self.assertEqual([o["results" if "web" in o else "headlines"][0] for o in out], ["web", "news"])
+        self.assertEqual(self.threads, [threading.current_thread().name] * 2)
+        self.assertLess(took, 0.9 + 2 * siri.QUEUE_GRACE)
+
+    def test_two_cpu_samples_side_by_side_take_turns(self):
+        # psutil keeps one CPU baseline: two samples at once reset each other's and said 0% or 100% (review)
+        calls = []
+
+        def percent(interval=None):
+            calls.append(threading.current_thread().name)
+            return 12.0
+        with mock.patch.object(sysinfo, "_snapshot", dict), \
+                mock.patch.object(sysinfo.psutil, "cpu_percent", percent):
+            both = [threading.Thread(target=sysinfo._sample_cpu, kwargs={"secs": 0.2}) for _ in range(2)]
+            for t in both:
+                t.start()
+            for t in both:
+                t.join(5)
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[0], calls[1])  # each reset is read back by the same sampler before the next begins
+        self.assertEqual(calls[2], calls[3])
+        self.assertNotEqual(calls[1], calls[2])
 
     def test_an_error_in_one_is_its_entry(self):
         def broken(*a, **k):

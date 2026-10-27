@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import socket
+import threading
 import time
 
 import psutil
@@ -16,6 +17,11 @@ NAMES = {"msedge": "Edge", "code": "VS Code", "explorer": "File Explorer", "msmp
          "memory compression": "Windows memory compression", "system": "Windows", "vmmem": "WSL",
          "vmmemwsl": "WSL", "registry": "the Windows registry"}
 KINDS = ("disk", "battery", "cpu", "memory", "apps", "network", "uptime", "system")
+# One CPU sample at a time (review, 27 October): psutil.cpu_percent(None) keeps one baseline for the whole module,
+# and since look-ups run side by side "why is my PC slow?" planned lookup cpu and top_apps together. The second to
+# start reset the first's baseline, which then measured a few milliseconds and said 0% or 100% as fact. The second
+# waits half a second instead
+CPU_SAMPLE = threading.Lock()
 
 
 def _app_name(name):
@@ -94,13 +100,14 @@ def _snapshot():
 
 def _sample_cpu(n=5, secs=0.5):
     """(whole CPU %, the apps using the most) from one half-second sample, added up by program. This process is left
-    out, since measuring is all it's doing just then."""
+    out, since measuring is all it's doing just then. One at a time (CPU_SAMPLE): psutil's baseline is shared."""
     me = os.getpid()
-    psutil.cpu_percent(None)
-    before, t0 = _snapshot(), time.perf_counter()
-    time.sleep(secs)
-    after, t1 = _snapshot(), time.perf_counter()
-    total = psutil.cpu_percent(None)
+    with CPU_SAMPLE:
+        psutil.cpu_percent(None)
+        before, t0 = _snapshot(), time.perf_counter()
+        time.sleep(secs)
+        after, t1 = _snapshot(), time.perf_counter()
+        total = psutil.cpu_percent(None)
     whole = (t1 - t0) * 1e7 * (psutil.cpu_count() or 1)  # all the cores' time, in 100 ns units
     totals = {}
     for pid, (name, cpu, _) in after.items():
