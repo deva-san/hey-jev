@@ -387,6 +387,23 @@ class RemindersCountDown(WithStore):
             self.assertEqual(len(siri.timer_snapshot()), 1)
 
 
+class DurableOnly(WithStore):
+    """27 October, found while mapping: do_step started research on a bare thread of its own, beside the durable
+    research task, and had a second way to approve or cancel a task. Every plan passes prepare_task_steps first, so
+    neither was reached; a bare thread would be lost when Jev closed, with nothing in Tasks to say so."""
+
+    def test_research_and_task_control_are_only_ever_task_rows(self):
+        plan = siri.prepare_task_steps({"steps": [{"do": "research", "topic": "budget phones"}], "say": ""})
+        (queued,) = plan["steps"]
+        self.assertEqual((queued["do"], self.store.get(queued["id"])["kind"]), ("task_queued", "research"))
+        with mock.patch.object(siri, "research", lambda *a, **k: self.fail("researched on a thread of its own")):
+            for step in ({"do": "research", "topic": "budget phones"},
+                         {"do": "task_control", "action": "cancel", "id": queued["id"]}):
+                with self.subTest(step=step["do"]), self.assertRaisesRegex(RuntimeError, "wasn't queued"):
+                    siri.do_step(step)
+        self.assertEqual(self.store.get(queued["id"])["status"], "queued")  # not cancelled by the second way
+
+
 class StopsWorker(tasks.Store):
     """A store whose claim_due ends task_worker's loop once the test is over."""
     stopped = False
@@ -484,6 +501,41 @@ class Worker(unittest.TestCase):
                 tasks.WAKE.set()
                 worker.join(5)
             self.assertFalse(worker.is_alive())
+
+    def test_a_wake_as_her_wait_ends_is_kept_for_her_next_look(self):
+        """27 October, found while mapping: Store.wait cleared WAKE after waiting, so a set() that came between the
+        wait ending and the clear was lost. The worker clears it before it looks for due tasks instead."""
+        folder = tempfile.mkdtemp(prefix="heyjev-worker-")
+
+        class Late(threading.Event):
+            def wait(self, timeout=None):
+                woke = super().wait(0)
+                self.set()  # a task added just as the wait ended
+                return woke
+        with mock.patch.object(tasks, "WAKE", Late()):
+            tasks.Store(os.path.join(folder, "wait.db")).wait(5)
+            self.assertTrue(tasks.WAKE.is_set())  # still there: the next wait ends at once
+
+        looked = []
+
+        class Looks(StopsWorker):
+            def claim_due(self, *args, **kwargs):
+                looked.append(tasks.WAKE.is_set())
+                return super().claim_due(*args, **kwargs)
+        store = Looks(os.path.join(folder, "tasks.db"))
+        tasks.WAKE.set()  # an old one, from before she looked
+        with mock.patch.object(siri, "TASK_STORE", store):
+            worker = threading.Thread(target=siri.task_worker, daemon=True)
+            worker.start()
+            try:
+                end = time.time() + 5
+                while not looked and time.time() < end:
+                    time.sleep(0.02)
+            finally:
+                store.stopped = True
+                tasks.WAKE.set()
+                worker.join(5)
+        self.assertEqual(looked[:1], [False])  # cleared before the look, so a set() after it ends the wait
 
 
 if __name__ == "__main__":

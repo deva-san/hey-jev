@@ -16,6 +16,7 @@ import socket
 import threading
 import time
 import xml.etree.ElementTree as ET
+from collections import OrderedDict
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
@@ -30,15 +31,26 @@ MAX_PAGE = 1_500_000  # bytes of a page read at most, so a huge page can't hold 
 # seconds a search waits for its sources, all together, before answering with what's come: each source's timeout
 # counts per read, and the waits used to add up, 11 to 13 s on 7 October. Research has the links to work out too
 SEARCH_WAIT = 5.0
-_cache = {}  # what was looked up lately: (kind, key) -> (when, result)
+_cache = OrderedDict()  # what was looked up lately: (kind, key) -> (when, result), the longest unused first
+# Looks kept at most. Nothing was ever let go: every search, page and story she read stayed in memory for as long as
+# she ran (found 27 October), and background research reads several pages a topic
+CACHE_MOST = 256
+_cache_lock = threading.Lock()  # a search's sources and background research look things up on threads of their own
 
 
 def _cached(kind, key, secs, make):
-    hit = _cache.get((kind, key))
+    with _cache_lock:
+        hit = _cache.get((kind, key))
+        if hit:
+            _cache.move_to_end((kind, key))  # used again: the last to go
     if hit and time.time() - hit[0] < secs:
         return hit[1]
     result = make()
-    _cache[(kind, key)] = (time.time(), result)
+    with _cache_lock:
+        _cache[(kind, key)] = (time.time(), result)
+        _cache.move_to_end((kind, key))
+        while len(_cache) > CACHE_MOST:
+            _cache.popitem(last=False)
     return result
 
 
@@ -93,7 +105,8 @@ def search(query, links=False):
     late = []
     found = _cached("search", (query.lower(), links), 600, make)
     if late:  # a source that was slow this time isn't left out for the next ten minutes
-        _cache.pop(("search", (query.lower(), links)), None)
+        with _cache_lock:
+            _cache.pop(("search", (query.lower(), links)), None)
     return found
 
 

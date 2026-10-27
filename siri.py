@@ -3652,7 +3652,9 @@ def learn_skill(step, agent=False):
         error = str(result.get("error") or "")
         print(f"  skill said: {error}")
         raise RuntimeError("That looks unsafe to keep" if error.startswith("Blocked") else
-                           "I couldn't find that skill" if "not found" in error else "I couldn't save that skill")
+                           "I couldn't find that skill" if "not found" in error else
+                           "I couldn't put that skill away, so it's kept" if action == "delete" else
+                           "I couldn't save that skill")
     return f"{action} {name}"
 
 
@@ -3680,7 +3682,7 @@ Read the two or three best pages and stories, not just the headlines, and go by 
 def research(topic, announce=True):
     """OpenDots' idea of work that carries on while you talk: she looks into a topic in the background, saves what
     she found as a note, then tells you once she's free (ANNOUNCE). Returns (success, spoken result) for a durable
-    task; the old fire-and-forget path leaves announce on."""
+    task, which tells you itself (announce off); do_step's own bare thread for it went on 27 October."""
     # in a task's own thread the turn's words aren't known: the topic is what its searches keep years from
     token = None if agent.SAID.get() else agent.SAID.set(str(topic or ""))
     try:
@@ -4158,7 +4160,8 @@ QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
 # Every step she can take: the ones PROMPT, LIST_STEPS, RESEARCH and agent.AGENT_PROMPT list, and the rest do_step knows. Any other
 # name is a misreading, left out so she doesn't say "I can't Here yet": prose in a tool call once came out as {"do":
 # "Here"}, and a broken one as {"do": "do"}. procedure: one of hers, which the skills list teaches. Never agent_resume,
-# which only her own question makes, so no model can plan the yes to a send
+# which only her own question makes, so no model can plan the yes to a send. click and wait are a live run's, which
+# think() turns into a task on the screen or leaves out (planned_clicks)
 KNOWN_STEPS = {"open", "close", "minimise", "website", "youtube", "google", "media", "volume", "scroll", "keys", "type",
                "new_tab", "timer", "cancel_timers", "dark_mode", "night_light", "lock", "sleep", "shutdown", "restart", "abort_shutdown",
                "dictate", "screen", "memory", "lookup", "recall", "web", "read", "weather", "news", "skill_view",
@@ -4320,6 +4323,29 @@ def _mend(step):
         to = next((step[k] for k in ("to", "on", "state", "level", "value", "action", "name") if k in step), None)
         return {"do": "device", "what": str(step["do"]).lower(), "to": to}
     return step
+
+
+CLICK_NAMES = ("name", "what", "target", "label", "element", "control")  # what a planned click names its control by
+
+
+def planned_clicks(steps):
+    """The planner's steps as run_plan can take them. click and wait are a live run's steps, in KNOWN_STEPS because
+    agent.ask reads its replies with this same parse_plan, but do_step has neither: the planner's {"do": "click"} was
+    said as "I can't click yet". A click that names its control becomes the task on the screen "click Subscribe",
+    which agent.quick_click presses by name with no model, through the same checks as those words said out loud
+    (_screen). A click by id or point (only a live run is shown those), one that types, and a wait are left out."""
+    out = []
+    for s in steps:
+        name = next((" ".join(s[k].split()) for k in CLICK_NAMES if isinstance(s.get(k), str) and s[k].strip()), "") \
+            if s["do"] == "click" and s.get("text") is None else ""
+        if name:
+            how = "double " if s.get("double") else "right " if str(s.get("button")).lower() == "right" else ""
+            out.append({"do": "screen", "task": f"{how}click {name[:120]}"})
+        elif s["do"] in ("click", "wait"):
+            print(f"  a live run's step, left out: {json.dumps(s, ensure_ascii=False)[:120]}")
+        else:
+            out.append(s)
+    return out
 
 
 def ask_plan(messages, again=True, deadline=DEADLINE, **kw):
@@ -4700,7 +4726,7 @@ def think(text, gate, notify=None, sure=1.0):
             and not plan.get("ignore"):
         plan["say"] = say_line("looked_no_answer")  # it wanted yet another look: never "say that again" for that
     plan["steps"] = [s for s in plan["steps"] if s["do"] not in INFO and s["do"] not in ASKS_YES]  # never planned
-    plan["steps"] = [clock_timer(s, text) for s in plan["steps"]]  # a time of day isn't a sum for the model
+    plan["steps"] = [clock_timer(s, text) for s in planned_clicks(plan["steps"])]  # a time of day isn't a sum for it
     # "llm" lines count as questions answered in the window's stats, "plan" lines as commands
     cached = (usage or {}).get("cache_read")  # of what she was sent, the tokens Haiku read back from its cache
     print(f"  {'plan' if plan['steps'] else 'llm'} {model} {int((time.time() - t) * 1000)}ms  "
@@ -5101,6 +5127,10 @@ def task_worker():
             tasking.WAKE.set()  # the next command, install or research may go now
 
     while True:
+        # cleared before she looks, never after the wait (tasks.Store.wait): a set() from here on, for a new task or a
+        # slow one finished, ends the wait below at once, and one that came before is seen by this look (slow is read
+        # after the clear, so its flag is the one run_slow left)
+        tasking.WAKE.clear()
         skip = SLOW_TASKS if slow.is_set() else ()
         if time.time() - last_look[0] > 90:
             missed[0] = time.time()
@@ -5140,6 +5170,9 @@ KEY_NAMES = {"control": "ctrl", "escape": "esc", "return": "enter", "pgup": "pag
              # are the same keys unshifted, so ctrl+plus zooms in where it said "There's no plus key"
              "plus": "=", "minus": "-", "equals": "="}
 WAIT_AFTER = {"open": 0.8, "new_tab": 0.5, "website": 3.0, "youtube": 3.0, "google": 2.5}  # before the next step
+# Seconds run_plan waits for a task on the screen before her turn goes on without it and closes its run. A live run
+# stops before this (agent.AGENT_SECONDS), so what it found is said in her turn, not after
+SCREEN_WAIT = 180.0
 SPEAK_FIRST = ("lock", "sleep", "procedure", "screen")  # and muting: she says it first, or she'd cut herself off. A
 # procedure or a task on the screen: she says what she'll do before she starts, so a misheard one is stopped in time
 # and these she says once they're done, never while they run: she said "Closed Messages." with Messages not running,
@@ -5154,6 +5187,22 @@ def find_app(name):
         raise RuntimeError(f"{name or 'That'} isn't an app name")
     k = APP_LOOKUP.get(key_of(name))
     return APP_SPECS[k] if k else win.App(name)
+
+
+# Opening one of agent.NO_OPEN's (a command window, the Run box, the registry editor...), the one list a live run
+# keeps to too. "open" is READ_SAFE, so a page read in the same turn could have had PowerShell or regedit opened with
+# no yes; typing into one was refused, opening it wasn't. Terminal work goes through command steps and their checks
+NO_OPEN_LINE = "I don't open command windows, the Run box or tools like the registry editor, so that's yours to open"
+
+
+def find_browser(name):
+    """A step's "browser": one of hers in apps.json (BROWSERS), by any name she knows it by, never another app.
+    winplatform.open_url starts the browser's program with the address, and an address may hold ";": a model's
+    {"browser": "PowerShell"}, after a page asked for it, would have started PowerShell with that as its command."""
+    k = APP_LOOKUP.get(key_of(name))
+    if k not in BROWSERS:
+        raise RuntimeError(f"{name} isn't one of your browsers")
+    return APP_SPECS[k]
 
 
 def front_browser():
@@ -5685,10 +5734,12 @@ def device_step(step):
 def do_step(step):
     """Do one step of a plan. Returns a few words for the log, raises RuntimeError with a reason she can say."""
     do = step.get("do")
-    browser = find_app(step["browser"]) if step.get("browser") else None
+    browser = find_browser(step["browser"]) if step.get("browser") else None
     profile = str(step.get("profile") or "").strip() or None
     if do in ("open", "close", "minimise"):
         name = str(step.get("app") or "")
+        if do == "open" and agent.NO_OPEN.search(name):  # before any other way of opening it, by whoever planned it
+            raise RuntimeError(NO_OPEN_LINE)
         if do == "open" and key_of(name) in SITES:  # "open YouTube" means the website
             page = key_of(name)
             open_page(SITES[page][1], browser, profile)
@@ -5775,12 +5826,6 @@ def do_step(step):
         return ""  # looked up already, while she was thinking
     if do == "skill":
         return learn_skill(step)
-    if do == "research":
-        topic = " ".join(str(step.get("topic") or step.get("query") or "").split())
-        if not topic:
-            raise RuntimeError("I didn't catch what to look into")
-        threading.Thread(target=research, args=(topic,), daemon=True).start()
-        return topic
     if do == "note":
         return save_note(step.get("title"), step.get("text"))
     if do == "todo":
@@ -5848,14 +5893,17 @@ def do_step(step):
         return ""
     if do == "window":
         action = str(step.get("action") or "").lower()
-        if action == "maximize":
+        if action in ("maximize", "maximise"):
             win.maximize_foreground_window()
-        elif action in ("restore", "unmaximize"):
+        elif action in ("restore", "unmaximize", "unmaximise"):
             win.restore_foreground_window()
-        elif action == "minimize":
+        elif action in ("minimize", "minimise"):
             win.minimize_foreground_window()
         elif action in ("desktop", "show_desktop"):
             win.show_desktop()
+        else:  # it did nothing and was counted as done, so a plan's line said it was, and nothing said it wasn't
+            raise RuntimeError(f"I can't {action.replace('_', ' ')} a window" if action else
+                               "I didn't catch what to do with the window")
         return action
     if do == "open_folder":
         path = step.get("path")
@@ -5927,14 +5975,10 @@ def do_step(step):
                                       step.get("number") or step.get("username") or step.get("id"))
     if do == "task_queued":
         return str(step.get("id") or "")
-    if do == "task_control":
-        task_id, action = int(step.get("id") or 0), str(step.get("action") or "").lower()
-        if action == "cancel" and TASK_STORE.cancel(task_id):
-            return f"cancelled {task_id}"
-        if action == "approve" and TASK_STORE.approve(task_id):
-            return f"approved {task_id}"
-        raise RuntimeError(f"Task {task_id} isn't waiting for that")
-    if do in ("command", "schedule"):
+    # research, task_control, command and schedule steps are durable rows by now (prepare_task_steps, which every plan
+    # passes before run_plan): research had a bare thread of its own here too, lost if Jev closed, and task_control a
+    # second way to approve that no plan reached
+    if do in ("command", "schedule", "research", "task_control"):
         raise RuntimeError("That task wasn't queued")
     if do == "timer":
         secs = int(float(step.get("seconds") or 0))
@@ -6097,6 +6141,20 @@ def run_plan(plan, notify):
             time.sleep(0.05)
         return done()
 
+    # once her turn's lines are said: [True] if one that comes later is still told, [False] if she was stopped
+    over, late = [], threading.Lock()
+
+    def found(said):  # what a task on the screen saw, did or asks: said in her turn, or told once she's free
+        with late:
+            if not over:
+                seen.append(said)
+                return
+        # the run outlasted SCREEN_WAIT: put in seen after it was read, it was never said (27 October). Back where it
+        # was asked, as a background task's result is (tell_task): your phone's chat, or out loud once she's free
+        if said and over[0]:
+            print(f"  (came after her turn, told once she's free: {str(said)[:80]!r})")
+            tell_task({"payload": {"origin": asked_from()}}, said)
+
     def work():
         opened = []  # the steps that opened an app or a site, done: where a task on the screen after them starts
         for i, step in enumerate(steps):
@@ -6106,7 +6164,7 @@ def run_plan(plan, notify):
                     # mustn't start on them (agent.learn), or "night light and open Gmail" would do night light alone
                     alone = all(s is step or (j < i and s["do"] in ("open", "website")) for j, s in enumerate(steps))
                     said, did = agent.dispatch(step, notify, opened, alone)
-                    seen.append(said)
+                    found(said)
                     print(f"  action: {step['do']} {describe(did) or 'looked'}")
                     if agent.TURN.get().learned:  # kept as a procedure: no review needs to make a skill of it
                         step["learned"] = agent.TURN.get().learned[-1]
@@ -6168,11 +6226,13 @@ def run_plan(plan, notify):
         shown = looks if task["do"] != "screen" else agent.task_words(looks) or \
             ("Looking at the screen\u2026" if agent.looks_only(looks) else "Working on it\u2026")
         emit(notify, "Looking", shown)
-    wait(lambda: not worker.is_alive(), 180 if looks is not None else 60)
+    wait(lambda: not worker.is_alive(), SCREEN_WAIT if looks is not None else 60)
     if task is not None:
         agent.close(turn)  # stopped, or still waiting on the model: from here it can't act, whatever it gets back
         if agent.asking() and REPLY_TO.get() is None:
             HER.asking = True  # her question about a step held for your yes: a yes said over it is for after it
+    with late:
+        over.append(not agent.STOP.is_set() and not (HER.stop.is_set() and REPLY_TO.get() is None))
     for said in seen:  # what she saw, or did, on the screen, or her question about a step held for your yes
         if said:
             voice_error = talk(said) or voice_error

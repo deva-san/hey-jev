@@ -170,6 +170,23 @@ class WindowsPages(unittest.TestCase):
         self.assertTrue(siri.could_be_request("device manager"))
 
 
+class WindowSteps(unittest.TestCase):
+    """27 October, found while mapping: a window step with an action do_step doesn't have did nothing and was counted
+    as done, so her line said it was."""
+
+    def test_one_it_cant_do_is_said_not_done(self):
+        for step, why in (({"do": "window", "action": "snap_left"}, "I can't snap left a window"),
+                          ({"do": "window"}, "I didn't catch what to do with the window")):
+            with self.subTest(step=step), self.assertRaisesRegex(RuntimeError, why):
+                siri.do_step(step)
+        done = []
+        with mock.patch.object(siri.win, "maximize_foreground_window", lambda: done.append("max")), \
+                mock.patch.object(siri.win, "minimize_foreground_window", lambda: done.append("min")):
+            for action in ("maximize", "maximise", "minimise"):
+                siri.do_step({"do": "window", "action": action})
+        self.assertEqual(done, ["max", "max", "min"])
+
+
 class Switching(unittest.TestCase):
     """25 October, from OpenLive: a window that's already open is switched to, opening nothing. Every plan she read
     left the step out ("no such steps, left out: switch"), the model's replies in an app included."""

@@ -1,6 +1,8 @@
 """Safety gates: what needs a yes after reading the web or messages, what a routine may hold, who a message goes to,
 how a browser is started, what keys reach a chat app and which commands may run by themselves."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -9,7 +11,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.support import DATA, ROOT, messaging, siri
+from tests.support import DATA, ROOT, TRIPPED, messaging, siri
 import tasks
 from hermes_memory import skills
 
@@ -477,6 +479,39 @@ class BrowserLaunch(unittest.TestCase):
         for url in (r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe"):
             with self.assertRaises(RuntimeError):
                 self.launch(url)
+
+
+class NoConsoles(unittest.TestCase):
+    """27 October, found while mapping: "open" needs no yes after a read (READ_SAFE), and only a live run kept to
+    agent.NO_OPEN, so a page read in the same turn could get PowerShell, cmd or the registry editor opened."""
+
+    def setUp(self):
+        self.tripped, self.said = len(TRIPPED), []
+        self.addCleanup(lambda: self.assertEqual(TRIPPED[self.tripped:], []))  # nothing was started on the PC
+        siri.HER.begin()
+
+    def run_planned(self, step):
+        """step as the planner planned it after reading a page, then run: (the plan, what failed)."""
+        plan = planned_after("read me this page", [step], looked=({"do": "read", "url": "https://example.com"},))
+        with mock.patch.object(siri, "say", lambda line, notify: self.said.append(line)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            return plan, siri.run_plan(plan, None)[0]
+
+    def test_a_page_cant_get_a_console_or_the_registry_editor_opened(self):
+        for app in ("PowerShell", "regedit", "cmd", "Command Prompt", "Registry Editor", "Windows Terminal", "Run"):
+            with self.subTest(app=app):
+                plan, failed = self.run_planned({"do": "open", "app": app})
+                self.assertEqual(plan["steps"], [{"do": "open", "app": app}])  # not asked about: refused instead
+                self.assertEqual(failed, [siri.NO_OPEN_LINE])
+        self.assertIn(siri.NO_OPEN_LINE, self.said[-1])
+
+    def test_nor_a_page_in_one_as_its_browser(self):
+        """open_url starts the browser's own program with the address, and a ";" in it is a PowerShell command."""
+        step = {"do": "website", "url": "https://example.com/;calc", "browser": "Windows PowerShell"}
+        plan, failed = self.run_planned(step)
+        self.assertEqual(plan["steps"], [step])
+        self.assertEqual(failed, ["Windows PowerShell isn't one of your browsers"])
+        self.assertIs(siri.find_browser("Google Chrome"), siri.APP_SPECS["chrome"])  # hers still are
 
 
 SECRETS = "reading credentials, environment variables, and private keys is blocked"

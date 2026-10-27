@@ -1161,6 +1161,13 @@ class Tripwires(unittest.TestCase):
             self.assertTrue(getattr(getattr(winplatform, name), "tripwire", None), name)
         self.assertNotIn("win.ui_act", TRIPPED)
 
+    def test_the_clipboard_and_the_start_menu_are_tripped_too(self):
+        """27 October, found while mapping: these four weren't in WIN_ACTIONS, so a test could put files on the real
+        clipboard, or start PowerShell to read the Start menu."""
+        for name in ("set_clipboard_files", "clipboard_snapshot", "clipboard_restore", "start_apps"):
+            self.assertTrue(getattr(getattr(winplatform, name), "tripwire", None), name)
+        self.assertEqual(winplatform.loaded_start_apps(), [])  # what's been read already is no action: never read here
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -62,6 +62,9 @@ WIN_ACTIONS = (
     "lock", "sleep",
     "shutdown", "restart", "abort_shutdown", "launch", "bring_to_front", "open_app", "focus_app", "minimise_app",
     "quit_app", "scroll", "open_url", "press", "type_text", "set_clipboard", "paste", "click", "speak_native",
+    # files on the clipboard for a chat, and the clipboard borrowed and put back; and the Start menu, read by starting
+    # PowerShell (until 27 October none of these four were tripped, so a test could reach the real PC through them)
+    "set_clipboard_files", "clipboard_snapshot", "clipboard_restore", "start_apps",
     "find_and_click_ui_element", "maximize_foreground_window", "restore_foreground_window",
     "minimize_foreground_window", "show_desktop", "open_folder", "open_snipping_tool", "set_start_with_windows",
     "open_windows_page",

@@ -4,7 +4,9 @@ no model at all, or with one planner call to fill its slots from your new words;
 working, and put away when it keeps failing; and every step of it through the same gate. Nothing here reads or presses
 the real screen: FakeApp stands in for the PC, a script for the model, and a counter for screenshots."""
 import contextlib
+import io
 import json
+import queue
 import tempfile
 import threading
 import time
@@ -1713,6 +1715,66 @@ class PlanStopping(Live):
                     siri.REPLY_TO.reset(token)
             self.assertEqual(self.app.done, [], "phone" if phone else "voice")
             self.forget()
+
+
+class PlannedClick(Live):
+    """27 October, found while mapping: KNOWN_STEPS keeps click and wait for a live run's replies, which agent.ask
+    reads with the same siri.parse_plan, but do_step has neither, so the planner's own {"do": "click"} was said as
+    "I can't click yet"."""
+
+    def think(self, *steps):
+        reply = json.dumps({"steps": list(steps), "say": ""})
+        with mock.patch.object(siri, "ask_plan", return_value=(reply, siri.parse_plan(reply), {}, "test")), \
+                mock.patch.object(siri, "context", return_value=""), contextlib.redirect_stdout(io.StringIO()):
+            return siri.think("click display", False)
+
+    def test_the_planners_click_is_pressed_by_name_with_no_model(self):
+        settings(self.app)
+        self.app.show("settings")
+        pressed = []
+        self.patch(winplatform, "find_and_click_ui_element", lambda name: pressed.append(name) or True)
+        plan = self.think({"do": "click", "name": "Display"})
+        self.assertEqual(plan["steps"], [{"do": "screen", "task": "click Display"}])
+        self.no_model()  # agent.quick_click: by UI Automation, with no model and no screenshot
+        with contextlib.redirect_stdout(io.StringIO()):
+            failed, _, _, _ = siri.run_plan(plan, None)
+        self.assertEqual((failed, pressed), ([], ["Display"]))
+        self.assertEqual(self.said[-1], "Clicked Display.")
+
+    def test_a_click_by_id_or_point_one_that_types_and_a_wait_are_left_out(self):
+        steps = [{"do": "wait", "seconds": 2}, {"do": "click", "id": 7}, {"do": "click", "x": 640, "y": 360},
+                 {"do": "click", "name": "Search", "text": "cats"}, {"do": "volume", "to": "up"}]
+        self.assertEqual(self.think(*steps)["steps"], [{"do": "volume", "to": "up"}])
+        # a live run's replies still have them: they're its steps
+        self.assertEqual([s["do"] for s in siri.parse_plan(json.dumps({"steps": steps}))["steps"]],
+                         ["wait", "click", "click", "click", "volume"])
+
+
+class LateLine(unittest.TestCase):
+    """27 October, found while mapping: a live run had 300 s (AGENT_SECONDS) while run_plan stopped waiting at 180 and
+    closed it, and a line that came after was put in what was read already, so it was never said."""
+
+    def setUp(self):
+        siri.HER.begin()
+        agent.STOP.clear()
+
+    def test_a_live_run_ends_before_her_turn_stops_waiting(self):
+        self.assertLess(agent.AGENT_SECONDS, siri.SCREEN_WAIT)
+
+    def test_what_a_task_finds_after_her_turn_is_told_once_shes_free(self):
+        said, announced, release = [], queue.Queue(), threading.Event()
+
+        def slow(step, notify=None, before=(), alone=True):
+            release.wait(5)
+            return "The download's finished.", []
+        with mock.patch.object(agent, "dispatch", slow), mock.patch.object(siri, "SCREEN_WAIT", 0.2), \
+                mock.patch.object(siri, "say", lambda line, notify: said.append(line)), \
+                mock.patch.object(siri, "ANNOUNCE", announced), contextlib.redirect_stdout(io.StringIO()):
+            siri.run_plan({"steps": [{"do": "screen", "task": "check the download in chrome"}], "say": ""}, None)
+            self.assertNotIn("The download's finished.", said)  # her turn went on without it
+            release.set()
+            self.assertEqual(announced.get(timeout=5), "The download's finished.")
+        self.assertNotIn("The download's finished.", said)  # told by heads_ups once she's free, not over her turn
 
 
 class Stopping(unittest.TestCase):

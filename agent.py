@@ -118,9 +118,11 @@ PROGRAM_TYPES = re.compile(r"\b(?:application|installer|package|batch|script|sho
 # speech-to-text was unsure of any more (asked on 21 October: only ask for what's sensitive); what can't be undone
 # still waits for your yes in gate
 # Raised on 25 October, as OpenLive gives its computer use: 12 rounds in 2 minutes left Hari's longer tasks half done,
-# and with Vision on she now sees the screen every round, so the screenshots a run may take went up with the rounds
+# and with Vision on she now sees the screen every round, so the screenshots a run may take went up with the rounds.
+# The seconds came back from 300 to 175 on 27 October: siri.run_plan stops waiting at 180 and closes the run with the
+# turn, so a run given 300 was cut off part-way and what it found came after her turn was over
 AGENT_STEPS = {"click", "type", "keys", "scroll", "wait", "open", "website", "switch"}
-AGENT_ROUNDS, AGENT_SECONDS, AGENT_SHOTS, AGENT_STUCK, STEPS_PER_ROUND = 30, 300.0, 30, 3, 4
+AGENT_ROUNDS, AGENT_SECONDS, AGENT_SHOTS, AGENT_STUCK, STEPS_PER_ROUND = 30, 175.0, 30, 3, 4
 OPENS = ("open", "website", "switch")  # steps that put another window in front, read afresh after them
 SPARSE = 5  # controls in front below which UI Automation isn't telling her enough: a screenshot too
 SNAP_CHARS = 2000  # of the window's controls written out for the model each round
@@ -642,8 +644,9 @@ def _note_run(r):
             data.pop(r.name)
         _save_stats(data)
     if gone:
-        print(f"  procedure {r.name} failed {FAILS_TO_ARCHIVE} times in a row: archived")
-        skills.delete_skill(r.name)
+        gone = bool(skills.delete_skill(r.name).get("success"))  # one that can't be archived is kept, never deleted
+        print(f"  procedure {r.name} failed {FAILS_TO_ARCHIVE} times in a row: "
+              f"{'archived' if gone else 'kept, as it could not be archived'}")
         host._skill_cache[0] = 0.0
     return gone
 

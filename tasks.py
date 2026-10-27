@@ -244,6 +244,9 @@ class Store:
         return not task or task["status"] == "cancelled"
 
     def wait(self, maximum=30.0, skip=()):
+        """Sleeps until the next queued task is due, at most maximum seconds, or until WAKE is set. WAKE is cleared
+        by the worker before it looks for due tasks (siri.task_worker), never here after the wait: a set() that came
+        between the wait ending and that clear() was lost, and a task waited up to 30 s for the next look."""
         self.init()
         with self._db() as con:
             row = con.execute(f"SELECT MIN(due) FROM tasks WHERE status='queued' AND kind NOT IN "
@@ -251,7 +254,6 @@ class Store:
         due = row[0] if row else None
         seconds = maximum if due is None else max(0.1, min(maximum, float(due) - time.time()))
         WAKE.wait(seconds)
-        WAKE.clear()
 
 
 # --------------------------------------------------------------------------- schedules
