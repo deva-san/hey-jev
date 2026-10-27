@@ -173,7 +173,8 @@ def bare(**kw):
     isl.eyes = face.Eyes()
     isl.pinned, isl.rest_pos, isl.rest_at = None, None, 0.0
     # the black pill: what these tests were written for, drawn as it always was. The capsule's own are below (Capsule)
-    isl.style, isl.pupil, isl.face_at, isl.patch_at, isl.level = "pill", (0, 0), None, (0, 0), 0.0
+    isl.style, isl.face_at, isl.patch_at, isl.level = "pill", None, (0, 0), 0.0
+    isl.look_at, isl.pointer, isl.pointer_at = None, None, 0.0
     for name, value in kw.items():
         setattr(isl, name, value)
     return isl
@@ -545,9 +546,10 @@ def straight(px):
 
 @needs_windows
 class Capsule(unittest.TestCase):
-    """27 October 2026: the owner's pick, a floating glass capsule with her as a small cartoon, the time beside her
-    when nothing's on, a task's title and how far it's got with a line under it, and a glass card. The black pill
-    stays as it was (Drawing, Cards: drawn the same, pixel for pixel)."""
+    """27 October 2026: the owner's pick, a floating glass capsule with her glowing eyes (the pill's own, after a
+    cartoon face was tried and put away the same day), the time beside her when nothing's on, a task's title and how
+    far it's got with a line under it, and a glass card. The black pill stays as it was (Drawing, Cards: drawn the
+    same, pixel for pixel)."""
 
     def capsule(self, **kw):
         return fonted(self, **dict({"style": "capsule"}, **kw))
@@ -602,43 +604,106 @@ class Capsule(unittest.TestCase):
         line, _ = straight(buf[int(y0), int((x0 + x1) / 2)])
         self.assertLess(line.max(), colour.min() - 0.08)  # a dark hairline on light glass
 
-    def test_idle_is_her_face_and_the_time_and_waits_for_the_minute(self):
+    def test_idle_is_her_eyes_and_the_time_and_waits_for_the_minute(self):
         isl = self.capsule()
         lay = isl._idle()
-        self.assertEqual((lay.kind, lay.face, lay.animated, lay.rate), ("idle", True, False, 0))
+        self.assertEqual((lay.kind, lay.face, lay.eyes, lay.wander, lay.animated, lay.rate),
+                         ("idle", True, "open", True, False, 0))
         col = drawn(lay)
         h, w = col.shape[:2]
-        self.assertGreater((col[:, :w // 3].min(-1) > 0.9).sum(), 20)  # the whites of her eyes on the left
+        self.assertGreater((col[:, :w // 3].min(-1) > 0.9).sum(), 20)  # her eyes on the left
         self.assertGreater(col[:, w // 2:].max(), 0.9)  # the time on the right
         now = time.time()
-        isl.eyes.next_blink, isl.eyes.blink_at, isl.eyes.mood = now + 1000, None, None
+        e = isl.eyes
+        e.next_blink, e.next_look, e.blink_at, e.mood = now + 1000, now + 1000, None, None
+        e.look, e.target, e.look_v = [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]
         self.assertAlmostEqual(isl._capsule_wait(now, lay, False), 60.02 - now % 60, places=3)  # nothing till then
-        isl.eyes.next_blink = now + 3
+        e.next_blink = now + 3
         self.assertAlmostEqual(isl._capsule_wait(now, lay, False), min(3, 60.02 - now % 60), places=3)  # a blink
-        isl.eyes.blink_at = now
+        e.next_look = now + 2
+        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), min(2, 60.02 - now % 60), places=3)  # a glance
+        isl.look_at = (0.5, 0.2)  # while the mouse moves her eyes, no glance of her own is waited for
+        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), min(3, 60.02 - now % 60), places=3)
+        isl.look_at = None
+        e.target = [0.9, 0.0]  # on her way to look somewhere: every frame till she's there
+        self.assertEqual(isl._capsule_wait(now, lay, False), 0.016)
+        e.target, e.blink_at = [0.0, 0.0], now
         self.assertEqual(isl._capsule_wait(now, lay, False), 0.016)  # while she blinks, every frame
-        isl.eyes.blink_at, isl.eyes.next_blink = None, now - 1  # a smile doesn't blink: no frames while it lasts
-        isl.eyes.react("happy", now)
-        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), face.REACT_FOR["happy"] + 0.01, places=3)
+        e.blink_at, e.next_blink = None, now - 1
+        e.react("love", now)  # the hearts beat and the sparkles twinkle while they last
+        self.assertEqual(isl._capsule_wait(now, lay, False), 0.033)
+        e.react("surprised", now)  # a look of its own: nothing till it's over, or her next blink
+        e.next_blink = now + 0.4
+        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), 0.4, places=3)
 
-    def test_her_pupils_follow_the_pointer_and_only_a_pixel_redraws(self):
+    def test_the_capsule_has_the_pills_own_eyes(self):
+        """27 October 2026: the owner found the cartoon face less alive than the glowing eyes, so the capsule has
+        those, drawn by the same face.draw_eyes, as big as on the pill's small rows."""
+        isl = self.capsule()
+        isl.eye = ("open", 1.0, 0.3, -0.2, False)
+        w, draw, expr = isl._face("think")
+        self.assertEqual(expr, "think")
+        mine, theirs = (np.zeros((60, int(w) + 40, 3), np.float32) for _ in range(2))
+        draw(face.Canvas(mine), 20, 30, 1.0, time.time())
+        face.draw_eyes(face.Canvas(theirs), 20 + w / 2, 30, isl.SMALL_EYES * isl.k, "open", 1.0, (0.3, -0.2),
+                       0.0, 0.0, island.GLASS["dark"]["eyes"], True)
+        self.assertTrue(np.allclose(mine, theirs, atol=1e-5))  # the very same eyes, where they're looking
+        self.assertFalse(hasattr(face, "cartoon"))
+        isl.eye = ("happy", 1.0, 0.0, 0.0, False)  # ^ ^, as the pill has them
+        arcs = drawn(isl._idle())
+        isl.eye = ("open", 1.0, 0.0, 0.0, False)
+        self.assertLess((arcs.min(-1) > 0.9).sum(), (drawn(isl._idle()).min(-1) > 0.9).sum())
+        for state, expr in (("listening", "open"), ("thinking", "think"), ("looking", "glasses"),
+                            ("doing", "focus"), ("error", "sad")):  # her turns look as on the pill (JEV)
+            isl.jev, isl.you, isl.since = {"state": state, "text": ""}, "", time.time()
+            isl._front_icon = lambda size: None
+            lay = isl._make(("jev",), time.time())
+            self.assertEqual((lay.eyes, lay.wander), (expr, False), state)
+        self.assertEqual([island.TASK_LOOKS.get(s, "open") for s in ("running", "done", "failed", "waiting_yes")],
+                         ["open", "happy", "sad", "surprised"])  # not "focus": its sway never rests
+
+    def test_their_glow_takes_the_colour_of_what_shes_doing(self):
+        isl = self.capsule()
+        isl.eye = ("open", 1.0, 0.0, 0.0, False)
+
+        def glow(tint, theme="amoled", mood=None):
+            isl.theme_name = theme
+            isl.eyes.mood, isl.eyes.mood_until = mood, (time.time() + 5 if mood else 0.0)
+            w, draw, _ = isl._face("open", tint)
+            col = np.zeros((60, int(w) + 40, 3), np.float32)
+            draw(face.Canvas(col), 20, 30, 1.0, time.time())
+            return col[(col.max(-1) > 0.05) & (col.min(-1) < 0.85)]  # round the eyes, not their whites
+
+        plain, amber = glow(None), glow(island.ORANGE)
+        self.assertLess(abs(plain[:, 0].mean() - plain[:, 2].mean()), 0.02)  # her own white glow
+        self.assertGreater(amber[:, 0].mean() - amber[:, 2].mean(), 0.05)  # warm while she works
+        blue = glow(island.ORANGE, mood="surprised")  # a reaction's colour over it while it lasts
+        self.assertGreater(blue[:, 2].mean() - blue[:, 0].mean(), 0.05)
+        self.assertEqual(len(glow(island.ORANGE, "light")), len(glow(None, "light")))  # light glass: no glow
+
+    def test_her_eyes_follow_the_pointer_then_glance_about_again(self):
         isl = self.capsule()
         wakes = []
         isl._wake = lambda: wakes.append(1)
-        isl.face_at = (100.0, 50.0)
-        reach = face.pupil_reach(isl.FACE_SIZE * isl.k)
-        self.assertLess(reach + 2.0 * isl.k, 4.3 * isl.k)  # a pupil at its furthest is still inside the eye
-        isl._follow(900, 50)
-        self.assertEqual(isl.pupil, (round(reach), 0))
-        isl._follow(901, 52)  # moved, but not by a pixel of hers
-        isl._follow(100, -600)
-        self.assertEqual(isl.pupil, (0, -round(reach)))
-        isl._follow(100, 50)
-        self.assertEqual(isl.pupil, (0, 0))
-        self.assertEqual(len(wakes), 3)
-        for x, y in ((-500, 900), (130, 70), (2000, -40)):
-            isl._follow(x, y)
-            self.assertLessEqual(np.hypot(*isl.pupil), reach + 0.75)
+        isl.face_at = (300.0, 30.0)
+        now = 1000.0
+        far = 10 * island.GAZE_REACH * isl.k
+        isl._follow(300 + far, 30, now)  # far off to the right: all the way that way
+        self.assertAlmostEqual(isl.look_at[0], 1.0, delta=0.06)
+        self.assertEqual(isl.look_at[1], 0.0)
+        isl._follow(300 - far, 30 + far, now + 0.07)
+        self.assertAlmostEqual(isl.look_at[0], -1.0, delta=0.06)
+        self.assertAlmostEqual(isl.look_at[1], 1.0, delta=0.06)
+        self.assertEqual(len(wakes), 2)
+        step = 1 / (0.36 * isl.SMALL_EYES * isl.k)  # a whole pixel of her eyes' move, in look
+        isl._follow(300 + 40, 30, now + 0.14)
+        before = len(wakes)
+        isl._follow(300 + 40.2, 30, now + 0.21)  # moved, but not by a pixel of hers
+        self.assertEqual(len(wakes), before)
+        self.assertAlmostEqual(isl.look_at[0] / step, round(isl.look_at[0] / step))  # on whole pixels
+        isl._follow(300 + 40.2, 30, now + 0.21 + island.GAZE_HOLD + 0.1)  # still a while: her own glances again
+        self.assertIsNone(isl.look_at)
+        self.assertEqual(len(wakes), before + 1)
 
     def test_no_frame_while_the_pointer_and_her_mood_stay_put(self):
         isl = bare(style="capsule", runner=mock.Mock(), look_at=None, visible_window=True, hover=False)
@@ -652,45 +717,12 @@ class Capsule(unittest.TestCase):
                 mock.patch.object(island.win, "cursor_pos", lambda: (900, 500)):
             for _ in range(5):
                 isl._hover_poll()
-        self.assertEqual(len(wakes), 1)  # her pupils went to the pointer once, then nothing
-
-    def test_a_blink_closes_her_eyes_from_the_top(self):
-        def whites(open_):
-            col = np.zeros((40, 40, 3), np.float32)
-            face.cartoon(face.Canvas(col), 20, 20, 26, "open", open_, fg=(0.4, 0.4, 0.4))  # her brows aren't white
-            return col.min(-1) > 0.9, col
-        wide, _ = whites(1.0)
-        shut, col = whites(0.1)
-        self.assertLess(shut.sum(), 0.25 * wide.sum())
-        rows = np.nonzero(wide.any(1))[0]
-        self.assertFalse(shut[:rows[0] + 6].any())  # what's left of them is at the bottom: the lid came down
-
-    def test_her_moods_brows_and_mouth(self):
-        looks = {name: face.CARTOON[name][:2] for name in face.CARTOON}
-        self.assertEqual(looks["open"], ("soft", "smile"))
-        self.assertEqual(looks["listen"], ("up", "o"))
-        self.assertEqual(looks["speak"][1], "talk")
-        self.assertEqual(looks["focus"][1], "flat")
-        self.assertEqual(looks["happy"], ("up", "grin"))
-        self.assertEqual(looks["sad"], ("sad", "frown"))
-        self.assertEqual(looks["think"][0], "think")
-        self.assertGreater(face.BROWS["sad"][1], 0)  # worried: the inner ends up
-        self.assertGreater(face.BROWS["high"][0], face.BROWS["up"][0])
-        self.assertTrue(face.CARTOON["happy"][2] and face.CARTOON["love"][2])  # pink cheeks
-        self.assertEqual(face.CARTOON["love"][3], "hearts")
-        for state, look in (("listening", "listen"), ("dictating", "listen"), ("thinking", "think"),
-                            ("speaking", "speak"), ("doing", "focus"), ("error", "sad"), ("looking", "glasses")):
-            self.assertEqual(island.CARTOON_FOR[state], look)
-        self.assertEqual([island.TASK_LOOKS[s] for s in ("running", "done", "failed", "waiting_yes")],
-                         ["focus", "happy", "sad", "surprised"])
-        for look in face.CARTOON:  # each one draws, and talking opens her mouth wider as her voice gets louder
-            col = np.zeros((40, 40, 3), np.float32)
-            face.cartoon(face.Canvas(col), 20, 20, 26, look, ring=island.VIOLET)
-            self.assertGreater(col.max(), 0.9, look)
-        quiet, loud = (np.zeros((40, 40, 3), np.float32) for _ in range(2))
-        face.cartoon(face.Canvas(quiet), 20, 20, 26, "speak", level=0.0, t=0.0)
-        face.cartoon(face.Canvas(loud), 20, 20, 26, "speak", level=1.0, t=0.0)
-        self.assertGreater(loud[27:].sum(), quiet[27:].sum())
+        self.assertEqual(len(wakes), 1)  # her eyes went to the pointer once, then nothing
+        isl.layout = island.Layout(("jev",), "jev", 200, 51, None, eyes="think", face=True, wander=False)
+        with mock.patch.object(island.win, "set_click_through", lambda hwnd, on: None), \
+                mock.patch.object(island.win, "cursor_pos", lambda: (950, 520)):
+            isl._hover_poll()
+        self.assertIsNone(isl.look_at)  # on her turn they do as it says (thinking: up), not after the mouse
 
     def test_a_task_shows_its_title_how_far_and_a_line_under_it(self):
         stop = {"name": "stop", "label": "Stop", "data": {"key": "task:1", "needs": ""}}
@@ -770,7 +802,7 @@ class Capsule(unittest.TestCase):
                       ("live", plugins.Activity("media", "media", {"title": "Song", "artist": "Band", "app": "Spotify",
                                                                    "playing": True, "art": None}, live=True))):
             lay = isl._make(scene, now)
-            self.assertTrue(lay.face, scene[1].kind)  # her face where the pill has her eyes
+            self.assertTrue(lay.face, scene[1].kind)  # on glass, with her eyes
             drawn(lay)
         note = plugins.Activity("notifications", "notification", {"app": "WhatsApp", "app_id": "", "title": "Mum",
                                                                   "text": "Home by eight", "phone": False})

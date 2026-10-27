@@ -3,8 +3,7 @@ while she reads the screen, headphones while music plays, turn to hearts when yo
 nothing's happened for a while. Drawn with numpy as signed distances, a few hundred pixels round each eye, so a
 frame costs well under a millisecond; between blinks nothing is drawn at all.
 
-The glass capsule's cartoon face (27 October 2026) is here as well: round eyes whose pupils follow the mouse, lids
-that blink, and brows and a mouth for her mood.
+The glass capsule (27 October 2026) has the same eyes, glowing in the colour of what she's doing (halo).
 
 The shapes and glyphs the island's plugins use (a battery, play and pause, a progress ring, a tick) are here too.
 """
@@ -107,8 +106,9 @@ class Canvas:
         py, px = sl[0].start + self.oy - Y0, sl[1].start + self.ox - X0
         return pic[py:py + sl[0].stop - sl[0].start, px:px + sl[1].stop - sl[1].start]
 
-    def shape(self, sd, bounds, colour, a=1.0, glow=0.0, spread=4.0):
-        """Fill sd(xs, ys) < 0 with colour; glow: light added round it, fading over spread px."""
+    def shape(self, sd, bounds, colour, a=1.0, glow=0.0, spread=4.0, halo=None):
+        """Fill sd(xs, ys) < 0 with colour; glow: light added round it, fading over spread px, in halo's colour if
+        one's given (the capsule's eyes glow in the colour of what she's doing), else colour's."""
         r = self.region(*bounds)
         if r is None or a <= 0.003:
             return
@@ -118,7 +118,7 @@ class Canvas:
         colour = np.asarray(colour, np.float32)
         if glow > 0:
             g = np.exp(-np.maximum(d, 0.0) / spread) * (glow * a)
-            dst += colour * g[..., None]
+            dst += (colour if halo is None else np.asarray(halo, np.float32)) * g[..., None]
         cover = (np.clip(0.5 - d, 0.0, 1.0) * a)[..., None]
         dst *= 1 - cover
         dst += colour * cover
@@ -260,8 +260,10 @@ class Eyes:
 
 
 def draw_eyes(cv, cx, cy, size, expr, open_=1.0, look=(0.0, 0.0), level=0.0, t=0.0, colour=WHITE, glow=True,
-              a=1.0):
-    """Two eyes centred on cx, cy, each size px tall when open. level: a voice, 0 to 1, that makes them bounce."""
+              a=1.0, halo=None):
+    """Two eyes centred on cx, cy, each size px tall when open. level: a voice, 0 to 1, that makes them bounce.
+    halo: the colour of their glow when it isn't their own (the glass capsule's, tinted by what's going on); the
+    hearts keep their pink."""
     if a <= 0.003:
         return
     gx = glow * 0.5 if glow else 0.0
@@ -280,7 +282,7 @@ def draw_eyes(cv, cx, cy, size, expr, open_=1.0, look=(0.0, 0.0), level=0.0, t=0
         if expr == "happy":
             r, w = size * 0.4, size * 0.22
             cv.shape(lambda xs, ys: arc(xs, ys, ex, ey + size * 0.16, r, w), eye_box(ex, ey, r, r), colour, a,
-                     gx, spread)
+                     gx, spread, halo)
         elif expr == "love":
             s = size * 1.15 * (1 + 0.07 * math.sin(t * 7.5))
             cv.shape(lambda xs, ys: heart(xs, ys, ex, ey, s), eye_box(ex, ey, s * 0.7, s * 0.7), PINK, a,
@@ -312,11 +314,11 @@ def draw_eyes(cv, cx, cy, size, expr, open_=1.0, look=(0.0, 0.0), level=0.0, t=0
             else:
                 def sd(xs, ys, ex=ex, ey=ey + yo, hw=hw, hh=hh):
                     return rbox(xs, ys, ex, ey, hw, hh, min(hw, hh))
-            cv.shape(sd, eye_box(ex, ey + yo, hw, hh), colour, a, gx, spread)
+            cv.shape(sd, eye_box(ex, ey + yo, hw, hh), colour, a, gx, spread, halo)
             if expr == "glasses":  # round frames over the eyes, and the bridge
                 r, lw = size * 0.62, max(1.2, size * 0.09)
                 cv.shape(lambda xs, ys: np.abs(circle(xs, ys, ex, ey, r)) - lw / 2, eye_box(ex, ey, r + lw, r + lw),
-                         colour, a, gx * 0.6, spread)
+                         colour, a, gx * 0.6, spread, halo)
     if expr == "glasses":
         r, lw = size * 0.62, max(1.2, size * 0.09)
         ax, bx = cx - gap / 2 + lx + r, cx + gap / 2 + lx - r
@@ -327,13 +329,14 @@ def draw_eyes(cv, cx, cy, size, expr, open_=1.0, look=(0.0, 0.0), level=0.0, t=0
         hx, hy = cx + lx * 0.3, cy + ly * 0.3 + size * 0.3  # worn low enough for the band to fit in the pill
         g = lw + 3.5 * spread  # room for the glow to fade out
         cv.shape(lambda xs, ys: arc(xs, ys, hx, hy, band_r, lw),
-                 (hx - band_r - g, hy - band_r - g, hx + band_r + g, hy + g), colour, a * 0.9, gx * 0.5, spread)
+                 (hx - band_r - g, hy - band_r - g, hx + band_r + g, hy + g), colour, a * 0.9, gx * 0.5, spread,
+                 halo)
         g = 1 + 3.5 * spread
         for side in (-1, 1):
             px = hx + side * band_r
             cv.shape(lambda xs, ys, px=px: rbox(xs, ys, px, hy + size * 0.05, size * 0.17, size * 0.36, size * 0.12),
                      (px - size * 0.17 - g, hy - size * 0.31 - g, px + size * 0.17 + g, hy + size * 0.41 + g), colour,
-                     a, gx * 0.6, spread)
+                     a, gx * 0.6, spread, halo)
     if expr in ("love", "happy") and glow:
         sparkles(cv, cx, cy, size, t, a)
 
@@ -351,134 +354,6 @@ def sparkles(cv, cx, cy, size, t, a=1.0):
         cv.shape(lambda xs, ys, sx=sx, sy=sy, r=r, w=w: np.minimum(segment(xs, ys, sx - r, sy, sx + r, sy, w),
                                                                    segment(xs, ys, sx, sy - r, sx, sy + r, w)),
                  (sx - r - g, sy - r - g, sx + r + g, sy + r + g), GOLD, a * k, 0.5, size * 0.12)
-
-
-# --------------------------------------------------------------------------- the capsule's cartoon face
-# 27 October 2026: the glass capsule (island.py, island_style "capsule") has her as a small cartoon in place of the
-# glowing eyes, the owner's pick: big round eyes whose pupils follow the mouse, lids that blink, brows and a mouth
-# that change with her mood. Each look: (brows, mouth, pink cheeks, what she wears). The pill's eyes are untouched.
-CARTOON = {
-    "open": ("soft", "smile", False, None),  # nothing going on: a small smile
-    "listen": ("up", "o", False, None),  # listening: brows up, a small "o"
-    "think": ("think", "hmm", False, None),  # one brow up, the mouth to one side, looking up
-    "focus": ("focus", "flat", False, None),  # working: a determined, flat mouth
-    "speak": ("up", "talk", False, None),  # a mouth that opens and closes with her voice
-    "happy": ("up", "grin", True, None),  # something done, or hello
-    "love": ("up", "smile", True, "hearts"),  # thanks: heart pupils and pink cheeks
-    "surprised": ("high", "big_o", False, None),  # a notification, or a question waiting on you
-    "sad": ("sad", "frown", False, None),  # something went wrong, or the battery's low
-    "x": ("sad", "frown", False, None),
-    "glasses": ("soft", "smile", False, "glasses"),  # reading the screen: round glasses
-    "headphones": ("soft", "smile", False, "headphones"),  # music playing
-    "side": ("soft", "flat", False, None),
-    "sleepy": ("low", "flat", False, None),
-}
-# (how far the brows are lifted, how much higher their inner ends are: worried above 0, determined below), face units
-BROWS = {"soft": (0.0, 0.25), "up": (0.9, 0.35), "high": (1.8, 0.5), "sad": (0.2, 1.3), "focus": (-0.2, -0.6),
-         "low": (-0.6, 0.0)}
-INK = (0.09, 0.09, 0.11)  # the eyes' outlines and pupils
-CHEEK = (1.0, 0.45, 0.62)
-
-
-def pupil_reach(size):
-    """How far, in px, a pupil may move from the middle of its eye in a cartoon face size px across."""
-    return (4.3 - 2.0 - 0.5) * size / 26
-
-
-def cartoon(cv, cx, cy, size, look, open_=1.0, pupil=(0.0, 0.0), level=0.0, t=0.0, fg=WHITE, ring=None, a=1.0):
-    """Her cartoon face centred on cx, cy, size px across (26 at 100%). look: a CARTOON key; open_: how far her lids
-    are open (1, less while she blinks); pupil: where her pupils sit from the middle of her eyes, px, within
-    pupil_reach; level: her voice, for a talking mouth; fg: the brows' and mouth's colour (the theme's words); ring: a
-    thin ring round her in the colour of what's going on, or None."""
-    if a <= 0.003:
-        return
-    brows, mouth, cheeks, wear = CARTOON.get(look, CARTOON["open"])
-    u = size / 26
-    if ring is not None:
-        cv.shape(lambda xs, ys: np.abs(circle(xs, ys, cx, cy, 12.6 * u)) - 0.65 * u,
-                 (cx - 14 * u, cy - 14 * u, cx + 14 * u, cy + 14 * u), ring, a)
-    R, pr, ey = 4.3 * u, 2.0 * u, cy - 1.6 * u
-    if look == "sleepy":
-        open_ = min(open_, 0.45)
-    px, py = pupil
-    if look == "think":  # looking up and away while she thinks, whatever the mouse is doing
-        reach = pupil_reach(size)
-        px, py = 0.6 * reach, -0.75 * reach
-    cut = ey - R + (1.0 - open_) * 2 * R * 0.96  # the lid's edge: it comes down from the top
-
-    def lidded(sd, pad=0.0):
-        """sd with what's above the lid cut away."""
-        if open_ >= 0.999:
-            return sd
-        return lambda xs, ys: np.maximum(sd(xs, ys), cut - pad - ys)
-    for side in (-1, 1):
-        ex = cx + side * 5.0 * u
-        box = (ex - R - 2 * u, ey - R - 2 * u, ex + R + 2 * u, ey + R + 2 * u)
-        cv.shape(lidded(lambda xs, ys, ex=ex: circle(xs, ys, ex, ey, R + 0.9 * u), 0.9 * u), box, INK, a)
-        cv.shape(lidded(lambda xs, ys, ex=ex: circle(xs, ys, ex, ey, R)), box, WHITE, a)
-        qx, qy = ex + px, ey + py
-        if wear == "hearts":
-            cv.shape(lidded(lambda xs, ys, qx=qx, qy=qy: heart(xs, ys, qx, qy, 3.6 * u)), box, PINK, a)
-        else:
-            cv.shape(lidded(lambda xs, ys, qx=qx, qy=qy: circle(xs, ys, qx, qy, pr)), box, INK, a)
-            cv.shape(lidded(lambda xs, ys, hx=qx - 0.7 * u, hy=qy - 0.75 * u: circle(xs, ys, hx, hy, 0.7 * u)), box,
-                     WHITE, a)
-        if open_ < 0.97:  # the lid's edge, a line across the eye: all that's left of it at the bottom of a blink
-            half = math.sqrt(max(0.0, (R + 0.5 * u) ** 2 - (cut - ey) ** 2))
-            cv.shape(lambda xs, ys, ex=ex, half=half: segment(xs, ys, ex - half, cut, ex + half, cut, 1.4 * u),
-                     (ex - half - 2 * u, cut - 2 * u, ex + half + 2 * u, cut + 2 * u), fg, a)
-        if wear == "glasses":
-            gr = R + 1.7 * u
-            cv.shape(lambda xs, ys, ex=ex: np.abs(circle(xs, ys, ex, ey, gr)) - 0.5 * u,
-                     (ex - gr - u, ey - gr - u, ex + gr + u, ey + gr + u), fg, a)
-        # a brow over each eye, lifted, and its inner end higher (worried) or lower (determined) by her mood
-        lift, inner = BROWS.get(brows, (0.0, 0.0))
-        if brows == "think":  # one up, one down
-            lift, inner = (1.6, -0.5) if side < 0 else (-0.2, -0.8)
-        by = ey - R - 2.4 * u - lift * u
-        ox, ix = ex + side * 2.2 * u, ex - side * 2.2 * u
-        oy, iy = by + inner * u / 2, by - inner * u / 2
-        cv.shape(lambda xs, ys, ox=ox, oy=oy, ix=ix, iy=iy: segment(xs, ys, ox, oy, ix, iy, 1.3 * u),
-                 (min(ox, ix) - 2 * u, min(oy, iy) - 2 * u, max(ox, ix) + 2 * u, max(oy, iy) + 2 * u), fg, a)
-    if wear == "glasses":  # the bridge between them
-        gr = R + 1.7 * u
-        cv.shape(lambda xs, ys: segment(xs, ys, cx - 5 * u + gr, ey - 0.4 * u, cx + 5 * u - gr, ey - 0.4 * u, u),
-                 (cx - 2 * u, ey - 2 * u, cx + 2 * u, ey + 2 * u), fg, a)
-    elif wear == "headphones":  # a band over her head and a cup each side, just outside the ring
-        band = 13.9 * u
-        cv.shape(lambda xs, ys: arc(xs, ys, cx, cy, band, 1.5 * u),
-                 (cx - band - 2 * u, cy - band - 2 * u, cx + band + 2 * u, cy + 2 * u), fg, a * 0.9)
-        for side in (-1, 1):
-            hx = cx + side * band
-            cv.shape(lambda xs, ys, hx=hx: rbox(xs, ys, hx, cy + 1.0 * u, 1.5 * u, 3.2 * u, 1.2 * u),
-                     (hx - 3 * u, cy - 3 * u, hx + 3 * u, cy + 5 * u), fg, a)
-    if cheeks:
-        for side in (-1, 1):
-            kx, ky = cx + side * 8.6 * u, cy + 5.2 * u
-            cv.shape(lambda xs, ys, kx=kx, ky=ky: circle(xs, ys, kx, ky, 1.6 * u),
-                     (kx - 3 * u, ky - 3 * u, kx + 3 * u, ky + 3 * u), CHEEK, a * 0.8)
-    my = cy + 6.4 * u
-    mbox = (cx - 4.5 * u, my - 4 * u, cx + 4.5 * u, my + 4 * u)
-    if mouth == "smile":
-        cv.shape(lambda xs, ys: arc(xs, ys, cx, my - 1.4 * u, 2.6 * u, 1.3 * u, up=False), mbox, fg, a)
-    elif mouth == "grin":  # a wide open smile, flat on top
-        gy = my - 0.8 * u
-        cv.shape(lambda xs, ys: np.maximum(circle(xs, ys, cx, gy, 3.0 * u), gy - ys), mbox, fg, a)
-    elif mouth in ("o", "big_o"):
-        r = 1.3 * u if mouth == "o" else 1.9 * u
-        cv.shape(lambda xs, ys: np.abs(circle(xs, ys, cx, my + 0.5 * u, r)) - 0.6 * u, mbox, fg, a)
-    elif mouth == "flat":
-        cv.shape(lambda xs, ys: segment(xs, ys, cx - 2.2 * u, my + 0.6 * u, cx + 2.2 * u, my + 0.6 * u, 1.3 * u),
-                 mbox, fg, a)
-    elif mouth == "hmm":
-        cv.shape(lambda xs, ys: segment(xs, ys, cx - 1.0 * u, my + 0.9 * u, cx + 2.4 * u, my + 0.1 * u, 1.3 * u),
-                 mbox, fg, a)
-    elif mouth == "frown":
-        cv.shape(lambda xs, ys: arc(xs, ys, cx, my + 2.0 * u, 2.4 * u, 1.3 * u), mbox, fg, a)
-    elif mouth == "talk":  # open as wide as her voice is loud, with a little wobble of its own
-        m = max(0.0, min(1.0, level * 1.6 + 0.2 * (0.5 + 0.5 * math.sin(t * 11.0))))
-        hh = 0.6 * u + 1.6 * u * m
-        cv.shape(lambda xs, ys: rbox(xs, ys, cx, my + 0.6 * u, 2.1 * u, hh, hh), mbox, fg, a)
 
 
 # --------------------------------------------------------------------------- the plugins' glyphs

@@ -1189,8 +1189,8 @@ class AssistantWindow:
 
         combo(row("Popup", "Her island has her eyes and the plugins below. The card and the pill show only her "
                            "turns."), "popup_style", POPUP_STYLES, self.style_changed)
-        combo(row("Style", "The glass capsule floats under the top of the screen with her cartoon face; the black "
-                           "pill sits at the top with her glowing eyes."), "island_style", ISLAND_STYLES)
+        combo(row("Style", "The glass capsule floats under the top of the screen, her glowing eyes following the "
+                           "mouse; the black pill sits at the top, as it was."), "island_style", ISLAND_STYLES)
         combo(row("Face", "Her eyes blink, look about and react: hearts when you say thanks, glasses while she reads "
                           "the screen, headphones while music plays. Or the Siri wave as she listens and talks."),
               "island_face", ISLAND_FACES)

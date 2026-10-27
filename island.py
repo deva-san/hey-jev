@@ -9,8 +9,10 @@ when you point at it, the battery when you plug in or it runs low, and a running
 AMOLED (pure black) themes, its place, size and corners, and the plugins are all in the Island tab.
 
 Two styles (27 October 2026): the glass capsule, the default, floats a little under the top of the screen, see-through
-with a hairline round it, and has her as a small cartoon whose pupils follow the mouse, with the time beside her when
-nothing's on; and the black pill it was before, with Nixi's glowing eyes, drawn exactly as it was.
+with a hairline round it, and has her glowing eyes, the pill's own, looking at the mouse while it moves and glowing in
+the colour of what she's doing, with the time beside her when nothing's on; and the black pill it was before, drawn
+exactly as it was. A small cartoon face was tried in the capsule first and put away the same day: the owner found the
+eyes more alive.
 
 It's one layered window drawn with numpy, like bubble.Island: clicks go through it except while you point at its
 buttons, it never takes the focus, and it's left out of her screenshots, so the model never sees its buttons. Between
@@ -69,12 +71,17 @@ GLASS = {
               "muted": (0.38, 0.38, 0.41), "eyes": (0.11, 0.11, 0.12), "glow": False, "line": (0.0, 0.0, 0.0),
               "line_a": 0.12, "shadow": 0.2, "track": (0.8, 0.8, 0.83)},
 }
-# Her cartoon face in the capsule (island_face.cartoon) for each of her turns, and for how a task is going
-CARTOON_FOR = {"listening": "listen", "read": "listen", "again": "listen", "dictating": "listen", "thinking": "think",
-               "looking": "glasses", "doing": "focus", "finishing": "focus", "speaking": "speak", "error": "sad"}
-TASK_LOOKS = {"running": "focus", "done": "happy", "failed": "sad", "waiting_yes": "surprised"}
-# the ring round her face while a reaction lasts: done, thanks, a notification, something wrong
-MOOD_RINGS = {"happy": GREEN, "love": face.PINK, "surprised": BLUE, "sad": RED, "x": RED}
+# Her eyes in the capsule for how a task is going (face.MOODS), as the pill's _compact has them: ^ ^ when done,
+# drooping when it failed, wide open while it waits on you, else open and glancing about. Not "focus" while one
+# runs: its sway never rests, a frame every 16 ms for as long as a job lasts. Her own turns take JEV's
+TASK_LOOKS = {"done": "happy", "failed": "sad", "waiting_yes": "surprised"}
+# the capsule's eyes glow in the colour of what's going on: a reaction while it lasts (done, a notification,
+# something wrong), else her turn's or the task's own. White eyes, a tinted glow round them: the eyes stay hers
+MOOD_TINTS = {"happy": GREEN, "surprised": BLUE, "sad": RED, "x": RED}
+TINT = 0.75  # how much of the glow is the tint, the rest the eyes' own white: a wash, not a coloured ring (at 0.6
+# the listening blue read as white in the previews)
+GAZE_HOLD = 3.0  # seconds the pointer stays still before her eyes go back to glancing about on their own
+GAZE_REACH = 220  # logical px from her eyes at which she looks as far as she can that way
 BLINKS = {"open", "surprised", "focus", "think", "glasses", "headphones", "sleepy", "side"}  # as face.Eyes blinks
 MIC_STATES = {"listening", "read", "again", "dictating"}
 HINTS = ("Say \u201cstop", "Say \"stop", "Go ahead", "Let go")  # the window's hints, not words you said
@@ -124,7 +131,7 @@ class Layout:
         self.key, self.kind, self.w, self.h, self.draw, self.radius = key, kind, w, h, draw, radius
         self.cap, self.hot, self.eyes, self.animated, self.rate = cap, list(hot), eyes, animated, rate
         self.wander, self.press = wander, dict(press or {})
-        self.face = face  # her cartoon face is in it (the capsule): its pupils follow the mouse, _follow
+        self.face = face  # the capsule: her eyes in it look at the mouse while it moves, _follow
 
 
 class Caption:
@@ -145,9 +152,9 @@ class DynamicIsland:
     CARD_W, CAP_MAX_W, CAP_PAD_X, CAP_PAD_Y = 380, 700, 16, 11
     EYES, SMALL_EYES = 19, 13
     CARD_PAD, ROW_GAP, BUTTON_H = 14, 9, 22  # a card's rows: round them, between them, and their buttons' height
-    # the capsule (27 October 2026): how far it floats under the top at least, how wide its row gets at most, her
-    # cartoon face across, and the glass cards' corners
-    FLOAT, CAPSULE_MAX_W, FACE_SIZE, GLASS_CORNER = 10, 330, 26, 18
+    # the capsule (27 October 2026): how far it floats under the top at least, how wide its row gets at most, and
+    # the glass cards' corners. Her eyes are the pill's small ones (SMALL_EYES), as big against its height
+    FLOAT, CAPSULE_MAX_W, GLASS_CORNER = 10, 330, 18
 
     def __init__(self, root):
         self.root = root
@@ -173,9 +180,10 @@ class DynamicIsland:
         self.icon, self.icon_for = None, None
         self.frame_ms, self.dt = 0.0, 0.016
         self.eye = ("open", 1.0, 0.0, 0.0, False)  # this frame's eyes (face.Eyes.update), the same for every layout
-        # the capsule's cartoon: where her pupils sit (whole px from the middle of her eyes) and where her face was
-        # last drawn in the window, for the mouse to be looked at (_follow); the patch drawn into, for that
-        self.pupil, self.face_at, self.patch_at = (0, 0), None, (0, 0)
+        # the capsule: where her eyes were last drawn in the window, for the mouse to be looked at (_follow), and
+        # the patch drawn into, for that; where the pointer was and since when, so a still one lets her glance about
+        self.face_at, self.patch_at = None, (0, 0)
+        self.pointer, self.pointer_at = None, 0.0
         self.texts = {}
         self.root.after(250, self._events)
         self.runner.start()
@@ -517,8 +525,8 @@ class DynamicIsland:
         cap = self._caption(state, text, bars)
         badge = sum(int(a.data.get("badge") or 0) for a in self.lives.values() if isinstance(a.data, dict))
         turn = self._turn()[1]  # how far her turn's got (step 3/5, round 5/30), beside her dots
-        if self.style == "capsule":  # her cartoon, which the capsule always has: the Face setting is the pill's
-            return self._capsule_jev(state, colour, mode, cap, badge, turn)
+        if self.style == "capsule":  # her eyes, which the capsule always has: the Face setting is the pill's
+            return self._capsule_jev(state, expr, colour, mode, cap, badge, turn)
         key = ("jev", state, self.face_style, badge, turn and (turn.get("status"), turn.get("progress")))
         if self.face_style == "wave":
             W, H = self.WAVE[0] * k, self.WAVE[1] * k
@@ -715,9 +723,9 @@ class DynamicIsland:
         """The small island: something on the left, her eyes, something on the right. left and right are
         (width, draw(cv, x, cy, a, now)) or None."""
         k, th = self.k, self.theme()
-        if self.style == "capsule":  # her cartoon face where her eyes would be
+        if self.style == "capsule":  # her eyes in the middle, on glass
             return self._capsule(key, kind, [left, self._face(expr), right], hot=hot, rate=rate, animated=animated,
-                                 press=press)
+                                 press=press, wander=wander)
         H = self.COMPACT_H * k
         size = self.SMALL_EYES * k
         eyes_w = 2.6 * size if self.face_style == "eyes" else 0
@@ -900,9 +908,10 @@ class DynamicIsland:
         """A card's height with every row at its tallest (buttons, two lines and a bar) and "+N more" under them."""
         k = self.k
         row = max(self.f_label.line, self.BUTTON_H * k) + 2 * k + 2 * self.f_small.line + 9 * k
-        # and room for the glass card's header (her face and "2 tasks") and its bars a little lower: the window is
-        # built once for either style, and only what changed is ever sent (_push), so the pill's picture is the same
-        glass = (self.FACE_SIZE + 10) * k + plugins.CARD_ROWS * 3 * k
+        # and room for the glass card's header (her eyes and "2 tasks", 26 px, and 10 under it) and its bars a little
+        # lower: the window is built once for either style, and only what changed is ever sent (_push), so the
+        # pill's picture is the same
+        glass = (26 + 10) * k + plugins.CARD_ROWS * 3 * k
         return 2 * self.CARD_PAD * k + plugins.CARD_ROWS * (row + self.ROW_GAP * k) + self.f_small.line + 5 * k + glass
 
     @staticmethod
@@ -1061,34 +1070,47 @@ class DynamicIsland:
         e = self.eyes
         return e.mood if e.mood and now < e.mood_until else None
 
-    def _face(self, look, ring=None):
-        """Her cartoon face as a part of a capsule's row: (width, draw, True). look: island_face.CARTOON's, unless a
-        reaction's on; ring: the colour of what's going on, round her."""
+    def _eyes_w(self):
+        """How much room her eyes have on the capsule: wider than the pill's small rows give them (2.6 sizes), as
+        hearts, headphones and the sparkles round them took the clock's room and the capsule's edge, and a glance
+        to one side all but touched what's beside them (27 October previews)."""
+        return 3.2 * self.SMALL_EYES * self.k
+
+    def _face(self, expr, tint=None, voice=False):
+        """Her eyes as a part of a capsule's row: (width, draw, expr). The pill's own (face.draw_eyes, face.Eyes:
+        her blinks, her glances about, her reactions), as big; expr: how they look (face.MOODS), unless a reaction's
+        on. tint: the colour of what's going on, in their glow (MOOD_TINTS while a reaction lasts); voice: they
+        bounce with it, as on the pill's big face."""
         k, th = self.k, self.theme()
-        size = self.FACE_SIZE * k
+        size, w = self.SMALL_EYES * k, self._eyes_w()
 
         def draw(cv, x, cy, a, now):
-            mood = self._mood(now)
-            cx = x + size / 2
+            cx = x + w / 2
             self.face_at = (cx + self.patch_at[0], cy + self.patch_at[1])  # in the window, for _follow
-            face.cartoon(cv, cx, cy, size, mood or look, self.eye[1], self.pupil,
-                         self.level if look == "speak" else 0.0, now - self.t0, th["text"], MOOD_RINGS.get(mood, ring),
-                         a)
-        return size, draw, True
+            e, open_, lx, ly, _ = self.eye
+            colour = MOOD_TINTS.get(self._mood(now), tint)
+            halo = None if colour is None or not th["glow"] else \
+                tuple(TINT * c + (1 - TINT) * w_ for c, w_ in zip(colour, th["eyes"]))
+            face.draw_eyes(cv, cx, cy, size, e, open_, (lx, ly), self.level if voice else 0.0, now - self.t0,
+                           th["eyes"], th["glow"], a, halo)
+        return w, draw, expr
 
-    def _capsule(self, key, kind, parts, hot=(), rate=0, animated=False, press=None, cap=None, under=None):
-        """The capsule's row: parts, (width, draw(cv, x, cy, a, now)) each, her face (_face) among them, side by
-        side. A face at an end sits in the round end, as far from the edge as from the top. under: drawn after
-        them, below the capsule if it likes (a task's progress line)."""
+    def _capsule(self, key, kind, parts, hot=(), rate=0, animated=False, press=None, cap=None, under=None,
+                 wander=True):
+        """The capsule's row: parts, (width, draw(cv, x, cy, a, now)) each, her eyes (_face, which also says how
+        they look) among them, side by side. Eyes at an end sit in the round end, their glow clear of its edge.
+        under: drawn after them, below the capsule if it likes (a task's progress line). wander: her eyes glance
+        about when nothing else says where to look."""
         k = self.k
         H = self.COMPACT_H * k
         parts = [p for p in parts if p]
         gap = 10 * k
-        edge = (H - self.FACE_SIZE * k) / 2
+        edge = 16 * k  # eyes at an end: room in the round end for their glow and a sparkle
         left = edge if len(parts[0]) == 3 else 15 * k
         right = edge if len(parts[-1]) == 3 else 15 * k
         inner = sum(p[0] for p in parts) + gap * (len(parts) - 1)
         W = max(H, left + inner + right)
+        expr = next((p[2] for p in parts if len(p) == 3), "open")
 
         def draw(cv, ox, oy, Wn, Hn, a, now):
             x = ox + left + (Wn - (left + inner + right)) / 2
@@ -1098,29 +1120,37 @@ class DynamicIsland:
                 x += p[0] + gap
             if under is not None:
                 under(cv, ox, oy, Wn, Hn, a, now)
-        # eyes: "open" so face.Eyes keeps her blinks and reactions; never wandering, her pupils follow the mouse
-        return Layout(key, kind, W, H, draw, cap=cap, hot=hot, eyes="open", animated=animated, rate=rate,
-                      wander=False, press=press, face=True)
+        return Layout(key, kind, W, H, draw, cap=cap, hot=hot, eyes=expr, animated=animated, rate=rate,
+                      wander=wander, press=press, face=True)
 
     def _capsule_idle(self):
-        """Nothing going on: her face, ringed in violet, and the time. Drawn again when the minute changes, she
-        blinks, a reaction comes and goes or her pupils move a pixel after the mouse, and never in between."""
+        """Nothing going on: her eyes, glancing about or at the mouse while it moves, and the time. Drawn again when
+        the minute changes, she blinks or glances, a reaction comes and goes or the mouse moves her eyes a pixel,
+        and never in between."""
         k, th = self.k, self.theme()
         font = self.f_compact
 
         def clock(cv, x, cy, a, now):
             cv.text(font.render(time.strftime("%H:%M", time.localtime(now))), x - 2, cy - font.line / 2 - 1,
                     th["text"], a)
-        return self._capsule(("idle",), "idle", [self._face("open", VIOLET), (font.measure("88:88") + k, clock)])
+        return self._capsule(("idle",), "idle", [self._face("open"), (font.measure("88:88") + k, clock)])
 
-    def _capsule_jev(self, state, colour, mode, cap, badge, turn):
-        """Her turn in the capsule: her face for it (CARTOON_FOR) ringed in its colour, the app you're in, the dots
-        that move with a voice, how far her turn's got and how many go on meanwhile, the words under it as ever."""
+    def _ink(self, colour):
+        """A colour for words on the glass: as it is on dark glass, darker on light glass, where amber "40%" was
+        hard to read (27 October previews)."""
+        if self.theme() is GLASS["light"]:
+            return tuple(c * 0.72 for c in colour)
+        return colour
+
+    def _capsule_jev(self, state, expr, colour, mode, cap, badge, turn):
+        """Her turn in the capsule: her eyes as the pill has them for it (JEV), glowing in its colour, the app you're
+        in, the dots that move with a voice, how far her turn's got and how many go on meanwhile, the words under
+        it as ever."""
         k = self.k
         icon = self._front_icon(round(17 * k))
         n, step, r = 5, 8.6 * k, 2.4 * k
         gr = 5.5 * k
-        parts = [self._face(CARTOON_FOR.get(state, "open"), colour)]
+        parts = [self._face(expr, colour, voice=state in MIC_STATES or state == "speaking")]
         if icon is not None:
             parts.append((icon.shape[1], lambda cv, x, cy, a, now: cv.image(icon, x, cy - icon.shape[0] / 2, a)))
 
@@ -1142,7 +1172,9 @@ class DynamicIsland:
             br = self._badge_r(badge)
             parts.append((2 * br, lambda cv, x, cy, a, now: self._badge(cv, x + br, cy, badge, a)))
         key = ("jev", state, "capsule", badge, turn and (turn.get("status"), turn.get("progress")))
-        return self._capsule(key, "jev", parts, animated=state not in ("error", "note", "phone"), cap=cap)
+        # her eyes do as her turn says (looking up while she thinks, about while she works), as on the pill
+        return self._capsule(key, "jev", parts, animated=state not in ("error", "note", "phone"), cap=cap,
+                             wander=False)
 
     def _badge_r(self, n):
         """Half the width of _badge's pill for n."""
@@ -1174,7 +1206,7 @@ class DynamicIsland:
                      (s0 - 1, y - lw, s1 + 1, y + lw), colour, a)
 
     def _capsule_task(self, act):
-        """What she's working on, small, in the capsule: her face ringed in its colour, the first one's title, how
+        """What she's working on, small, in the capsule: her eyes glowing in its colour, the first one's title, how
         far it's got ("40%") or how long it's been going, how many there are, and a thin line under the capsule
         for how far (or a piece stepping along it once a second when that isn't known)."""
         k, th = self.k, self.theme()
@@ -1194,15 +1226,16 @@ class DynamicIsland:
             since = lead.get("since") if not words else None
         words_w = font.measure("88:88") + 2 * k if since is not None else font.measure(words)
         br = self._badge_r(n) if n > 1 else 0
-        size, gap = self.FACE_SIZE * k, 10 * k
-        avail = self.CAPSULE_MAX_W * k - (self.COMPACT_H * k - size) / 2 - 15 * k - size - gap - \
+        size, gap = self._eyes_w(), 10 * k
+        avail = self.CAPSULE_MAX_W * k - 16 * k - 15 * k - size - gap - \
             (words_w + gap if words_w else 0) - (2 * br + gap if br else 0)
         title = font.fit(" ".join(str(lead.get("title") or "").split()), max(30 * k, avail))
         parts = [self._face(TASK_LOOKS.get(state, "open"), colour),
                  self._slot_text(title, th["text"]) if title else None]
+        ink = self._ink(colour)
         if words_w:
             def tell(cv, x, cy, a, now):
-                cv.text(font.render(words or _clock(max(0.0, now - since))), x - 2, cy - font.line / 2 - 1, colour, a)
+                cv.text(font.render(words or _clock(max(0.0, now - since))), x - 2, cy - font.line / 2 - 1, ink, a)
             parts.append((words_w, tell))
         if br:
             parts.append((2 * br, lambda cv, x, cy, a, now: self._badge(cv, x + br, cy, n, a)))
@@ -1226,15 +1259,16 @@ class DynamicIsland:
         lead = rows[0] if rows else {}
         n = len(rows) + more
         W = self.CARD_W * k
-        pad, gap, size = self.CARD_PAD * k, self.ROW_GAP * k, self.FACE_SIZE * k
+        pad, gap = self.CARD_PAD * k, self.ROW_GAP * k
+        head_h, ew = 26 * k, self._eyes_w()  # its top line, her eyes and the heading
         if d.get("rows") is not None:
             head = d.get("short") or d.get("title") or (f"{n} tasks" if n != 1 else "1 task")
         else:  # the card is its one row: its plugin's name over it, not its title twice
             head = act.plugin.replace("_", " ").capitalize()
-        tx = pad + size + 10 * k
+        tx = pad + ew + 8 * k
         head = self.f_title.fit(str(head), W - tx - pad)
         me = self._face(TASK_LOOKS.get(lead.get("state"), "open"), self._glass_colour(lead))
-        hot, press, parts, y = [], {}, [], pad + size + 8 * k
+        hot, press, parts, y = [], {}, [], pad + head_h + 8 * k
         for row in rows:
             h, draw_row = self._glass_row(row, y, W, pad, act.plugin, hot, press)
             parts.append(draw_row)
@@ -1245,7 +1279,7 @@ class DynamicIsland:
         press["pin"] = (act.plugin, "pin", None, False)
 
         def draw(cv, ox, oy, Wn, Hn, a, now):
-            hy = oy + pad + size / 2
+            hy = oy + pad + head_h / 2
             me[1](cv, ox + pad, hy, a, now)
             cv.text(self.f_title.render(head), ox + tx - 2, hy - self.f_title.line / 2 - 1, th["text"], a)
             for draw_row in parts:
@@ -1254,7 +1288,7 @@ class DynamicIsland:
                 cv.text(self.f_small.render(tail), ox + pad - 2, oy + y - gap + 5 * k, th["muted"], a)
         live = any((r.get("state") or "running") == "running" for r in rows)
         return Layout(("card", act.plugin, repr(rows), more), "card", W, H, draw, radius=self._corner(), hot=hot,
-                      eyes="open", rate=1 if live else 0, wander=False, press=press, face=True)
+                      eyes=me[2], rate=1 if live else 0, press=press, face=True)
 
     def _glass_row(self, row, y0, W, pad, plugin, hot, press):
         """One row of a glass card from y0: (its height, draw(cv, ox, oy, a, now)): its title with a few words at
@@ -1312,12 +1346,12 @@ class DynamicIsland:
         return h, draw
 
     def _capsule_wait(self, now, lay, moving):
-        """Seconds till the capsule's next frame: at once while it moves or she blinks, 30 a second while the dots
-        go with a voice, once a second for a long job, and otherwise only at her next blink, when a reaction ends
-        or the minute changes (the clock), with her pupils moved by _follow in between. Never a frame for
-        nothing."""
+        """Seconds till the capsule's next frame: at once while it moves, she blinks or her eyes are on their way
+        somewhere, 30 a second while the dots go with a voice or hearts beat, once a second for a long job, and
+        otherwise only at her next blink or glance about, when a reaction ends or the minute changes (the clock),
+        with the mouse moving her eyes by _follow in between. Never a frame for nothing."""
         e = self.eyes
-        if moving or e.blink_at is not None:
+        if moving or e.blink_at is not None or self._looking():
             return 0.016
         if lay.animated or (lay.cap is not None and lay.cap.animated):
             wait = 0.033
@@ -1326,26 +1360,37 @@ class DynamicIsland:
         else:
             wait = 3600.0
         mood = self._mood(now)
-        if mood:
+        if mood in ("love", "happy"):  # the hearts beat and the sparkles twinkle while they last
+            wait = min(wait, 0.033)
+        elif mood:
             wait = min(wait, max(0.016, e.mood_until - now + 0.01))
         if mood is None or mood in BLINKS:  # a smile or hearts don't blink: the next one waits till it's over
-            wait = min(wait, max(0.016, e.next_blink - now))
+            due = e.next_blink
+            if lay.wander and self.look_at is None:  # and her next glance about, when the mouse isn't moving her
+                due = min(due, e.next_look)
+            wait = min(wait, max(0.016, due - now))
         if lay.kind == "idle":
             wait = min(wait, 60.02 - now % 60)
         return wait
 
-    def _follow(self, x, y):
-        """Her pupils toward the pointer at x, y (in the window): a frame only when that moves one by a whole pixel,
-        so a still or slow mouse costs nothing between the 70 ms looks at it (_hover_poll)."""
+    def _follow(self, x, y, now):
+        """Her eyes toward the pointer at x, y (in the window) while it moves, and back to glancing about on their
+        own once it's been still GAZE_HOLD seconds. A frame only when that moves them a whole pixel (draw_eyes moves
+        them look * 0.36 of their size across and 0.26 down), so a still or slow mouse costs nothing between the
+        70 ms looks at it (_hover_poll); face.Eyes springs them there, as when she glances about."""
         if self.face_at is None:
             return
-        reach = face.pupil_reach(self.FACE_SIZE * self.k)
-        dx, dy = x - self.face_at[0], y - self.face_at[1]
-        d = math.hypot(dx, dy)
-        f = reach * min(1.0, d / (60 * self.k)) / d if d > 0.5 else 0.0  # all the way once it's 60 px off
-        pupil = (int(round(dx * f)), int(round(dy * f)))
-        if pupil != self.pupil:
-            self.pupil = pupil
+        if (x, y) != self.pointer:
+            self.pointer, self.pointer_at = (x, y), now
+        look = None
+        if now - self.pointer_at < GAZE_HOLD:
+            reach, size = GAZE_REACH * self.k, self.SMALL_EYES * self.k
+            sx, sy = 1 / (0.36 * size), 1 / (0.26 * size)  # a whole pixel's worth of looking, across and down
+            lx = max(-1.0, min(1.0, (x - self.face_at[0]) / reach))
+            ly = max(-1.0, min(1.0, (y - self.face_at[1]) / reach))
+            look = (round(lx / sx) * sx, round(ly / sy) * sy)
+        if look != self.look_at:
+            self.look_at = look
             self._wake()
 
     # ------------------------------------------------------------------ the frames
@@ -1421,9 +1466,7 @@ class DynamicIsland:
         for spring in (self.W, self.H, self.CW, self.CH):
             spring.step(dt)
         lay = self.layout or self.prev
-        if lay is not None and lay.face:  # the cartoon takes only her blinks and reactions: never a glance to draw
-            self.eye = self.eyes.update(now, dt, lay.eyes, wander=False, look_at=(0.0, 0.0))
-        elif lay is not None and lay.eyes is not None:  # once a frame, whatever's fading in or out
+        if lay is not None and lay.eyes is not None:  # once a frame, whatever's fading in or out
             self.eye = self.eyes.update(now, dt, lay.eyes, wander=lay.wander, look_at=self.look_at)
         if lay is not None and lay.kind == "jev":
             src = "mic" if self.jev and self.jev["state"] in MIC_STATES else \
@@ -1704,8 +1747,8 @@ class DynamicIsland:
                 self.dirty = True
                 self._wake()
         win.set_click_through(self.hwnd, not (self.hover and clickable))
-        if lay is not None and lay.face:  # the capsule's cartoon looks at the pointer wherever it is
-            self._follow(x, y)
+        if lay is not None and lay.face and lay.kind != "jev":  # the capsule's eyes look at the pointer while it
+            self._follow(x, y, now)  # moves, wherever it is; on her turn they do as it says (JEV), as on the pill
         elif self.hover and lay is not None and lay.kind == "idle":  # her eyes follow the mouse
             cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
             self.look_at = (max(-1.0, min(1.0, (x - cx) / max(1.0, (x1 - x0) / 2))),
