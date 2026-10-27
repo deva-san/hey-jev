@@ -206,6 +206,16 @@ def when_text(t):
     return when.strftime("%a %d %b" if days < 300 else "%d %b %Y").replace(" 0", " ")
 
 
+def skill_line(entry):
+    """A skill as the Memory tab lists it: "work-mode: Their work setup  (you say “work mode”)", its emoji first if it
+    has one, "(put in by hand)" for one in skills\\imported, and why it's hidden if it is (skills.why_hidden), so a
+    skill dropped in that never shows up in what she does says why."""
+    says = ", ".join(f"“{t}”" for t in entry["triggers"])
+    line = (f"{entry['emoji']} " if entry.get("emoji") else "") + f"{entry['name']}: {entry['description']}"
+    line += (f"  (you say {says})" if says else "") + ("  (put in by hand)" if entry.get("imported") else "")
+    return line + (f"  (hidden: {entry['hidden']})" if entry.get("hidden") else "")
+
+
 def todo_stamp():
     """When the to-do list last changed, so the tab only reads it again when it has."""
     try:
@@ -1036,7 +1046,8 @@ class AssistantWindow:
         store = hermes_memory.store()
         try:
             store.load_from_disk()
-            learned = skills.list_skills()
+            # the hidden ones too, with why (skills.why_hidden); one just dropped in is scanned off the window's thread
+            learned = skills.list_skills(hidden=True, wait=False)
         except Exception as exc:
             self.mem_message.configure(text=f"Couldn't read her memory: {exc}", fg=ERROR)
             return
@@ -1046,8 +1057,7 @@ class AssistantWindow:
         about = {"user": "You", "memory": "Her notes", "skill": "Skill"}
         for row, (target, entry) in enumerate(self.memories):
             if target == "skill":  # "work-mode: Their work setup (you say: work mode)"
-                says = ", ".join(f"\u201c{t}\u201d" for t in entry["triggers"])
-                entry = f"{entry['name']}: {entry['description']}" + (f"  (you say {says})" if says else "")
+                entry = skill_line(entry)
             self.mem_table.insert("", "end", iid=str(row), values=(about[target], " ".join(entry.split())))
         try:
             turns = history.count()
@@ -1064,7 +1074,8 @@ class AssistantWindow:
             return
         target, entry = self.memories[int(sel[0])]
         if target == "skill":
-            result = skills.delete_skill(entry["dir"], really=True)  # you asked: gone, not archived
+            # you asked: gone, not archived; one put in by hand from skills\imported, not hers of the same name
+            result = skills.delete_skill(entry["dir"], really=True, imported=bool(entry.get("imported")))
         else:
             result = hermes_memory.memory_tool(hermes_memory.store(), "remove", target, old_text=entry)
         if result.get("success"):
