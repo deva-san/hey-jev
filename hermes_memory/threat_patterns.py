@@ -1,4 +1,4 @@
-# From Hermes Agent by Nous Research, tools/threat_patterns.py at commit 3569fba6a686e17f9208da7500de8bd20b4c82f9
+# From Hermes Agent by Nous Research, tools/threat_patterns.py at commit 1ae3c55e4bb16f495ebf0536a5672782d903e15e
 # https://github.com/NousResearch/hermes-agent, MIT License, see LICENSE in this folder.
 # Copied by sync_hermes.py; only the imports are changed, see UPSTREAM.json. Don't edit by hand.
 """Shared threat-pattern library (prompt injection / promptware / exfiltration) for
@@ -25,7 +25,7 @@ _SECRET_VAR = r"\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)S?\b"
 # Verb prefix for "modify agent config" patterns.
 _MODIFY = r"(update|modify|edit|write|change|append|add\s+to)\s+[^\n]{0,2048}"
 # (regex, pattern_id, scope); scope ∈ {"all", "context", "strict"}
-_PATTERNS: List[Tuple[str, str, str]] = [
+_PATTERNS: list[tuple[str, str, str]] = [
     # ── Classic prompt injection (applies everywhere) ────────────────
     (rf'ignore\s+{_FILLER}(previous|all|above|prior)\s+{_FILLER}instructions', "prompt_injection", "all"),
     (r'system\s+prompt\s+override', "sys_prompt_override", "all"),
@@ -118,8 +118,8 @@ INVISIBLE_CHARS = frozenset(
 _SCOPE_SETS = {"all": ("all", "context", "strict"), "context": ("context", "strict"), "strict": ("strict",)}
 
 
-def _compile() -> dict[str, List[Tuple[re.Pattern, str]]]:
-    compiled: dict[str, List[Tuple[re.Pattern, str]]] = {"all": [], "context": [], "strict": []}
+def _compile() -> dict[str, list[tuple[re.Pattern, str]]]:
+    compiled: dict[str, list[tuple[re.Pattern, str]]] = {"all": [], "context": [], "strict": []}
     for pattern, pid, scope in _PATTERNS:
         if scope not in _SCOPE_SETS:
             raise ValueError(f"threat_patterns: unknown scope {scope!r} for pattern {pid!r}")
@@ -131,7 +131,7 @@ def _compile() -> dict[str, List[Tuple[re.Pattern, str]]]:
 _COMPILED = _compile()
 
 
-def scan_for_threats(content: str, scope: str = "context") -> List[str]:
+def scan_for_threats(content: str, scope: str = "context") -> list[str]:
     """Matched pattern IDs in ``content`` for ``scope``; invisible codepoints are
     reported as ``"invisible_unicode_U+XXXX"``. Raises ValueError on an unknown scope."""
     if not content:
@@ -140,7 +140,7 @@ def scan_for_threats(content: str, scope: str = "context") -> List[str]:
         raise ValueError(f"scan_for_threats: unknown scope {scope!r}")
     content = content[:MAX_SCAN_CHARS]
     # Invisible unicode is checked on the RAW content: NFKC below can strip these codepoints.
-    findings: List[str] = [f"invisible_unicode_U+{ord(ch):04X}" for ch in set(content) & INVISIBLE_CHARS]
+    findings: list[str] = [f"invisible_unicode_U+{ord(ch):04X}" for ch in set(content) & INVISIBLE_CHARS]
     # NFKC folds full-width / compatibility variants (ｃａｔ → cat) against homograph bypass.
     # It does NOT fold cross-script confusables (Cyrillic ``а``) — that needs a TR#39 database.
     normalised = unicodedata.normalize("NFKC", content)
@@ -162,4 +162,4 @@ def first_threat_message(content: str, scope: str = "strict") -> Optional[str]:
             f"injection or exfiltration payloads.")
 
 
-__all__ = ["INVISIBLE_CHARS", "MAX_SCAN_CHARS", "scan_for_threats", "first_threat_message"]
+__all__ = ["INVISIBLE_CHARS", "MAX_SCAN_CHARS", "first_threat_message", "scan_for_threats"]

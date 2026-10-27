@@ -1,6 +1,6 @@
 {
  "repo": "https://github.com/NousResearch/hermes-agent",
- "commit": "3569fba6a686e17f9208da7500de8bd20b4c82f9",
+ "commit": "1ae3c55e4bb16f495ebf0536a5672782d903e15e",
  "files": [
   {
    "to": "memory_store.py",
@@ -29,6 +29,10 @@
     [
      "from tools import memory_tool  #",
      "from . import _compat as memory_tool  #"
+    ],
+    [
+     "from tools.memory_tool import _memory_target_error",
+     "from .memory_bits import _memory_target_error"
     ]
    ]
   },
@@ -95,7 +99,10 @@
       "is_skill_support_path",
       "iter_skill_index_files",
       "SKILL_PROMPT_DESC_LIMIT",
+      "_LAST_WHITESPACE_RE",
+      "_CLIP_TRAIL_RE",
       "_normalize_skill_description",
+      "clip_skill_description",
       "extract_skill_description"
      ]
     },
@@ -172,14 +179,15 @@
   },
   {
    "to": "acp_bits.py",
-   "doc": "Pieces of Hermes Agent's ACP client (agent/copilot_acp_client.py) Hey Jev uses to drive the OpenCode CLI in\ncoder.py: its JSON-RPC replies, and picking the session's model from the ones it offers.",
-   "imports": "from typing import Any",
+   "doc": "Pieces of Hermes Agent's ACP client (agent/acp_client.py) Hey Jev uses to drive the OpenCode CLI in\ncoder.py: its JSON-RPC replies, and picking the session's model from the ones it offers.",
+   "imports": "from collections.abc import Callable\nfrom typing import Any",
    "extract": [
     {
-     "from": "agent/copilot_acp_client.py",
+     "from": "agent/acp_client.py",
      "names": [
       "_jsonrpc_result",
       "_jsonrpc_error",
+      "_never_disabled",
       "_enabled_id_list",
       "_model_config_option",
       "_session_model_ids",
@@ -215,6 +223,206 @@
       "_interrupted_at",
       "mark_speech_interrupted",
       "take_speech_interrupted"
+     ]
+    }
+   ]
+  },
+  {
+   "to": "iteration_budget.py",
+   "from": "agent/iteration_budget.py",
+   "rewrite": []
+  },
+  {
+   "to": "interrupt.py",
+   "from": "tools/interrupt.py",
+   "rewrite": [
+    [
+     "from utils import env_var_enabled",
+     "from ._compat import env_var_enabled"
+    ]
+   ]
+  },
+  {
+   "to": "daemon_pool.py",
+   "from": "tools/daemon_pool.py",
+   "rewrite": []
+  },
+  {
+   "to": "skills_guard.py",
+   "from": "tools/skills_guard.py",
+   "rewrite": []
+  },
+  {
+   "to": "tool_result_classification.py",
+   "from": "agent/tool_result_classification.py",
+   "rewrite": []
+  },
+  {
+   "to": "tool_guardrails.py",
+   "from": "agent/tool_guardrails.py",
+   "rewrite": [
+    [
+     "from utils import safe_json_loads",
+     "from ._compat import safe_json_loads"
+    ],
+    [
+     "from agent.tool_result_classification import (",
+     "from .tool_result_classification import ("
+    ]
+   ]
+  },
+  {
+   "to": "tool_bits.py",
+   "doc": "Pieces of Hermes Agent's tool calling for Hey Jev's agent: a tool's registry entry, its bounded JSON errors\nand results, and a call's arguments cut to what its handler takes (tools/registry.py); the tools safe to run\nside by side and the line asking a model to batch them (agent/tool_dispatch_helpers.py,\nagent/prompt_builder.py); and the wrapper that marks text from outside as data, never instructions\n(agent/tool_dispatch_helpers.py).",
+   "imports": "import inspect\nimport json\nimport logging\nimport re\nfrom dataclasses import dataclass\nfrom typing import Any, Callable, Optional\n\nfrom .threat_patterns import scan_for_threats",
+   "extract": [
+    {
+     "from": "tools/registry.py",
+     "names": [
+      "logger",
+      "_MAX_TOOL_ERROR_CHARS",
+      "_TOOL_ERROR_TRUNCATION_MARKER",
+      "_MAX_LOGGED_ERROR_CHARS",
+      "_bound_error_text",
+      "_bound_json_error_result",
+      "ToolEntry",
+      "tool_error",
+      "tool_result",
+      "_kwargs_accepted_by"
+     ]
+    },
+    {
+     "from": "agent/tool_dispatch_helpers.py",
+     "names": [
+      "_NEVER_PARALLEL_TOOLS",
+      "_PARALLEL_SAFE_TOOLS",
+      "_is_text_part",
+      "_UNTRUSTED_TOOL_NAMES",
+      "_UNTRUSTED_TOOL_PREFIXES",
+      "_UNTRUSTED_WRAP_MIN_CHARS",
+      "_DELIMITER_TOKEN_RE",
+      "_is_untrusted_tool",
+      "_is_text_item",
+      "_UPSTREAM_ELISION_PATTERNS",
+      "_ELISION_SCAN_MIN_CHARS",
+      "_ELISION_SCAN_MAX_CHARS",
+      "_UPSTREAM_ELISION_NOTICE",
+      "_detect_upstream_elision",
+      "_maybe_append_elision_notice",
+      "_tool_output_risk_metadata",
+      "_neutralize_delimiters",
+      "_maybe_wrap_untrusted"
+     ]
+    },
+    {
+     "from": "agent/prompt_builder.py",
+     "names": [
+      "PARALLEL_TOOL_CALL_GUIDANCE"
+     ]
+    }
+   ]
+  },
+  {
+   "to": "memory_bits.py",
+   "doc": "The piece of Hermes Agent's memory tool (tools/memory_tool.py) its store (memory_store.py) calls back into:\nthe check that one write names one store, USER.md or MEMORY.md, and that the store is switched on.",
+   "imports": "from typing import Any\n\nfrom .memory_store import FAILURE_CLASS, MemoryStore",
+   "extract": [
+    {
+     "from": "tools/memory_tool.py",
+     "names": [
+      "_memory_target_error"
+     ],
+     "rewrite": [
+      [
+       "from tools.registry import _bound_error_text",
+       "from .tool_bits import _bound_error_text"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "to": "todo_store.py",
+   "doc": "Hermes Agent's checklist for the agent's own work on a job of several parts (tools/todo_tool.py): TodoStore,\nits schema (which allows one item in progress at a time) and the tool's entry point. Without the\ntool-registry entry and the transcript helpers, which need the rest of Hermes.",
+   "imports": "import json\nfrom typing import Any, Dict, List, Optional\n\nfrom .tool_bits import tool_error",
+   "extract": [
+    {
+     "from": "tools/todo_tool.py",
+     "names": [
+      "VALID_STATUSES",
+      "MAX_TODO_CONTENT_CHARS",
+      "MAX_TODO_ITEMS",
+      "MAX_TODO_RESULT_CHARS",
+      "_TRUNCATION_MARKER",
+      "TODO_INJECTION_HEADER",
+      "_STATUS_MARKERS",
+      "_ACTIVE_STATUSES",
+      "TodoStore",
+      "todo_tool",
+      "check_todo_requirements",
+      "TODO_SCHEMA",
+      "TODO_LEGACY_ALIASES",
+      "TODO_TOOL_NAMES",
+      "is_todo_tool_name"
+     ]
+    }
+   ]
+  },
+  {
+   "to": "goal_bits.py",
+   "doc": "Pieces of Hermes Agent's standing goals (hermes_cli/goals.py) for a job worked on in the background: the\njudge's prompts (done, blocked, continue or wait), the line that sends the agent on, and reading the\njudge's verdict, which fails open to continue.",
+   "imports": "import json\nimport re\nfrom typing import Any, Optional",
+   "extract": [
+    {
+     "from": "hermes_cli/goals.py",
+     "names": [
+      "DEFAULT_MAX_TURNS",
+      "_JUDGE_RESPONSE_SNIPPET_CHARS",
+      "DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES",
+      "CONTINUATION_PROMPT_TEMPLATE",
+      "JUDGE_SYSTEM_PROMPT",
+      "JUDGE_USER_PROMPT_TEMPLATE",
+      "_truncate",
+      "_JSON_OBJECT_RE",
+      "_extract_json_object",
+      "_parse_judge_response"
+     ]
+    }
+   ]
+  },
+  {
+   "to": "notify_bits.py",
+   "doc": "Pieces of Hermes Agent's background-work notices (tools/process_registry_notifications.py): the text the agent\nis given when a background job or command finishes, and the short title shown for it.",
+   "imports": "import time\nfrom contextlib import suppress\n\nfrom ._compat import delegation_notice_lines as _notice_lines  # Hermes' reads its subagent config",
+   "extract": [
+    {
+     "from": "tools/process_registry_notifications.py",
+     "names": [
+      "_DONE",
+      "_REASON_STATUS",
+      "_format_age",
+      "_TRUNCATED_SUMMARY_NOTE",
+      "_is_truncated",
+      "_preamble",
+      "_format_task_failure_notice",
+      "_recovery_lines",
+      "_format_batch_delegation",
+      "_process_accounting_lines",
+      "_format_async_delegation",
+      "async_delegation_display_text",
+      "_short_title",
+      "_short_command",
+      "process_completion_display_text",
+      "heartbeat_output_text",
+      "_delegation_attribution_line",
+      "_completion_status",
+      "format_process_notification"
+     ],
+     "rewrite": [
+      [
+       "from tools.delegate_tool import get_subagent_attribution",
+       "from ._compat import get_subagent_attribution"
+      ]
      ]
     }
    ]

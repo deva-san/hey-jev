@@ -1,4 +1,4 @@
-# From Hermes Agent by Nous Research, tools/voice_mode_transcript.py, tools/tts_streaming.py at commit 3569fba6a686e17f9208da7500de8bd20b4c82f9
+# From Hermes Agent by Nous Research, tools/voice_mode_transcript.py, tools/tts_streaming.py at commit 1ae3c55e4bb16f495ebf0536a5672782d903e15e
 # https://github.com/NousResearch/hermes-agent, MIT License, see LICENSE in this folder.
 # Copied by sync_hermes.py; only the imports are changed, see UPSTREAM.json. Don't edit by hand.
 
@@ -78,7 +78,7 @@ def is_tts_echo(transcript: str, spoken_text: str,
         return True
     if len(a) < MIN_FRAGMENT_LENGTH_FOR_ECHO or len(a) >= len(b):
         return False
-    return any(_similar(a, b[start : start + len(a)]) for start in range(0, len(b) - len(a) + 1))
+    return any(_similar(a, b[start : start + len(a)]) for start in range(len(b) - len(a) + 1))
 
 
 # --- tools/tts_streaming.py ---
