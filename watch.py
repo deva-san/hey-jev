@@ -84,7 +84,7 @@ def notifications(since=0.0, messages_only=True, limit=30):
             OWN_SEEN[app] = max(OWN_SEEN.get(app, 0.0), (arrived - FILETIME_1970) / 1e7)  # covered, not new
             continue
         out.append({"app": app, "from": texts[0][:60], "text": " ".join(texts[1:])[:300],
-                    "when": (arrived - FILETIME_1970) / 1e7})
+                    "when": (arrived - FILETIME_1970) / 1e7, "app_id": primary_id or ""})
         if len(out) >= limit:
             break
     return out[::-1]

@@ -13,7 +13,17 @@ from .memory_store import ENTRY_DELIMITER, MEMORY_BLOCK_HEADERS, MemoryStore
 
 __all__ = ["ENTRY_DELIMITER", "MEMORY_BLOCK_HEADERS", "MemoryStore", "get_hermes_home", "get_memory_dir", "set_home",
            "set_memory_dir",
-           "memory_tool"]
+           "memory_tool", "store", "USER_CHAR_LIMIT", "MEMORY_CHAR_LIMIT"]
+
+# Hey Jev: USER.md was full at Hermes' 1,375 letters by 22 October, and everything new she learned about you was
+# dropped ("not kept: Memory at 1,357/1,375 chars"), while MEMORY.md used 53 of its 2,200. The room goes where she
+# writes: the same 3,575 letters in all, so her prompt stays within its budget (tests/test_learning.py)
+USER_CHAR_LIMIT, MEMORY_CHAR_LIMIT = 2000, 1575
+
+
+def store() -> MemoryStore:
+    """Her memory, with Hey Jev's limits: use this, not MemoryStore(), so every reader and writer agrees on them."""
+    return MemoryStore(memory_char_limit=MEMORY_CHAR_LIMIT, user_char_limit=USER_CHAR_LIMIT)
 
 _STORE_ACTIONS = {
     "add": lambda store, target, content, old_text: store.add(target, content),

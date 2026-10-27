@@ -416,6 +416,18 @@ class RoomTalk(unittest.TestCase):
                      "That sounded like someone speaking nearby, not a request for me."):
             self.assertTrue(siri.let_go({"steps": [], "say": said}), said)
 
+    def test_asking_what_room_talk_meant_is_let_go(self):
+        """Free models' questions back to room talk, 9 to 21 October: without her name she never asks what you meant."""
+        for said in ("What do you need me to do, Hari?", "Merlin is what, Hari? Can you finish the sentence?",
+                     "I'm lost, Hari \u2014 can you repeat that? Couldn't make out what you meant.",
+                     "Not following you, Hari \u2014 what do you want me to do? Just say it.",
+                     "Could you clarify what you'd like me to do with that message?",
+                     "Notepad's open \u2014 what do you want me to do with it, Hari?"):
+            self.assertTrue(siri.let_go({"steps": [], "say": said}), said)
+        for said in ("What would you like me to type to Amma?", "Which Harish profile should I open?",
+                     "Who should I message, and what should it say?"):  # what she needs to know to do it
+            self.assertIsNone(siri.let_go({"steps": [], "say": said}), said)
+
     def test_an_answer_is_not_let_go(self):
         for plan in ({"steps": [], "say": "It's 5 PM."},
                      {"steps": [], "say": "It was said to you, Hari. Your C drive is nearly full."},
@@ -515,6 +527,43 @@ class WebSearch(unittest.TestCase):
         self.assertEqual(len(wiki), 2)
 
 
+class CurrentYears(unittest.TestCase):
+    """22 October 2026: "GTA six launched any new trailer" was searched as "GTA 6 new trailer 2024 2025", the model's
+    own "now", and found 2024's stories a week after the launch trailer came out."""
+    NOW = time.localtime().tm_year
+
+    def q(self, query, said):
+        return siri.current_query(query, said)
+
+    def test_a_recent_year_they_didnt_say_is_taken_out(self):
+        a, b = self.NOW - 2, self.NOW - 1
+        self.assertEqual(self.q(f"GTA 6 new trailer {a} {b}", "GTA six launched any new trailer"), "GTA 6 new trailer")
+        self.assertEqual(self.q(f"FIFA World Cup {self.NOW - 4} winner", "who won the last world cup"),
+                         "FIFA World Cup winner")
+        self.assertEqual(self.q(f"Python latest version in {a}-{str(b)[2:]}", "python latest version"),
+                         "Python latest version")
+
+    def test_one_they_said_or_counted_back_to_stays_and_so_does_this_years(self):
+        old = self.NOW - 2
+        for query, said in ((f"who won the {old} T20 World Cup", f"who won the {old} T20 World Cup"),
+                            (f"India GDP growth {self.NOW - 1}", "what was India's GDP growth last year"),
+                            (f"iPhone price {self.NOW}", "latest iphone price"),
+                            (f"x {old}", ""),  # the words aren't known
+                            ("World War 2 1945", "when did world war two end")):
+            self.assertEqual(self.q(query, said), query, said)
+
+    def test_every_search_she_makes_goes_without_it(self):
+        searched = []
+        siri.agent.SAID.set("GTA six launched any new trailer")
+        self.addCleanup(siri.agent.SAID.set, "")
+        with patch.object(siri.web, "search", lambda q, links=False: searched.append(q) or {}), \
+                patch.object(siri.web, "news", lambda t, n=6, links=False: searched.append(t) or []):
+            out = siri.run_info([{"do": "web", "query": f"GTA 6 trailer {self.NOW - 1}"},
+                                 {"do": "news", "topic": f"GTA 6 {self.NOW - 1}"}])
+        self.assertEqual(searched, ["GTA 6 trailer", "GTA 6"])
+        self.assertIn('"web": "GTA 6 trailer"', out)
+
+
 class WebRead(unittest.TestCase):
     """A20: names that point at this PC or the home network, and redirects to them, are never fetched."""
 
@@ -606,6 +655,11 @@ class PromptBits(unittest.TestCase):
     def test_timer_label_only_when_named(self):
         line = next(l for l in siri.PROMPT.splitlines() if l.startswith('{"do":"timer"'))
         self.assertIn("label and alert only", line)
+
+    def test_night_light_has_its_own_step(self):
+        """With its thinking off, Haiku turned on dark mode for "turn on night light" 4 times in 4: it had no step
+        of its own, only a walk through Settings."""
+        self.assertIn('{"do":"dark_mode","on":true} {"do":"night_light","on":true}', siri.PROMPT)
 
 
 if __name__ == "__main__":

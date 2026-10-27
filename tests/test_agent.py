@@ -267,6 +267,7 @@ class Live(Home):
                                     (siri, "do_step", self.app.do_step), (siri, "press_keys", self.app.press_keys),
                                     (siri, "review", lambda **kw: self.reviews.append(kw)),
                                     (siri, "media_playing", lambda: False), (siri, "asked_last", lambda within=0: False),
+                                    (siri, "offered", lambda within=0: ""),
                                     (siri, "soul", lambda: ""), (siri, "memory_block", lambda: ""),
                                     (siri, "see", ORIGINAL["see"]), (siri.vision, "capture", self.capture),
                                     (siri.decider, "available", lambda: False),
@@ -327,7 +328,9 @@ class Live(Home):
         return agent.procedures()
 
 
-NIGHT = "turn on night light"
+# A Settings task the model does on screen. "Turn on night light" alone is switched in the registry now (QUICK)
+NIGHT = "turn on night light in settings"
+NIGHT_NAME = "turn-on-night-light-in-settings"
 
 
 class Learning(Live):
@@ -350,9 +353,10 @@ class Learning(Live):
     def test_night_light_is_learned_by_name_and_done_again_with_no_model(self):
         script = self.night_light()
         self.assertEqual(self.said, [f"Okay: {NIGHT}.", "Night light's on, and I've learned how."])  # said first
-        self.assertEqual((self.shots, len(script.sent)), ([], 2))  # its controls were enough: no screenshot
+        # with Vision on she sees the screen each round, as OpenLive's agent does; the switch is still learned by name
+        self.assertEqual((len(self.shots), len(script.sent), script.picture(0), script.picture(1)), (2, 2, True, True))
         (name, proc), = self.learned().items()
-        self.assertEqual(name, "turn-on-night-light")
+        self.assertEqual(name, NIGHT_NAME)
         self.assertEqual(proc["steps"], [
             {"do": "open", "app": "Settings"},  # the plan's own step, where it starts
             {"do": "ui", "name": "Display", "role": "button", "in": "systemsettings.exe"},
@@ -364,7 +368,7 @@ class Learning(Live):
         self.app.show("mail.google.com")
         self.said.clear()
         self.no_model()
-        siri.handle("Turn on night light.")
+        siri.handle("Turn on night light in Settings.")
         self.assertEqual(self.said, [f"Okay: {NIGHT}.", "Night light's on."])
         self.assertEqual(self.app.windows["settings"].switch.state, "on")
         self.assertNotIn("opencode.chat", TRIPPED)
@@ -376,7 +380,7 @@ class Learning(Live):
         was plainly yours."""
         self.night_light(gate="cold")
         self.assertEqual(self.said, [f"Okay: {NIGHT}.", "Night light's on, and I've learned how."])
-        self.assertEqual(list(self.learned()), ["turn-on-night-light"])
+        self.assertEqual(list(self.learned()), [NIGHT_NAME])
 
     def test_a_task_she_asked_about_is_learned_after_your_yes(self):
         """Words that don't say the task in so many words get "Should I ...?" first: the yes makes it as plainly
@@ -393,7 +397,7 @@ class Learning(Live):
         with mock.patch.dict(siri._learning, turns=10, last=0.0):
             siri.handle("Yes.", gate=True)
         self.assertEqual(self.said[-1], "Night light's on, and I've learned how.")
-        self.assertEqual(list(self.learned()), ["turn-on-night-light"])
+        self.assertEqual(list(self.learned()), [NIGHT_NAME])
 
     def test_a_cold_click_send_still_waits_for_the_yes_to_send(self):
         """"Click send in Gmail" says the task in so many words, so she no longer asks "Should I ...?" first: the Send
@@ -416,7 +420,7 @@ class Learning(Live):
         self.assertNotIn("Controls:", script.text(0))  # the inbox in front isn't the task's: only its title went
         self.assertNotIn("Lunch on Friday", script.text(0))
         self.assertIn("Controls:", script.text(1))
-        self.assertEqual(self.learned()["turn-on-night-light"]["steps"][0], {"do": "open", "app": "Settings"})
+        self.assertEqual(self.learned()[NIGHT_NAME]["steps"][0], {"do": "open", "app": "Settings"})
 
     def test_a_window_already_open_is_checked_for_first(self):
         settings(self.app)
@@ -444,10 +448,10 @@ class Learning(Live):
     def test_forget_what_you_just_learned_takes_it_back(self):
         self.night_light()
         self.assertTrue(self.learned())
-        self.assertEqual(siri.undo_learning(), ["how to turn on night light"])
+        self.assertEqual(siri.undo_learning(), [f"how to {NIGHT}"])
         siri._skill_cache[0] = 0.0
         self.assertEqual(self.learned(), {})
-        self.assertIsNone(skills.find_skill("turn-on-night-light"))
+        self.assertIsNone(skills.find_skill(NIGHT_NAME))
 
     def test_the_latest_one_isnt_learned_to_open_that_same_one_again(self):
         gmail(self.app)
@@ -994,7 +998,7 @@ class Repair(Live):
         self.assertEqual(self.said[-1], "Done, and I've updated how I do it.")
         self.assertIn("didn't work: the Display button, it isn't on screen", script.text(0))
         self.assertTrue(script.picture(0))  # stuck: it looks at a screenshot
-        self.assertEqual(len(self.shots), 1)
+        self.assertEqual(len(self.shots), 2)  # and with Vision on, at one each round it works it out live
         proc = self.learned()["turn-on-night-light"]
         self.assertEqual([s.get("name") or s.get("app") or s.get("has") for s in proc["steps"]],
                          ["Settings", "Screen", "Night light", "Night light"])  # steps[:1] kept, then what worked
@@ -1087,15 +1091,18 @@ class Vision(Live):
         _, r = self.run_task("star the mail about lunch on friday in Gmail")
         self.assertEqual(r.rec, [{"do": "look", "what": "the star on the lunch mail"}])
 
-    def test_an_unchanged_screen_stops_after_two_rounds_and_nothing_is_learned(self):
+    def test_an_unchanged_screen_stops_after_three_rounds_and_nothing_is_learned(self):
+        """AGENT_STUCK rounds that change nothing: three since 25 October, so a model told the last go did nothing
+        has two goes at another way."""
         settings(self.app)
         self.app.show("settings")
         dead = lambda: {"steps": [{"do": "click", "id": self.app.id("Sound")}]}  # noqa: E731, pressing it does nothing
         self.app.control("Sound").on = lambda: setattr(self.app, "version", self.app.version - 1)  # not even a repaint
-        script = self.model(dead, dead, dead, dead)
+        script = self.model(dead, dead, dead, dead, dead)
         line, r = self.run_task("turn the sound up in Settings")
         self.assertEqual(r.outcome, "stuck")
-        self.assertEqual(len(script.sent), 2)
+        self.assertEqual(len(script.sent), agent.AGENT_STUCK)
+        self.assertIn("changed nothing", script.text(2))
         self.assertLessEqual(len(self.shots), agent.AGENT_SHOTS)
         self.assertTrue(script.picture(1))  # told it did nothing, with a screenshot
         self.assertIn("changed nothing", script.text(1))
@@ -1114,6 +1121,7 @@ class Vision(Live):
         settings(self.app)
         self.app.show("settings")
         self.app.slow = True
+        self.patch(agent, "AGENT_SHOTS", 5)  # fewer than the rounds a run has, as they once were
         script = self.model(*[{"steps": [{"do": "keys", "keys": "tab"}]}] * agent.AGENT_ROUNDS)
         line, r = self.run_task("turn on night light in Settings", before=[{"do": "open", "app": "Settings"}])
         self.assertEqual(r.outcome, "stuck")
@@ -1153,6 +1161,129 @@ class Vision(Live):
         self.assertTrue(agent.unchanged(r, dict(r.before_act), None))
         self.assertFalse(agent.unchanged(r, {**r.before_act, "total": 74}, None))
         self.assertFalse(agent.unchanged(r, {**r.before_act, "focused": ("edit", "To", "ravi@gmail.com")}, None))
+
+
+class Reach(Live):
+    """25 October, from OpenLive's agent: she keeps going when another window comes up, moves between the windows
+    already open (switch), and leaves only chats, payment and password pages to you."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch(siri, "named_window", self.named_window)
+        self.patch(winplatform, "bring_to_front", lambda hwnd: self.app.show(
+            next(k for k, w in self.app.windows.items() if w.hwnd == hwnd)))
+
+    def named_window(self, name, kind):
+        w = self.app.windows.get(name.lower())
+        if w is None:
+            raise siri.NotAWindow(f"I couldn't find an open window called {name}.")
+        return {"hwnd": w.hwnd, "exe": w.exe, "title": w.title, "name": name}
+
+    def test_a_window_that_comes_up_by_itself_is_looked_at_and_switched_away_from(self):
+        """On 22 to 25 October a window she'd opened herself coming up late stopped her with "You're using the PC,
+        so I've stopped", every time, and the task was left half done."""
+        settings(self.app)
+        self.app.window("notepad", "notepad.exe", "Untitled - Notepad").controls = [Control("Text editor", "document")]
+        self.app.show("settings")
+
+        def notepad_comes_up():
+            self.app.show("notepad")  # while the model thinks
+            return {"steps": [{"do": "click", "id": 4}]}  # Display, on the Settings it was shown
+        script = self.model(notepad_comes_up, {"steps": [{"do": "switch", "to": "Settings"}]},
+                            lambda: {"steps": [{"do": "click", "id": self.app.id("Display")}]},
+                            lambda: {"steps": [{"do": "click", "id": self.app.id("Night light"), "state": "on"}],
+                                     "done": True, "expect": {"has": "Night light", "state": "on"},
+                                     "say": "Night light's on."})
+        line, r = self.run_task("turn on night light in Settings", before=[{"do": "open", "app": "Settings"}])
+        self.assertTrue(line.startswith("Night light's on"), line)
+        self.assertIn("Untitled - Notepad", script.text(1))  # she looked again at what was in front
+        self.assertIn("switched to Settings", script.text(2))
+        self.assertEqual(self.app.windows["settings"].switch.state, "on")
+        self.assertNotIn({"do": "look", "what": "the Settings window"}, r.rec)  # an app's opened again next time
+
+    def test_a_window_not_open_is_said_to_the_model_and_a_chat_isnt_switched_to(self):
+        settings(self.app)
+        self.app.show("settings")
+        script = self.model({"steps": [{"do": "switch", "to": "Excel"}]},
+                            {"steps": [], "done": True, "say": "Excel isn't open."})
+        line, _ = self.run_task("copy the total into Excel")
+        self.assertIn("I couldn't find an open window called Excel", script.text(1))
+        self.assertEqual(line, "Excel isn't open.")
+        self.model({"steps": [{"do": "switch", "to": "WhatsApp"}]})
+        line, r = self.run_task("check my messages")
+        self.assertEqual((line, r.outcome), (agent.CHAT_LINE, "refused"))
+
+    def test_sign_in_pages_are_worked_in_and_payment_and_password_pages_left_to_you(self):
+        seen = {"full": True, "items": [], "exe": "chrome.exe"}
+        for title, site, left in (("Sign in - Google Accounts", "accounts.google.com", False),
+                                  ("Sign-in options", None, False), ("Display", None, False),
+                                  ("Checkout - PayPal", "paypal.com", True),
+                                  ("Passwords - Bitwarden", "vault.bitwarden.com", True)):
+            with self.subTest(title=title):
+                off = agent.off_limits({**seen, "title": title, "site": site})
+                self.assertEqual(off, ("sensitive", agent.PRIVATE_LINE) if left else None)
+
+    def test_the_whole_prompt_is_cached_each_round(self):
+        settings(self.app)
+        self.app.show("settings")
+        script = self.model({"steps": [], "done": True, "say": "It's Settings."})
+        self.run_task("what's on my screen")
+        system = script.sent[0][0][0]["content"]
+        self.assertEqual(system.cache_at, len(system))
+        self.assertIn("How to work:", system)
+
+
+class Checked(Live):
+    """26 October: Recorder and Ctrl+R, planned for "open recorder and record my voice", were pressed blind, and she
+    said "I've started recording your voice" with nothing recording. Keys the model chose in an app are a task on the
+    screen now: she looks, does it, and says it's done only once the screen shows it."""
+
+    def recorder(self, asks=False):
+        """Windows' Sound Recorder: Start recording, which, when asks, brings up a microphone permission prompt first."""
+        w = self.app.window("sound recorder", "soundrec.exe", "Sound Recorder")
+
+        def recording():
+            w.controls = [Control("Stop recording"), Control("Pause recording"), Control("00:00:01", "text")]
+
+        def start():
+            w.controls = [Control("Let Sound Recorder access your microphone?", "text"), Control("Yes"),
+                          Control("No")] if asks else []
+            if not asks:
+                recording()
+        w.opened = lambda: setattr(w, "controls", [Control("Start recording", on=start), Control("Settings")])
+        return w
+
+    def test_its_done_and_checked_on_the_screen_before_she_says_so(self):
+        self.recorder()
+        script = self.model(lambda: {"steps": [{"do": "click", "id": self.app.id("Start recording")}], "done": True,
+                                     "expect": {"has": "Stop recording"}, "say": "It's recording now."})
+        with self.planner({"do": "open", "app": "Sound Recorder"}, {"do": "keys", "keys": "ctrl+r"},
+                          say="Recorder's open, and I've started recording your voice."):
+            siri.handle("open recorder and record my voice")
+        self.assertNotIn(("keys", "ctrl+r"), self.app.done)  # not pressed blind
+        self.assertIn("press Control R", script.text(0))  # but given as a hint
+        self.assertTrue(script.picture(0))  # with a screenshot of the window
+        self.assertEqual(self.said[0], "Okay: open recorder and record my voice.")
+        self.assertTrue(self.said[-1].startswith("It's recording now"), self.said)
+        self.assertNotIn("Recorder's open, and I've started recording your voice.", self.said)
+
+    def test_a_prompt_in_the_way_is_said_not_left_in_silence(self):
+        self.recorder(asks=True)
+        self.model(lambda: {"steps": [{"do": "click", "id": self.app.id("Start recording")}]},
+                   {"steps": [], "done": False,
+                    "say": "Windows is asking if Sound Recorder can use your mic. Click Yes and I'll start it."})
+        with self.planner({"do": "open", "app": "Sound Recorder"}, {"do": "keys", "keys": "ctrl+r"}):
+            siri.handle("open recorder and record my voice")
+        self.assertEqual(self.said[-1], "Windows is asking if Sound Recorder can use your mic. Click Yes and I'll "
+                                        "start it.")
+
+    def test_a_claim_the_screen_doesnt_show_isnt_said_as_done(self):
+        self.recorder()
+        self.model({"steps": [{"do": "keys", "keys": "ctrl+r"}], "done": True, "expect": {"has": "Stop recording"},
+                    "say": "It's recording now."})  # Ctrl+R in this window does nothing
+        with self.planner({"do": "open", "app": "Sound Recorder"}, {"do": "keys", "keys": "ctrl+r"}):
+            siri.handle("open recorder and record my voice")
+        self.assertIn("I can't see it on the screen, though, so check it.", self.said[-1])
 
 
 class Safety(Live):
@@ -1401,13 +1532,22 @@ class Safety(Live):
         self.assertEqual((r.outcome, self.app.pressed("OK")), ("held", []))
         self.assertTrue(line.endswith("Should I press OK?"), line)
 
-    def test_a_task_heard_unsurely_is_asked_first(self):
+    def test_a_task_heard_unsurely_is_done_without_asking(self):
+        """Speech-to-text is rarely 90% sure on this PC, so "Should I turn on night light?" came before nearly every
+        task: asked on 21 October to only ask about what's sensitive. What can't be undone still waits (gate)."""
         settings(self.app)
+        gmail(self.app)
         self.app.show("settings")
-        with self.planner({"do": "screen", "task": NIGHT}):
+        self.model(lambda: {"steps": [{"do": "click", "id": self.app.id("Display")}], "say": ""},
+                   lambda: {"steps": [{"do": "click", "id": self.app.id("Night light"), "state": "on"}], "done": True,
+                            "expect": {"has": "Night light", "state": "on"}, "say": "Night light's on."})
+        # as the planner plans it (Learning.night_light): Settings opened first, so its controls are read
+        with self.planner({"do": "open", "app": "Settings"}, {"do": "screen", "task": NIGHT}), \
+                mock.patch.dict(siri._learning, turns=10, last=0.0):
             siri.handle(siri.speech.heard(NIGHT, 0.85))
-        self.assertEqual(self.said, ["Should I turn on night light?"])
-        self.assertEqual(self.app.done, [])
+        self.assertEqual(self.said[0], f"Okay: {NIGHT}.")
+        self.assertNotIn("Should I", " ".join(self.said))
+        self.assertEqual(self.app.windows["settings"].switch.state, "on")
 
     COMPOSE = "https://mail.google.com/mail/?view=cm&fs=1&to={to}&su=Lunch&body=See%20you%20at%201"
 

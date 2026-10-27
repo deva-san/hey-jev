@@ -7,7 +7,10 @@
 - Parakeet writes the words once the turn is over, in about 0.2 s.
 
 From the end of a command to its text took 0.88 s here when half a second of quiet was the only sign you'd
-finished, about 0.65 s now. Nemotron, NVIDIA's streaming speech-to-text, is in Settings too: it writes the words
+finished, and 0.65 s with Smart Turn ending a turn at the first pause. That was too quick for Hari: 931 turns ended
+after 0.22 s of quiet, and "Job open settings [pause] and Windows update" came as two. She waits like OpenLive's
+"Patient" now (Listener.WAITS): at least 0.7 s of quiet, longer when Smart Turn says you're not done.
+Nemotron, NVIDIA's streaming speech-to-text, is in Settings too: it writes the words
 as you say them, but in Hari's voice it wrote "Hey Jev" as "Hello", so with it a bare greeting gets the chime
 (siri.GREETING_ONLY), and it costs more CPU (see STREAM_THREADS). Whisper small.en too.
 
@@ -73,9 +76,25 @@ def heard(text, sure=1.0):
     return h
 
 
+def _env_file(name):
+    """One value from .env, read without loading the rest of it into this process."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), encoding="utf-8") as f:
+            for line in f:
+                key, _, value = line.strip().partition("=")
+                if key.strip() == name and not line.lstrip().startswith("#"):
+                    return value.strip().strip("\"'") or None
+    except OSError:
+        pass
+    return None
+
+
 def models_dir():
-    return os.getenv("HEYJEV_MODELS") or os.path.join(
-        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Hey Jev", "models")
+    """Where the models live. HEYJEV_MODELS is also read from .env here, for a script that imports this without
+    loading .env: one put a second 1.2 GB copy of the models on C: on 9 October, with C: nearly full. Not under the
+    tests (HEYJEV_TESTING), which must never find the real models."""
+    found = os.getenv("HEYJEV_MODELS") or (None if os.getenv("HEYJEV_TESTING") else _env_file("HEYJEV_MODELS"))
+    return found or os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Hey Jev", "models")
 
 
 def _sha256(path):
@@ -402,15 +421,27 @@ class Listener:
     # long instruction cut at 15 s came back as two turns, and the second, without her name, was ignored
     MAX_TURN_HERS = 40.0
     SHORT = 1.0  # a turn with less speech than this, like a bare "Hey Jev" before the rest, never ends at the first pause
-    FINISHED, MAYBE = 0.5, 0.15  # Smart Turn's chance that you're done: over FINISHED, she goes at the first pause
-    SETTLE, LONGEST = 0.5, 1.2  # over MAYBE after SETTLE seconds of quiet, and whatever it said after LONGEST
+    # How long she waits for you to finish, Settings > Wait before answering, from OpenLive's turn presets
+    # (katipally/openlive, apps/web/src/lib/live/pipelineConfig.ts): QUIET, the quiet she always waits; FINISHED,
+    # Smart Turn's chance that you're done for her to go then; MAYBE, the chance she goes on after SETTLE seconds of
+    # quiet (or none, for a short turn); LONGEST, the most she waits when it says you're not done. "quick" is how it
+    # was until 25 October: a turn ended at the first pause, 0.22 s, whenever Smart Turn was over 50% sure, and 90%
+    # of 1,459 turns were. "Job open settings [pause] and Windows update" came as two, the second let go
+    WAITS = {"patient": {"QUIET": 0.7, "FINISHED": 0.65, "MAYBE": 0.3, "SETTLE": 1.0, "LONGEST": 2.5},
+             "even": {"QUIET": 0.5, "FINISHED": 0.5, "MAYBE": 0.2, "SETTLE": 0.8, "LONGEST": 2.0},
+             "quick": {"QUIET": 0.0, "FINISHED": 0.5, "MAYBE": 0.15, "SETTLE": 0.5, "LONGEST": 1.2}}
+    WAIT = "patient"  # Hari: "a little delay is fine"
+    QUIET, FINISHED, MAYBE, SETTLE, LONGEST = WAITS[WAIT].values()  # each wait has them in this order
 
     def __init__(self, vad, ears, on_phrase, on_speech=lambda: None, turn=None, on_words=None, hold_for=None,
-                 is_hers=None, speaker=None):
+                 is_hers=None, speaker=None, wait=None):
         """hold_for(words so far): True to wait the longest before ending, for words that are only the start.
         is_hers(words so far): True if her name is in them, so a long turn isn't cut at MAX_TURN.
         speaker(audio): (voice print or None, seconds of speech), worked out while speech-to-text finishes and put on
-        the text as .voice and .spoke (Speaker.print), for voiceid."""
+        the text as .voice and .spoke (Speaker.print), for voiceid. wait: one of WAITS, how long she waits for you to
+        finish; WAIT if it's not one."""
+        for name, value in self.WAITS.get(wait, self.WAITS[self.WAIT]).items():
+            setattr(self, name, value)
         self.vad, self.ears, self.on_phrase, self.on_speech, self.turn = vad, ears, on_phrase, on_speech, turn
         self.on_words = on_words or (lambda text, kind: None)
         self.hold_for = hold_for or (lambda words: False)
@@ -558,9 +589,9 @@ class Listener:
         # "Hello" and a pause is the start of "Hello [breath] Jev": ending there cut her name off, 3 times in 3 one
         # evening, so with only a greeting written it waits the longest for the rest
         held = self.hold_for(self.words)
-        if quiet >= self.LONGEST or (not held and (
-                (self.chance is not None and self.chance >= self.FINISHED) or
-                (quiet >= self.SETTLE and (self.chance is None or self.chance >= self.MAYBE)))):
+        done = self.chance is not None and self.chance >= self.FINISHED
+        if quiet >= self.LONGEST or (not held and quiet >= self.QUIET and (
+                done or (quiet >= self.SETTLE and (self.chance is None or self.chance >= self.MAYBE)))):
             if not self.session.live and spoke < self.SHORT and quiet < self.LONGEST:
                 # Parakeet and Whisper only write once you stop, so a short turn is written here, when it would end
                 # anyway, and waits the same if that's only a greeting: "Hello [700 ms] Jev" came out as "Hello." and

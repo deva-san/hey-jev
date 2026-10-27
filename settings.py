@@ -13,6 +13,8 @@ DEFAULTS = {
     "llm_model": "space-bunny-free",  # OpenCode Zen, free, zero retention, and allowed outside OpenCode's own app
     # speech to text on this PC: parakeet, nemotron (writes as you talk, but lost "Hey Jev" in Hari's voice), or whisper
     "stt_engine": "parakeet",
+    # how long she waits for you to finish before answering: patient, even or quick (speech.Listener.WAITS)
+    "turn_wait": "patient",
     "echo_cancel": True,  # the mic in Windows' speech mode, so she hears you over videos and music
     "talk_over": True,  # in speech mode the mic stays on while she talks, so what you say over her is heard
     "popup": True,  # the pill at the bottom of the screen while she listens, thinks and talks
@@ -33,6 +35,24 @@ DEFAULTS = {
     "no_name": False,
     "call_aware": True,  # during WhatsApp/Teams/Zoom/browser calls, unnamed speech is for the call; say Jev/Jarvis
     "spoken_answers": True,  # a question, even "Google when is...", is looked up and answered out loud, see siri
+    # the popup: "island" (her face at the top, like Nixi's, with plugins: island.py), "card" (the iPhone Dynamic
+    # Island card, bubble.Island) or "pill" (the Siri pill at the bottom)
+    "popup_style": "island",
+    # the island (island.py), all changed in the Island tab
+    "island_face": "eyes",  # eyes (Nixi's) or wave (the Siri wave)
+    "island_theme": "amoled",  # system, light, dark or amoled (pure black)
+    "island_border": False,  # a thin line round it
+    "island_align": "center",  # left, center or right of the screen's top
+    "island_x": 0,  # px across from there
+    "island_y": 8,  # px down from the top of the screen
+    "island_scale": 100,  # its size, percent
+    "island_radius": 22,  # its corners, px
+    "island_always": True,  # her eyes stay at the top of the screen when she isn't doing anything
+    "island_hide_fullscreen": True,  # not over a full-screen game, video or presentation, but for her own turns
+    "island_auto_hide": 5,  # seconds a popup (a notification, the battery) stays up
+    "island_plugins": {},  # plugin ID: on or off (island_plugins.PLUGINS), missing ones as the plugin says
+    "island_plugin_options": {},  # plugin ID: {option: value}
+    "island_apps": {},  # app name: whether its notifications show, missing ones on for apps people message you in
 }
 # Fish Audio voices that speak well on its free model, for Settings > Voice: (name, ID, what she sounds like)
 VOICES = (  # the first is the default when none is picked, so Hannah stays first

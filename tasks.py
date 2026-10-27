@@ -5,6 +5,7 @@ library. Code, never the answer model, decides which commands may run.
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import math
@@ -22,7 +23,7 @@ from winplatform import APPDATA_DIR, CREATE_NO_WINDOW, POWERSHELL
 
 DB_PATH = os.path.join(APPDATA_DIR, "tasks.db")
 STATUSES = {"queued", "running", "waiting_approval", "completed", "failed", "cancelled"}
-KINDS = {"command", "reminder", "lookup", "research", "install", "code"}
+KINDS = {"command", "reminder", "lookup", "research", "install", "code", "watch"}  # watch: see watchers.py
 CHANGES_PC = {"command", "install", "code"}  # never re-run by themselves after Jev stopped part-way: they ask again
 # Hermes Agent's cron rule (cron/jobs.py): a one-off job that comes due more than 2 minutes late, as after the PC was
 # off or asleep, doesn't run late by itself. One that changes the PC asks again; a reminder says when it was for
@@ -45,12 +46,23 @@ class Store:
         self._ready = False
         self._lock = threading.Lock()
 
-    def _db(self):
+    def _connect(self):
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         con = sqlite3.connect(self.path, timeout=5)
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA busy_timeout=5000")
         return con
+
+    @contextlib.contextmanager
+    def _db(self):
+        """A connection for one change or read, committed (rolled back on an error) and closed after: sqlite's own
+        with only commits, and a watch looks every few seconds for hours (watchers.py)."""
+        con = self._connect()
+        try:
+            with con:
+                yield con
+        finally:
+            con.close()
 
     def init(self):
         with self._lock:
@@ -165,7 +177,7 @@ class Store:
         """The next due task, now running, or None. skip: kinds to leave queued for now."""
         self.init()
         now = float(now if now is not None else time.time())
-        con = self._db()
+        con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(f"SELECT * FROM tasks WHERE status='queued' AND due<=? AND kind NOT IN "
@@ -210,6 +222,21 @@ class Store:
                 con.execute("UPDATE tasks SET status=?, result=?, error=?, finished=?, updated=? WHERE id=? AND "
                             "status='running'", (status, str(result)[:OUTPUT_LIMIT], str(error)[:2000], now, now,
                                                  int(task_id)))
+        WAKE.set()
+
+    def again(self, task_id, due, payload=None):
+        """A running task queued again for another go at due, its payload replaced if given: a watch that's still
+        waiting looks again in a few seconds, with what it saw kept (watchers.py). Never one that was cancelled."""
+        self.init()
+        now = time.time()
+        with self._db() as con:
+            if payload is None:
+                con.execute("UPDATE tasks SET status='queued', due=?, started=NULL, updated=? WHERE id=? AND "
+                            "status='running'", (float(due), now, int(task_id)))
+            else:
+                con.execute("UPDATE tasks SET status='queued', due=?, payload=?, started=NULL, updated=? WHERE id=? "
+                            "AND status='running'", (float(due), json.dumps(payload, ensure_ascii=False), now,
+                                                     int(task_id)))
         WAKE.set()
 
     def is_cancelled(self, task_id):
@@ -383,6 +410,22 @@ def next_due(previous, spec, now=None):
             target += dt.timedelta(days=1)
         return target.timestamp()
     raise ValueError("unsupported repeat")
+
+
+def every(spec):
+    """Seconds between the times a repeat comes round: an interval's own, a day, or a week."""
+    kind = spec.get("kind")
+    return max(60, int(spec.get("seconds") or 0)) if kind == "interval" else 604800 if kind == "weekly" else 86400
+
+
+def stale(task, now=None):
+    """True for a repeating task's time missed by more than half its repeat, as the PC was off or asleep: the hourly
+    "drink water" from 9:35 last night was said at 9 the next morning. The next one comes round as ever. A one-off,
+    or a daily one an hour late, is still said, with when it was for (task["missed"], see siri.task_worker)."""
+    spec = task.get("repeat")
+    if not spec or not task.get("missed"):
+        return False
+    return float(now if now is not None else time.time()) - float(task["due"]) > every(spec) / 2
 
 
 def describe_due(timestamp):

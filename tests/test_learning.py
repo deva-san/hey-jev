@@ -249,6 +249,98 @@ class Undo(Home):
         self.assertFalse(siri.UNDO_ASKED.fullmatch(siri.plain("forget what you just remembered")))  # the model's job
 
 
+class MakingRoom(Home):
+    """From 20 October her memory was full and everything new was let go, "not kept" five times in the log, while
+    one-day facts like "Hari asked Jev to open Telegram and WhatsApp" stayed."""
+    NEW = "When Hari says not this about a video, check his screen first."
+
+    def setUp(self):
+        super().setUp()
+        self.store, self.asked = hermes_memory.MemoryStore(user_char_limit=200), []
+        for fact in ("Hari asked about a CWC recruitment page on 22 October.", "Hari prefers Light mode.",
+                     "Hari asked Jev to open Telegram and WhatsApp on 23 October."):
+            hermes_memory.memory_tool(self.store, "add", "user", fact)
+        for patch in (mock.patch.object(siri, "MEMORY", self.store),
+                      mock.patch.object(siri, "learn_words", lambda w, s: "words")):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def reply(self, raw):
+        def chat(key, messages, **kw):
+            self.asked.append(messages[0]["content"])
+            return raw, None, None
+        return mock.patch.object(siri.opencode, "chat", chat)
+
+    def kept(self):
+        self.store.load_from_disk()
+        return self.store._entries_for("user")
+
+    def test_a_review_makes_room_for_what_it_learned(self):
+        with self.reply(json.dumps({"operations": [{"action": "remove", "entry": 1}, {"action": "remove", "entry": 3},
+                                                   {"action": "add", "content": self.NEW}]})):
+            out = siri.apply_learning({"memory": [{"action": "add", "target": "user", "content": self.NEW}]})
+        self.assertEqual(self.kept(), ["Hari prefers Light mode.", self.NEW])
+        self.assertFalse(any("not kept" in o for o in out), out)
+        self.assertIn("Free at least", self.asked[0])
+        self.assertIn("\n2. Hari prefers Light mode.", self.asked[0])
+
+    def test_entries_are_named_by_number_not_quoted(self):
+        """23 October: the model's words from an entry were a little off, matched nothing, and the batch failed."""
+        with self.reply(json.dumps({"operations": [
+                {"action": "replace", "entry": "3", "content": "Hari uses Telegram and WhatsApp."},
+                {"action": "remove", "entry": 1}, {"action": "remove", "entry": 1},  # twice is once
+                {"action": "add", "content": self.NEW}]})):
+            siri.apply_learning({"memory": [{"action": "add", "target": "user", "content": self.NEW}]})
+        self.assertEqual(self.kept(), ["Hari prefers Light mode.", "Hari uses Telegram and WhatsApp.", self.NEW])
+
+    def test_however_much_it_tidies_the_new_one_goes_in(self):
+        """24 October: the add came 14th, after 13 changes, and a cap of 10 cut it off."""
+        os.remove(os.path.join(hermes_memory.get_memory_dir(), "USER.md"))  # not setUp's entries: twelve short ones
+        store = hermes_memory.MemoryStore(user_char_limit=150)
+        for i in range(1, 13):
+            hermes_memory.memory_tool(store, "add", "user", f"Fact {i}.")
+        with mock.patch.object(siri, "MEMORY", store), \
+                self.reply(json.dumps({"operations": [{"action": "remove", "entry": i} for i in range(1, 12)]
+                                      + [{"action": "add", "content": self.NEW}]})):
+            siri.apply_learning({"memory": [{"action": "add", "target": "user", "content": self.NEW}]})
+        store.load_from_disk()
+        self.assertEqual(store._entries_for("user"), ["Fact 12.", self.NEW])
+
+    def test_only_as_much_is_taken_out_as_it_needs(self):
+        """24 October: asked to free 100 characters, it took out 10 entries, 700 characters, preferences among them."""
+        os.remove(os.path.join(hermes_memory.get_memory_dir(), "USER.md"))
+        store = hermes_memory.MemoryStore(user_char_limit=400)
+        facts = [f"Fact {i} ".ljust(100, "x") for i in (1, 2, 3)] + ["Fact 4 ".ljust(90, "y")]
+        for fact in facts:
+            hermes_memory.memory_tool(store, "add", "user", fact)
+        with mock.patch.object(siri, "MEMORY", store), \
+                self.reply(json.dumps({"operations": [{"action": "remove", "entry": i} for i in (1, 2, 3, 4)]
+                                      + [{"action": "add", "content": self.NEW}]})):
+            siri.apply_learning({"memory": [{"action": "add", "target": "user", "content": self.NEW}]})
+        store.load_from_disk()
+        self.assertEqual(store._entries_for("user"), [facts[3], self.NEW])  # the room it needs and ROOM_SPARE more
+
+    def test_remember_this_makes_room_too(self):
+        with self.reply(json.dumps({"operations": [{"action": "remove", "entry": 1},
+                                                   {"action": "add", "content": self.NEW}]})):
+            siri.do_step({"do": "memory", "action": "add", "target": "user", "content": self.NEW})
+        self.assertIn(self.NEW, self.kept())
+
+    def test_nothing_changes_when_no_room_is_made(self):
+        before = self.kept()
+        for raw in ("not json", json.dumps({"operations": []}),
+                    json.dumps({"operations": [{"action": "remove", "entry": 9},
+                                               {"action": "add", "content": self.NEW}]})):
+            with self.subTest(raw=raw), self.reply(raw):
+                out = siri.apply_learning({"memory": [{"action": "add", "target": "user", "content": self.NEW}]})
+                self.assertTrue(any("not kept" in o for o in out), out)
+                self.assertEqual(self.kept(), before)
+        self.store.reset_consolidation_failures()
+        with self.reply("not json"), self.assertRaises(RuntimeError) as said:
+            siri.do_step({"do": "memory", "action": "add", "target": "user", "content": self.NEW})
+        self.assertIn("memory is full", str(said.exception))
+
+
 class Corrections(unittest.TestCase):
     def test_a_correction_is_looked_at_straight_away_with_it_as_the_focus(self):
         started = []
@@ -315,7 +407,7 @@ class PromptSize(Home):
         """PLAN's budget: 3,000 tokens or less for the fixed part, 4,000 in total with full memory, and a test fails if
         it grows. With full memory and 40 skills it measured 5,059 tokens against a test that let it reach 6,000 (B35).
         A request for a command or a schedule, which has those steps written out, stays within it too."""
-        store = hermes_memory.MemoryStore()
+        store = hermes_memory.store()  # her own limits
         for i in range(60):
             hermes_memory.memory_tool(store, "add", "user", f"Fact number {i} about them, a few words long here.")
             hermes_memory.memory_tool(store, "add", "memory", f"Note number {i} about this PC, a few words long.")

@@ -627,6 +627,58 @@ class LookingThemUp(unittest.TestCase):
         self.assertEqual(searched, ["mum", "Bunty Kumar", "Bunty"])
 
 
+class WhoComesFirst(unittest.TestCase):
+    """"Send a message to Uma hi": WhatsApp listed Dileep Hyd first, and she asked about him first."""
+
+    def look(self, labels, name="Uma"):
+        m, opened = real_messaging(), []
+        people = {label: {"name": m._label_name(label), "number": str(i), "shown": str(i)}
+                  for i, label in enumerate(labels)}
+
+        def read(uia, root, hwnd, i, label):
+            opened.append((i, label))
+            return people[label]
+
+        with mock.patch.object(m, "time", SimpleNamespace(sleep=lambda s: None, time=time.time)), \
+                mock.patch.object(m, "box_value", lambda box: ""), \
+                mock.patch.object(m, "_set_value", lambda box, text: None), \
+                mock.patch.object(m, "_results", lambda uia, root, stale=None: list(labels)), \
+                mock.patch.object(m, "_read_person", read):
+            found = m._look_for(None, None, 5, SimpleNamespace(SetFocus=lambda: None), name, m.LOOK_AT)
+        return [p["name"] for p in found], opened
+
+    def test_the_one_named_it_comes_first_and_the_rest_arent_opened(self):
+        found, opened = self.look(["Dileep Hyd 9:47 am Uma will come", "Ravi Kumar Yesterday ok",
+                                   "Uma Devi 8:02 am see you"])
+        self.assertEqual(found, ["Uma Devi"])
+        self.assertEqual(opened, [(2, "Uma Devi 8:02 am see you")])  # still its own row
+
+    def test_those_named_it_then_those_it_starts(self):
+        found, opened = self.look(["Dileep Hyd 9:47 am Uma will come", "Umapathi 10:15 am hello",
+                                   "Uma Devi Monday bye"])
+        self.assertEqual(found, ["Uma Devi", "Umapathi"])
+        self.assertEqual([i for i, _ in opened], [2, 1])
+
+    def test_nobody_named_it_keeps_whatsapps_order(self):
+        found, opened = self.look(["Dileep Hyd 9:47 am hi", "Ravi Kumar Yesterday ok"])
+        self.assertEqual(found, ["Dileep Hyd", "Ravi Kumar"])
+        self.assertEqual([i for i, _ in opened], [0, 1])
+
+    def test_the_name_in_a_label(self):
+        m = real_messaging()
+        for label, name in (("Buntyyy \U0001f43c 9:47 am hi there", "Buntyyy \U0001f43c"),
+                            ("+91 98765 43210 Yesterday hi", "+91 98765 43210"),
+                            ("Amma \U0001f496 21/10/2026 Photo", "Amma \U0001f496"),
+                            ("Ravi 21:47 ok", "Ravi"), ("Uma Devi", "Uma Devi")):
+            self.assertEqual(m._label_name(label), name, label)
+
+    def test_how_surely_its_them(self):
+        m = real_messaging()
+        for name, want, rank in (("Uma Devi", "uma", 0), ("Bunty Kumar", "my bunty", 0), ("Buntyyy", "Bunty", 1),
+                                 ("Ravi Kumar", "Uma", 2), ("Bunty", "Bunty Kumar", 2)):
+            self.assertEqual(m._name_rank(name, want), rank, (name, want))
+
+
 class ReadingThePanel(unittest.TestCase):
     """Review: the number is read only off the panel of the chat she clicked, and named as that panel names it."""
 

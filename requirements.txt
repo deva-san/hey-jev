@@ -17,5 +17,9 @@ winrt-runtime==3.2.1
 winrt-Windows.Foundation==3.2.1
 winrt-Windows.Foundation.Collections==3.2.1
 winrt-Windows.Media.Control==3.2.1
+# Wi-Fi and Bluetooth on and off (winplatform.set_radio), as Tomte does it
+winrt-Windows.Devices.Radios==3.2.1
+# the island's cover art for what's playing (island_plugins.Media), read from Windows' media controls
+winrt-Windows.Storage.Streams==3.2.1
 # Jev on your phone (telegram_bot.py): the library Hermes Agent pins, LGPL-3.0, only httpx besides
 python-telegram-bot==22.8

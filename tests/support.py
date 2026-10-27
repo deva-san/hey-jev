@@ -42,6 +42,7 @@ requests.sessions.Session.request = tripwire("network")  # web, Fish, the model 
 
 import backup  # noqa: E402
 import dictation  # noqa: E402
+import filesearch  # noqa: E402
 import installer  # noqa: E402
 import messaging  # noqa: E402
 import opencode  # noqa: E402
@@ -57,19 +58,29 @@ backup.HERE = os.path.join(DATA, "repo")
 
 # what acts on the PC: windows, keys, mouse, clipboard, sound, power, browser launches, chat apps and installs
 WIN_ACTIONS = (
-    "play", "chime", "set_volume", "set_muted", "set_app_volume", "media_command", "set_dark_mode", "lock", "sleep",
+    "play", "chime", "set_volume", "set_muted", "set_app_volume", "media_command", "set_dark_mode", "set_night_light",
+    "lock", "sleep",
     "shutdown", "restart", "abort_shutdown", "launch", "bring_to_front", "open_app", "focus_app", "minimise_app",
     "quit_app", "scroll", "open_url", "press", "type_text", "set_clipboard", "paste", "click", "speak_native",
     "find_and_click_ui_element", "maximize_foreground_window", "restore_foreground_window",
     "minimize_foreground_window", "show_desktop", "open_folder", "open_snipping_tool", "set_start_with_windows",
+    "open_windows_page",
+    # brightness, Wi-Fi, Bluetooth, the mic and the sound's output (device_step), changed or read on the real PC
+    "set_brightness", "set_radio", "set_mic_muted", "set_output", "brightness", "radio_on", "mic_muted",
+    "output_devices",
     # UI Automation, for her procedures: it reads what's on the real screen and presses its controls
     "uia", "find_ui", "find_all_ui", "ui_act", "ui_info", "ui_value", "ui_toggle", "ui_at", "ui_focused",
     "ui_dialog_text", "ui_fields", "foreground", "browser_site", "window_at", "root_at", "owner_of", "window_exists",
+    "browser_windows", "close_site_tab",
     # and what she reads of the screen for a task in an app: its controls, or a picture of it
     "ui_snapshot", "screenshot",
+    # and what a watch looks at (watchers.py): one window's picture, the windows open, what's playing
+    "window_image", "open_windows", "media_sessions",
 )
+WIN_ORIGINAL = {}  # the real ones, for a test of one that never lets it reach the PC (it patches what that calls)
 for _name in WIN_ACTIONS:
     if hasattr(winplatform, _name):
+        WIN_ORIGINAL[_name] = getattr(winplatform, _name)
         setattr(winplatform, _name, tripwire(f"win.{_name}"))
 for _name in ("open_chat", "send", "prepare", "prepare_other", "_send_other", "_type_now", "discard", "focus_other",
               "whatsapp_people", "bring_up"):
@@ -79,9 +90,17 @@ for _name in ("prepare", "install", "_run", "find"):
     if hasattr(installer, _name):
         setattr(installer, _name, tripwire(f"installer.{_name}"))
 opencode.chat = tripwire("opencode.chat")
+# finding your files asks Windows Search's real index, and opening one starts its app
+for _name in ("_ask_index", "open_found"):
+    setattr(filesearch, _name, tripwire(f"filesearch.{_name}"))
 siri.STREAM_SAY = False  # no "One moment" on a thread: tests that want it turn it on
 ORIGINAL = {}  # what was swapped for a tripwire, for a test that needs the real one
 for _name in ("speak", "fish", "fetch_tts", "warm_cache", "open_page", "see", "spotify_play", "Line"):
     if hasattr(siri, _name):
         ORIGINAL[_name] = getattr(siri, _name)
         setattr(siri, _name, tripwire(f"siri.{_name}"))
+# what the planner is told is in the window in front reads the real window: nothing, unless a test gives it one;
+# and a page opened in the tab in front would press keys in the real browser: a new tab, as open_page's tripwire has it
+for _name, _stub in (("screen_view", lambda: None), ("same_tab", lambda url: False)):
+    ORIGINAL[_name] = getattr(siri, _name)
+    setattr(siri, _name, _stub)

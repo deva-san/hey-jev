@@ -588,10 +588,10 @@ PANELS = ("Contact info", "Business info", "Group info")  # the contact panel's 
 
 
 def whatsapp_people(name, most=LOOK_AT, stop=None):
-    """The people WhatsApp itself finds for a name, in its order, at most most and no groups: [{"name": "Buntyyy",
-    "number": "915555501234", "shown": "+91 55555 01234"}]. [] if it finds nobody. RuntimeError if WhatsApp can't
-    be looked in. Not linked to the phone, it finds nobody: the message she then stages says why. stop: called
-    before each chat is opened, True to open no more (you talked over her)."""
+    """The people WhatsApp itself finds for a name, those named it first, at most most and no groups: [{"name":
+    "Buntyyy", "number": "915555501234", "shown": "+91 55555 01234"}]. [] if it finds nobody. RuntimeError if
+    WhatsApp can't be looked in. Not linked to the phone, it finds nobody: the message she then stages says why.
+    stop: called before each chat is opened, True to open no more (you talked over her)."""
     # the name as alias_key has it, in your own letters: "my mum" typed in found nobody, where "mum" finds Mum
     name = clean_search(" ".join([w for w in str(name or "").split() if w.lower() not in ("my", "the")]) or name)
     hwnd = bring_up("whatsapp", "whatsapp:")
@@ -642,9 +642,11 @@ def _look_for(uia, root, hwnd, box, name, most, stop=None):
     if labels is None:
         raise RuntimeError("WhatsApp didn't show its search results")
     found = []
-    for i, label in enumerate(labels[:most + 2]):  # a group or two among them, not a long list
-        if len(found) >= most or (stop and stop()):
+    for tries, (i, label) in enumerate(_by_name(labels, name)):  # a group or two among them, not a long list
+        if tries >= most + 2 or len(found) >= most or (stop and stop()):
             break
+        if _name_rank(_label_name(label), name) == 2 and any(_name_rank(p["name"], name) < 2 for p in found):
+            break  # someone by that name is found: the rest only matched on something else, a chat each to open
         try:  # never tried again: that would click the chat again
             person = _read_person(uia, root, hwnd, i, label)
         except Exception as exc:
@@ -652,7 +654,40 @@ def _look_for(uia, root, hwnd, box, name, most, stop=None):
             continue
         if person and all(p["number"] != person["number"] for p in found):
             found.append(person)
+    # "Send a message to Uma": WhatsApp listed Dileep Hyd before Uma Devi, and she asked about him first
+    found.sort(key=lambda p: _name_rank(p["name"], name))  # stable: WhatsApp's own order within each
     return found
+
+
+# a result's label is the name, when they last wrote, then their last message: "Dileep Hyd 9:47 am Uma will come"
+WHEN = re.compile(r"\s(?:\d{1,2}:\d{2}(?:\s?[ap]\.?m\.?)?|yesterday|today|monday|tuesday|wednesday|thursday|friday"
+                  r"|saturday|sunday|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})(?=\s|$)", re.I)
+
+
+def _label_name(label):
+    """The name a search result's label starts with: "Dileep Hyd 9:47 am Uma will come" -> "Dileep Hyd". The whole
+    label if it shows no time."""
+    label = " ".join(str(label).split())
+    when = WHEN.search(label)
+    return label[:when.start()] if when else label
+
+
+def _name_rank(name, want):
+    """How surely a name is the one asked for: 0 if it has each word ("Uma" in "Uma Devi"), 1 if each word starts
+    one of its words ("Bunty" in "Buntyyy"), 2 if not. Not by the letters alone: "uma" is in "Kumar"."""
+    asked = [w for w in re.findall(r"\w+", str(want).casefold()) if w not in ("my", "the")]
+    words = re.findall(r"\w+", str(name).casefold())
+    if asked and all(w in words for w in asked):
+        return 0
+    if asked and all(any(n.startswith(w) for n in words) for w in asked):
+        return 1
+    return 2
+
+
+def _by_name(labels, want):
+    """(row, label) for each search result in the order she opens them: theirs by name first, then by the start of
+    a word of it, then the rest, each in WhatsApp's own order. The row is still the result's own place."""
+    return sorted(enumerate(labels), key=lambda row: _name_rank(_label_name(row[1]), want))
 
 
 STALE_FOR = 2.0  # seconds the results of what was in the search box before don't count: it searches again by then

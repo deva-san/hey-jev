@@ -1,5 +1,6 @@
 """Carrying things out and confirming them: keys, media, the yes or no to her questions, what she says about what she
 did. Nothing here acts on the PC: tests.support turns that into tripwires, and each test patches what it needs."""
+import json
 import time
 import unittest
 from types import SimpleNamespace
@@ -32,6 +33,78 @@ class Keys(unittest.TestCase):
     def test_zoom_stays_a_safe_shortcut(self):
         for keys in ("ctrl+plus", "ctrl+minus", "ctrl + =", "ctrl+0"):
             self.assertIn(siri.combo(keys), siri.SAFE_KEYS, keys)
+
+
+class NightLight(unittest.TestCase):
+    """22 October: Night light took the model and a walk through Settings (and with Haiku's thinking off it turned on
+    dark mode instead). It's switched in the registry now, the way Quick Settings does it."""
+    # this PC's state value that day: off, last changed by hand (Windows 11 25H2, build 26200)
+    OFF = bytes.fromhex("43 42 01 00 0a 02 01 00 2a 06 cc f1 ab d6 06 2a 2b 0e 13 43 42 01 00 d0 0a 02 c6 14 f8 f7 c2 "
+                        "8f ae a5 d6 ee 01 00 00 00 00")
+    # on, as the scheduler leaves it (no cause field), from nathanbabcock/nightlight-cli issue 2
+    SCHEDULED_ON = bytes.fromhex("43 42 01 00 0a 02 01 00 2a 06 cd 8b 80 cd 06 2a 2b 0e 12 43 42 01 00 10 00 c6 14 e5 c6 "
+                                 "b2 82 fe ad c1 ed 01 00 00 00 00")
+    NOW = 1792000000.0
+
+    def fields(self, value):
+        return winplatform._night_fields(winplatform._night_split(value)[1])
+
+    def test_on_and_off_are_what_windows_writes(self):
+        on = winplatform.night_light_value(self.OFF, True, self.NOW)
+        stamp, inner = winplatform._night_split(on)
+        filetime = winplatform._varint(int((self.NOW + winplatform.FILETIME_1970) * 10_000_000))
+        self.assertEqual(inner, bytes.fromhex("43 42 01 00 10 00 d0 0a 02 c6 14") + filetime + b"\x00")
+        self.assertEqual(stamp, int(self.NOW))
+        self.assertEqual(on[:19], self.OFF[:10] + winplatform._varint(int(self.NOW)) + bytes.fromhex("2a 2b 0e 15"))
+        off = winplatform.night_light_value(on, False, self.NOW)
+        self.assertNotIn(0, self.fields(off))
+        self.assertEqual(winplatform._night_split(off)[0], int(self.NOW) + 2)  # never one Windows has seen go by
+        self.assertEqual(len(off), len(self.OFF))
+
+    def test_on_and_off_from_the_schedule_too(self):
+        self.assertIn(0, self.fields(self.SCHEDULED_ON))
+        off = winplatform.night_light_value(self.SCHEDULED_ON, False, self.NOW)
+        self.assertEqual(sorted(self.fields(off)), [10, 20])  # turned off by hand
+
+    def test_a_value_laid_out_otherwise_is_left_alone(self):
+        for bad in (b"", self.OFF[:-1], self.OFF + b"\x00", self.OFF.replace(b"\x2b\x0e", b"\x2b\x10"),
+                    self.OFF[:18] + bytes([10]) + b"\x43\x42\x01\x00\x09\x03abc\x00" + b"\x00" * 3):  # a string
+            with self.assertRaises(ValueError):
+                winplatform.night_light_value(bad, True, self.NOW)
+        unusable = bytes.fromhex("43 42 01 00 0a 02 01 00 2a 06 cc f1 ab d6 06 2a 2b 0e 08 43 42 01 00 c2 1e 00 00 "
+                                 "00 00 00")
+        with self.assertRaises(RuntimeError):
+            winplatform.night_light_value(unusable, True, self.NOW)
+
+    def test_said_it_switches_at_once_and_night_mode_is_dark_mode(self):
+        for said, step in (("turn on night light", {"do": "night_light", "on": True}),
+                           ("Night light on", {"do": "night_light", "on": True}),
+                           ("enable nightlight", {"do": "night_light", "on": True}),
+                           ("turn off night light", {"do": "night_light", "on": False}),
+                           ("night light off", {"do": "night_light", "on": False}),
+                           ("turn on night mode", {"do": "dark_mode", "on": True}),
+                           ("night mode", {"do": "dark_mode", "on": True}),
+                           ("turn off night mode", {"do": "dark_mode", "on": False}),
+                           ("turn on dark mode", {"do": "dark_mode", "on": True}),
+                           # as speech-to-text heard them on 22 October, both done by the model, slowly or not at all
+                           ("Turn on light night", {"do": "night_light", "on": True}),
+                           ("Hey turn on light mode", {"do": "dark_mode", "on": False}),
+                           ("start night light", {"do": "night_light", "on": True}),
+                           ("Back to light mode", {"do": "dark_mode", "on": False}),
+                           ("switch to light mode", {"do": "dark_mode", "on": False}),
+                           ("light mode", {"do": "dark_mode", "on": False}),
+                           ("turn off light mode", {"do": "dark_mode", "on": True})):
+            self.assertEqual(siri.quick(said)["steps"], [step], said)
+        self.assertIn(siri.quick("turn on light mode")["say"], siri.REPLIES["light_on"])
+        switched = []
+        with mock.patch.object(siri.win, "set_night_light", lambda on: switched.append(on) or True), \
+                mock.patch.object(siri.win, "night_light", lambda: True):
+            for on in (True, False, None):
+                siri.do_step({"do": "night_light", "on": on})
+        self.assertEqual(switched, [True, False, False])  # None: the other way from now
+        self.assertEqual(siri.confirm_question({"do": "night_light", "on": True}), "Should I turn night light on?")
+        self.assertEqual(siri.confirm_question({"do": "dark_mode", "on": False}), "Should I turn dark mode off?")
+        self.assertIn('{"do":"night_light","on":true}', siri.PROMPT)
 
 
 def session(app, position=0.0, playing=True):
@@ -192,10 +265,52 @@ class SaysWhatHappened(unittest.TestCase):
         """"Closed Messages.", then "Hmm, that didn't work. Messages isn't running." (log, 12:10)"""
         def not_running(app):
             raise RuntimeError(f"{app.name} isn't running")
-        failed, _, _, spoken = self.close(not_running)
-        self.assertEqual(failed, ["Messages isn't running"])
+        with mock.patch.object(siri.win, "close_site_tab", mock.Mock(side_effect=LookupError("no tab shows it"))):
+            failed, _, _, spoken = self.close(not_running)
+        self.assertEqual(failed, ["Messages isn't open"])  # in an app or a tab
         self.assertNotIn("Closed Messages.", spoken)
         self.assertEqual(len(spoken), 1)
+
+    def test_a_site_isnt_an_app_its_tab_is_closed(self):
+        """"Close the YouTube" on 22 October: "Sorry, that didn't work. YouTube isn't running." """
+        def not_running(app):
+            raise RuntimeError(f"{app.name} isn't running")
+        closed = mock.Mock(return_value="Akka Official Trailer - YouTube - Google Chrome")
+        with mock.patch.object(siri.win, "quit_app", not_running), mock.patch.object(siri.win, "close_site_tab", closed):
+            failed, _, _, spoken = siri.run_plan({"steps": [{"do": "close", "app": "YouTube"}], "say": "Closed it."},
+                                                 None)
+        self.assertEqual((failed, spoken), ([], ["Closed it."]))
+        closed.assert_called_once_with(("YouTube",))
+        self.assertEqual(siri.quick("Close the YouTube")["steps"], [{"do": "close", "app": "YouTube"}])
+        self.assertEqual(siri.quick("close youtube tab")["steps"], [{"do": "close", "app": "YouTube"}])
+
+    def test_a_sites_own_titles_are_its_tabs(self):
+        for title, names, shows in (("Akka Official Trailer | Keerthy Suresh - YouTube - Google Chrome", "YouTube", True),
+                                    ("(3) YouTube - Google Chrome", "YouTube", True),
+                                    ("YouTube", "YouTube", True),  # its app, installed from Chrome
+                                    ("Inbox (12) - hari@gmail.com - Gmail - Google Chrome", "Gmail", True),
+                                    ("(2) Feed | LinkedIn - Personal - Microsoft\u200b Edge", "LinkedIn", True),
+                                    ("Home / X - Google Chrome", "X", True),
+                                    ("akka trailer - Google Search - Google Chrome", ("Google", "Google Search"), True),
+                                    ("download youtube videos - Google Search - Google Chrome", "YouTube", False),
+                                    ("YouTube Music - Google Chrome", "YouTube", False),
+                                    ("Max - Google Chrome", "X", False)):
+            self.assertEqual(winplatform.shows_site(title, names), shows, title)
+
+    def test_close_it_right_after_she_played_one_is_her_tab(self):
+        """22 October: "Close it", twice, 17 s after she played a trailer, went to the model as room talk."""
+        front = "Akka Official Trailer | Keerthy Suresh - YouTube - Google Chrome"
+        with mock.patch.object(siri.win, "front_title", lambda: front), \
+                mock.patch.dict(siri.FOCUS, app="youtube", at=time.monotonic() - 17):
+            self.assertEqual(siri.quick("Close it")["steps"], [{"do": "close", "app": "YouTube", "tab": True}])
+            self.assertEqual(siri.quick("close this video")["steps"], [{"do": "close", "app": "YouTube", "tab": True}])
+            self.assertIsNone(siri.let_go({"steps": [{"do": "close", "app": "YouTube", "tab": True}], "say": "Done."}))
+        with mock.patch.object(siri.win, "front_title", lambda: "Inbox - Outlook"), \
+                mock.patch.dict(siri.FOCUS, app="youtube", at=time.monotonic() - 17):
+            self.assertIsNone(siri.quick("Close it"))  # you've gone to something else: the model works it out
+        with mock.patch.object(siri.win, "front_title", lambda: front), \
+                mock.patch.dict(siri.FOCUS, app="youtube", at=time.monotonic() - 300):
+            self.assertIsNone(siri.quick("Close it"))  # long ago
 
     def test_closing_is_said_once_it_has_closed(self):
         order = []
@@ -219,6 +334,7 @@ class Turn(unittest.TestCase):
         for target, name, value in ((siri, "say", lambda line, notify: self.said.append(line)),
                                     (siri, "learn_later", lambda *a: None), (siri, "media_playing", lambda: False),
                                     (siri, "asked_last", lambda within=0: False), (siri, "not_into_shell", lambda *a: None),
+                                    (siri, "offered", lambda within=0: ""),
                                     (siri.win, "press", lambda *keys: self.pressed.append(keys))):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
@@ -229,6 +345,84 @@ class Turn(unittest.TestCase):
 
     def model(self, plan):
         return mock.patch.object(siri, "think", lambda *a, **kw: plan)
+
+
+class NowPlaying(unittest.TestCase):
+    """22 October, 17:25: "What's the video", without her name. The model looked at the screen for it, and that was
+    let go as room talk: "I wasn't sure that was for me"."""
+    TRAILER = ("Akka Official Trailer | Keerthy Suresh | Radhika Apte", "Netflix India")
+
+    def ask(self, words, props=("", ""), page=""):
+        with mock.patch.object(siri.win, "media_session", lambda app_hint=None: object()), \
+                mock.patch.object(siri.win, "media_props", lambda session: props), \
+                mock.patch.object(siri, "youtube_title", lambda: page):
+            return siri.quick(words)
+
+    def test_whats_playing_is_said_from_the_media_controls(self):
+        for words in ("What's the video", "what's playing", "what song is this", "what video is this"):
+            self.assertEqual(self.ask(words, self.TRAILER),
+                             {"steps": [], "say": "It's Akka Official Trailer, Keerthy Suresh, Radhika Apte, from "
+                                                  "Netflix India."}, words)
+        self.assertEqual(self.ask("what's the video", page="Lofi beats to study to")["say"],
+                         "It's Lofi beats to study to.")  # paused, nothing in the media controls: the page in front
+        self.assertIsNone(self.ask("what's playing"))  # nothing says: the model looks
+
+    def test_what_a_video_is_about_is_a_look_at_the_screen_said_plainly(self):
+        screen = [{"do": "screen", "task": "say what the video on the screen is about"}]
+        for words in ("what is this video about", "What's the video", "what's this page about", "what song is this"):
+            self.assertIsNone(siri.unasked(screen, words, "cold"), words)
+        self.assertEqual(siri.unasked(screen, "what was that about", "cold"), screen[0])  # room talk
+
+
+OFFER = "There's a WhatsApp message on your screen, Hari. Want me to read it or open the chat?"
+
+
+class AnswerToHer(Turn):
+    def test_a_mumbled_yes_to_what_she_offered_answers_it(self):
+        """22 October, 15:08: she offered "Want me to read it or open the chat?", and "Yes", 46% sure, was let go."""
+        asked = []
+        with mock.patch.object(siri, "offered", lambda within=0: OFFER), \
+                mock.patch.object(siri, "think", lambda *a, **kw: asked.append(str(a[0])) or
+                                  {"steps": [], "say": "Ravi says he's on his way."}):
+            siri.handle(siri.speech.heard("Yes", 0.46), gate=True)
+        self.assertEqual((asked, self.said), (["Yes"], ["Ravi says he's on his way."]))
+
+    def test_a_mumble_after_nothing_offered_or_said_cold_is_still_let_go(self):
+        with mock.patch.object(siri, "think", lambda *a, **kw: self.fail("asked the model")):
+            siri.handle(siri.speech.heard("Yes", 0.46), gate=True)  # nothing offered (setUp)
+            with mock.patch.object(siri, "offered", lambda within=0: OFFER):
+                siri.handle(siri.speech.heard("Yes", 0.46), gate="cold")
+                siri.handle(siri.speech.heard("and then we went to the market", 0.46), gate=True)
+        self.assertEqual(self.said, [])
+
+
+class ToSomeoneElse(Turn):
+    def test_where_are_you_without_her_name_is_to_a_person(self):
+        """22 October, 21:26: "Where are you" got "I'm right here on Hari's laptop, Jev."."""
+        with mock.patch.object(siri, "think", lambda *a, **kw: self.fail("asked the model")):
+            for words in ("Where are you?", "when are you coming home", "did you eat", "Are you coming?"):
+                self.assertFalse(siri.handle(words, gate="cold"), words)
+        self.assertEqual(self.said, [])
+
+    def test_she_never_calls_you_by_her_own_name(self):
+        self.assertEqual(siri.tidy("I'm right here on Hari's laptop, Jev."), "I'm right here on Hari's laptop.")
+        self.assertEqual(siri.tidy("Jev, it's five o'clock."), "It's five o'clock.")
+        for line in ("Hey, I'm Jev, what can I do for you?", 'Just say "Hey, Jev."', "I'm Jev."):
+            self.assertEqual(siri.tidy(line), line)
+
+
+class Offered(unittest.TestCase):
+    def offered(self, line):
+        recent = [(time.time(), "what's on my screen", json.dumps({"steps": [], "say": line}))]
+        with mock.patch.object(siri.history, "recent", lambda n, within: recent):
+            return siri.offered()
+
+    def test_what_she_offered_and_what_she_left_to_you(self):
+        self.assertEqual(self.offered(OFFER), OFFER)
+        self.assertEqual(self.offered("Should I look it up?"), "Should I look it up?")
+        for line in ("Done. Anything else?", "Hi! What can I do for you?", "Is there anything you'd like me to do?",
+                     "It's 32 degrees in Delhi.", ""):
+            self.assertEqual(self.offered(line), "", line)
 
 
 class CloseTab(Turn):
@@ -255,6 +449,27 @@ class CloseTab(Turn):
                 mock.patch.object(siri.win, "quit_app", lambda app: closed.append(app.name)):
             siri.handle("close chrome and everything in it")
         self.assertEqual((closed, self.pressed), (["Google Chrome"], []))
+
+    def test_close_it_without_her_name_closes_the_video_she_just_played(self):
+        """22 October, 15:10: the trailer she'd played 17 s before was playing, and "Close it" was let go twice."""
+        def not_running(app):
+            raise RuntimeError(f"{app.name} isn't running")
+        tab = mock.Mock(return_value="Akka Official Trailer - YouTube - Google Chrome")
+        with mock.patch.object(siri.win, "front_title", lambda: "Akka Official Trailer - YouTube - Google Chrome"), \
+                mock.patch.dict(siri.FOCUS, app="youtube", at=time.monotonic() - 17), \
+                mock.patch.object(siri, "media_playing", lambda: True), \
+                mock.patch.object(siri.win, "quit_app", not_running), \
+                mock.patch.object(siri.win, "close_site_tab", tab), \
+                mock.patch.object(siri, "think", lambda *a, **kw: self.fail("asked the model")):
+            siri.handle("Close it", gate="cold")
+        tab.assert_called_once_with(("YouTube",))
+        self.assertEqual(len(self.said), 1)
+        asked = []
+        with mock.patch.object(siri.win, "front_title", lambda: "Inbox - Outlook"), \
+                mock.patch.dict(siri.FOCUS, app="youtube", at=time.monotonic() - 17), \
+                mock.patch.object(siri, "think", lambda *a, **kw: asked.append(a[0]) or None):
+            siri.handle("Close it", gate="cold")  # not what you're looking at now: the model decides
+        self.assertEqual(asked, ["Close it"])
 
 
 LONG = ("The train from Bengaluru is running very late again tonight because of the rain near Hosur. "

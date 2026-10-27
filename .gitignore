@@ -12,3 +12,5 @@ build/
 dist/
 .eggs/
 assets/icon.iconset/
+# the WhatsApp link's npm packages (whatsapp_bridge/package.json pins them; npm install puts them back)
+whatsapp_bridge/node_modules/

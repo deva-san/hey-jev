@@ -15,6 +15,24 @@ from ctypes import wintypes
 from functools import lru_cache
 from urllib.parse import quote
 
+
+# --------------------------------------------------------------------------- the C++ runtime, first
+def _system_cpp_runtime():
+    """Windows' own C++ runtime, loaded before any package can load its older copy. winrt brings MSVCP140.dll
+    14.29, and onnxruntime and sherpa-onnx, built with a newer one, crash in that one (a mutex, 0xc0000005) if it's
+    loaded first: once a DLL of that name is in the process, every later load of the name gets it. On 22 October
+    the island's media plugin imported winrt before the speech models loaded, and she crashed 4 seconds in. The
+    runtime is backward compatible, so winrt runs on the newer one."""
+    path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "msvcp140.dll")
+    try:
+        if os.path.exists(path):
+            ctypes.WinDLL(path)
+    except Exception:  # not Windows (the tests' stand-ins), or a runtime Windows won't load: as it was
+        pass
+
+
+_system_cpp_runtime()
+
 # --------------------------------------------------------------------------- paths
 # On 8 Oct `python -m unittest` from the repo root imported siri through the old hand checks (test_listen.py and co.)
 # before tests/support.py had moved %APPDATA%, and the test run wrote 982 turns into her real history, 1,488 runs into
@@ -275,6 +293,165 @@ def app_sounding(app):
         return False
 
 
+# --------------------------------------------------------------------------- brightness, Wi-Fi, Bluetooth, mic, output
+# From Tomte (github.com/xditya/tomte-windows, MIT, src/Tomte.Core/Device): the laptop screen's brightness through
+# WMI, Wi-Fi and Bluetooth through Windows.Devices.Radios, the mic's mute and the sound's output device through Core
+# Audio, each straight away. On 25 October "Increase brightness" went to a task in Settings, which pressed Win+A and
+# stopped. Tomte says the radios need a packaged app; here, unpackaged, Windows allowed them (access 1, 26 October)
+def _wmi():
+    _com()
+    import comtypes.client
+    return comtypes.client.CoGetObject("winmgmts:{impersonationLevel=impersonate}!\\\\.\\root\\wmi", dynamic=True)
+
+
+def brightness():
+    """The built-in screen's brightness, 0 to 100, or None with none Windows can set (an external monitor needs
+    DDC/CI, which this doesn't do)."""
+    try:
+        for m in _wmi().ExecQuery("SELECT CurrentBrightness FROM WmiMonitorBrightness"):
+            return int(m.Properties_.Item("CurrentBrightness").Value)
+    except Exception:
+        return None
+    return None
+
+
+def set_brightness(percent):
+    """The built-in screen at percent, 0 to 100. RuntimeError if there's none Windows can set."""
+    percent, done = max(0, min(100, int(percent))), False
+    try:
+        for m in _wmi().ExecQuery("SELECT * FROM WmiMonitorBrightnessMethods"):
+            args = m.Methods_.Item("WmiSetBrightness").InParameters.SpawnInstance_()
+            args.Properties_.Item("Timeout").Value = 1
+            args.Properties_.Item("Brightness").Value = percent
+            m.ExecMethod_("WmiSetBrightness", args)
+            done = True
+    except Exception as exc:
+        raise RuntimeError("This screen's brightness isn't one Windows lets me set") from exc
+    if not done:
+        raise RuntimeError("This screen's brightness isn't one Windows lets me set")
+
+
+RADIO_PAGES = {"wifi": "ms-settings:network-wifi", "bluetooth": "ms-settings:bluetooth"}
+
+
+def _radio_call(kind, on=None):
+    """kind's radio ("wifi" or "bluetooth"): with on None, True or False for on or off; else set so, True if Windows
+    did. None if Windows won't let her, or there's no such radio (an adapter turned off in Device Manager)."""
+    _com()
+    from winrt.windows.devices.radios import Radio, RadioAccessStatus, RadioKind, RadioState
+    want = {"wifi": RadioKind.WI_FI, "bluetooth": RadioKind.BLUETOOTH}[kind]
+
+    async def run():
+        if await Radio.request_access_async() != RadioAccessStatus.ALLOWED:
+            return None
+        radio = next((r for r in await Radio.get_radios_async() if r.kind == want), None)
+        if radio is None:
+            return None
+        if on is None:
+            return radio.state == RadioState.ON
+        return await radio.set_state_async(RadioState.ON if on else RadioState.OFF) == RadioAccessStatus.ALLOWED
+    try:
+        return asyncio.run(run())
+    except OSError:  # a radio that went away mid-call (a dongle pulled out) raises rather than saying so
+        return None
+
+
+def radio_on(kind):
+    """True if Wi-Fi or Bluetooth (kind) is on, False if off, None if she can't tell."""
+    return _radio_call(kind)
+
+
+def set_radio(kind, on):
+    """Wi-Fi or Bluetooth (kind) on or off. When Windows won't let her, its Settings page opens instead, as Tomte
+    does, and RuntimeError says so."""
+    if _radio_call(kind, bool(on)) is not True:
+        open_windows_page(RADIO_PAGES[kind])
+        raise RuntimeError(f"Windows didn't let me switch {'Wi-Fi' if kind == 'wifi' else 'Bluetooth'}, so I've "
+                           f"opened its settings")
+
+
+def _mic_endpoint():
+    _com()
+    from comtypes import CLSCTX_ALL
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+    mic = AudioUtilities.GetMicrophone()
+    if mic is None:
+        raise RuntimeError("There's no microphone")
+    return ctypes.cast(mic.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None), ctypes.POINTER(IAudioEndpointVolume))
+
+
+def mic_muted():
+    return bool(_mic_endpoint().GetMute())
+
+
+def set_mic_muted(muted):
+    """Mute the default mic for every app (calls too). Her own listening uses it as well, so muted she hears only
+    right Alt's push-to-talk if that's on the same mic: say it before, not after."""
+    _mic_endpoint().SetMute(1 if muted else 0, None)
+
+
+def output_devices():
+    """[(id, name, is_default)] for the sound outputs that are on: speakers, headphones, a Bluetooth speaker."""
+    _com()
+    from pycaw.constants import DEVICE_STATE, EDataFlow
+    from pycaw.pycaw import AudioUtilities
+    try:
+        current = AudioUtilities.GetSpeakers().id
+    except Exception:
+        current = None
+    return [(d.id, d.FriendlyName, d.id == current)
+            for d in AudioUtilities.GetAllDevices(EDataFlow.eRender.value, DEVICE_STATE.ACTIVE.value)
+            if d.FriendlyName]
+
+
+# Windows names an output for what it is and what it's on: "Speakers (Realtek(R) Audio)" is the laptop's own,
+# "Speakers (JBL Flip 5)" or "Headphones (Galaxy Buds2 Pro)" a Bluetooth one. These words only say what it is
+OUTPUT_KINDS = {"speaker", "speakers", "headphone", "headphones", "headset", "earbud", "earbuds", "earphone",
+                "earphones", "audio", "sound", "output", "bluetooth", "stereo", "hands", "free"}
+SOUND_CHIP = re.compile(r"realtek|high definition|intel|amd|nvidia|conexant|cirrus|audio device|smart sound", re.I)
+
+
+def output_name(name):
+    """An output as she'd say it: "Speakers" for the laptop's own, "JBL Flip 5" for a Bluetooth speaker."""
+    m = re.fullmatch(r"(.+?) \((.+)\)", name.strip())
+    return (m[1] if SOUND_CHIP.search(m[2]) else m[2]) if m else name.strip()
+
+
+def pick_output(devices, name):
+    """The one of devices called name: the whole name, else the one that has most of its words, a word that names it
+    ("jbl", "buds") over one that only says what it is ("speaker"). LookupError, as she'd say it, for none or for
+    more than one as near."""
+    words = [w for w in re.findall(r"[a-z0-9]+", name.lower())
+             if w not in ("the", "my", "a", "to", "device", "one", "please")]
+    if not words:
+        raise LookupError("Which speaker or headphones?")
+    exact = [d for d in devices if d[1].lower() == name.lower().strip() or output_name(d[1]).lower() == name.lower()]
+    if len(exact) == 1:
+        return exact[0]
+
+    def score(d):
+        have = set(re.findall(r"[a-z0-9]+", d[1].lower()))
+        return sum((1 if w in OUTPUT_KINDS else 2) for w in words
+                   if w in have or w.rstrip("s") in have or w + "s" in have)
+    scored = [(score(d), d) for d in devices]
+    best = max((s for s, _ in scored), default=0)
+    found = [d for s, d in scored if s == best and s > 0]
+    if len(found) == 1:
+        return found[0]
+    names = " or ".join(output_name(d[1]) for d in (found or devices))
+    raise LookupError(f"There's more than one like that: {names}." if found else
+                      f"I can't find a sound output called {name}. There's {names}." if devices else
+                      "There's no sound output on.")
+
+
+def set_output(device_id):
+    """Sound goes to this output from now on, in every app, as picking it in Quick Settings does."""
+    _com()
+    from pycaw.constants import ERole
+    from pycaw.pycaw import AudioUtilities
+    AudioUtilities.SetDefaultDevice(device_id, [ERole.eConsole, ERole.eMultimedia, ERole.eCommunications])
+
+
 # --------------------------------------------------------------------------- media (Spotify), via Windows media controls
 def media_session(app_hint=None):
     """The media session of the app whose id contains app_hint ("spotify"). With no hint, the one Windows shows in
@@ -293,6 +470,17 @@ def media_session(app_hint=None):
     return asyncio.run(find())
 
 
+def media_sessions():
+    """Every media session Windows' media controls know of: each tab playing in a browser has its own."""
+    _com()
+    from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionManager as Manager
+
+    async def find():
+        manager = await Manager.request_async()
+        return list(manager.get_sessions())
+    return asyncio.run(find())
+
+
 def media_command(session, command):
     calls = {"play": session.try_play_async, "pause": session.try_pause_async,
              "toggle": session.try_toggle_play_pause_async,
@@ -303,15 +491,21 @@ def media_command(session, command):
     return asyncio.run(run())
 
 
-def media_title(session):
-    """'Title - Artist' of what a media session is playing, or "" if it doesn't say."""
+def media_props(session):
+    """(title, artist) of what a media session is playing, "" for what it doesn't say. A YouTube video in Chrome is
+    its title and its channel."""
     async def get():
         return await session.try_get_media_properties_async()
     try:
         props = asyncio.run(get())
     except Exception:
-        return ""
-    title, artist = (props.title or "").strip(), (props.artist or "").strip()
+        return "", ""
+    return (props.title or "").strip(), (props.artist or "").strip()
+
+
+def media_title(session):
+    """'Title - Artist' of what a media session is playing, or "" if it doesn't say."""
+    title, artist = media_props(session)
     return f"{title} - {artist}" if title and artist else title
 
 
@@ -333,6 +527,27 @@ def media_position(session):
     return pos
 
 
+MEDIA_STATUS = {0: "closed", 1: "opened", 2: "changing", 3: "stopped", 4: "playing", 5: "paused"}
+
+
+def media_status(session):
+    """What a media session is doing: "playing", "paused", "stopped", "changing", "opened" or "closed", "" if
+    Windows won't say."""
+    try:
+        return MEDIA_STATUS.get(int(session.get_playback_info().playback_status), "")
+    except Exception:
+        return ""
+
+
+def media_length(session):
+    """How long what a media session plays is, in seconds, or 0 if it doesn't say."""
+    try:
+        timeline = session.get_timeline_properties()
+        return max(0.0, timeline.end_time.total_seconds() - timeline.start_time.total_seconds())
+    except Exception:
+        return 0.0
+
+
 # --------------------------------------------------------------------------- dark mode, lock, sleep
 PERSONALIZE = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
 
@@ -345,14 +560,166 @@ def dark_mode():
         return False  # never set means light
 
 
+def light_mode():
+    """True if apps and Windows itself (the taskbar, Start) are both in light mode: dark_mode reads only the apps."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, PERSONALIZE) as key:
+            for name in ("AppsUseLightTheme", "SystemUsesLightTheme"):
+                try:
+                    if winreg.QueryValueEx(key, name)[0] == 0:
+                        return False
+                except OSError:
+                    pass  # never set means light
+    except OSError:
+        pass
+    return True
+
+
 def set_dark_mode(on):
     light = 0 if on else 1
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, PERSONALIZE, 0, winreg.KEY_SET_VALUE) as key:
         winreg.SetValueEx(key, "AppsUseLightTheme", 0, winreg.REG_DWORD, light)
         winreg.SetValueEx(key, "SystemUsesLightTheme", 0, winreg.REG_DWORD, light)
-    result = ctypes.c_size_t()  # tell the taskbar and open apps to repaint in the new theme
-    user32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "ImmersiveColorSet", SMTO_ABORTIFHUNG, 2000,
+    # tell the taskbar and open apps to repaint in the new theme. A window that hasn't taken the message when the wait
+    # runs out never hears of it and keeps its old colours, and Explorer, repainting many windows, can take more than
+    # 2 s: Tomte (Display.cs) waits 5 s, as Microsoft's PowerToys Light Switch does. A hung window is skipped at once
+    result = ctypes.c_size_t()
+    user32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "ImmersiveColorSet", SMTO_ABORTIFHUNG, 5000,
                                ctypes.byref(result))
+
+
+# --------------------------------------------------------------------------- Night light
+# Windows keeps whether Night light is on in the registry, as Bond CompactBinary v1 inside a CloudStore envelope, and
+# explorer.exe applies a change there at once, so it's switched as quickly as dark mode, with no Settings window. It
+# isn't documented: this is the layout kvnxiao/win-nightlight-cli worked out (docs/nightlight-registry-format.md,
+# Windows 11 builds 26100 and 26300; 26200 here is the same). On or off writes only the state value, the way Settings
+# and Quick Settings do it. A value laid out any other way is left alone: one Windows can't read could leave it stuck
+NIGHT_STATE = "\\".join((r"Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current",
+                         "default$windows.data.bluelightreduction.bluelightreductionstate",
+                         "windows.data.bluelightreduction.bluelightreductionstate"))
+BOND = b"CB\x01\x00"  # a marshaled Bond CompactBinary v1 struct
+ENVELOPE = BOND + b"\x0a\x02\x01\x00\x2a\x06"  # its metadata (field 0: true), then the payload's timestamp
+BT_BOOL, BT_UINT8, BT_UINT64, BT_INT8, BT_INT32 = 2, 3, 6, 14, 16
+VARINTS = {4, 5, 6, 15, 16, 17}  # Bond's unsigned and (zigzag) signed integers, 16 to 64 bits
+FILETIME_1970 = 11644473600  # seconds from 1601, where a FILETIME counts from, to 1970
+
+
+def _varint(n):
+    out = bytearray()
+    while n > 0x7F:
+        out.append(n & 0x7F | 0x80)
+        n >>= 7
+    out.append(n)
+    return bytes(out)
+
+
+def _read_varint(data, i):
+    n = shift = 0
+    while shift < 70:
+        b = data[i]
+        n, i, shift = n | (b & 0x7F) << shift, i + 1, shift + 7
+        if b < 0x80:
+            return n, i
+    raise ValueError("a number too long")
+
+
+def _night_split(data):
+    """(timestamp, inner payload) out of the state value, or ValueError if it isn't laid out as Windows writes it."""
+    data = bytes(data)
+    try:
+        if not data.startswith(ENVELOPE):
+            raise ValueError("not a CloudStore envelope")
+        stamp, i = _read_varint(data, len(ENVELOPE))
+        if data[i:i + 3] != b"\x2a\x2b\x0e":  # field 1: the data wrapper, with field 1 a list of bytes
+            raise ValueError("no payload where it should be")
+        size, i = _read_varint(data, i + 3)
+    except IndexError:
+        raise ValueError("cut short") from None
+    inner = data[i:i + size]
+    if len(inner) != size or data[i + size:] != b"\x00\x00\x00":
+        raise ValueError("more than the payload in it")
+    return stamp, inner
+
+
+def _night_fields(inner):
+    """{field: (Bond type, its bytes)} of the inner state, or ValueError for a type it shouldn't have."""
+    if not inner.startswith(BOND):
+        raise ValueError("not a Bond struct")
+    fields, i = {}, len(BOND)
+    try:
+        while True:
+            head = inner[i]
+            kind, field, i = head & 0x1F, head >> 5, i + 1
+            if not kind:  # BT_STOP
+                break
+            if field == 6:
+                field, i = inner[i], i + 1
+            elif field == 7:
+                field, i = inner[i] | inner[i + 1] << 8, i + 2
+            start = i
+            if kind in (BT_BOOL, BT_UINT8, BT_INT8):
+                i += 1
+            elif kind in VARINTS:
+                _, i = _read_varint(inner, i)
+            else:
+                raise ValueError(f"field {field} is of type {kind}")
+            fields[field] = (kind, inner[start:i])
+    except IndexError:
+        raise ValueError("cut short") from None
+    if i != len(inner):
+        raise ValueError("more after its end")
+    return fields
+
+
+def _bond_field(field, kind, value):
+    head = bytes([field << 5 | kind]) if field <= 5 else bytes([0xC0 | kind, field]) if field <= 0xFF else \
+        bytes([0xE0 | kind, field & 0xFF, field >> 8])
+    return head + value
+
+
+def night_light_value(data, on, now=None):
+    """The state value data with Night light on or off, as Windows Settings writes it: field 0 there (0, running)
+    only when it's on, field 10 = 1 (changed by hand), field 20 = now as a FILETIME, and the envelope's timestamp the
+    later of now and 2 s after the one in it, as Windows won't apply one it has seen go by. Fields it doesn't know
+    stay as they are, in order."""
+    now = time.time() if now is None else now
+    stamp, inner = _night_split(data)
+    fields = _night_fields(inner)
+    if fields.get(30, (BT_BOOL, b"\x01"))[1] == b"\x00":  # usable: false
+        raise RuntimeError("Night light isn't available on this screen")
+    fields.pop(0, None)
+    if on:
+        fields[0] = (BT_INT32, b"\x00")
+    fields[10] = (BT_INT32, b"\x02")  # zigzag 1
+    fields[20] = (BT_UINT64, _varint(int((now + FILETIME_1970) * 10_000_000)))
+    inner = BOND + b"".join(_bond_field(f, *fields[f]) for f in sorted(fields)) + b"\x00"
+    return ENVELOPE + _varint(max(int(now), stamp + 2)) + b"\x2a\x2b\x0e" + _varint(len(inner)) + inner + b"\x00" * 3
+
+
+def night_light():
+    """True if Night light is on now, False if it's off, None if that can't be told."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, NIGHT_STATE) as key:
+            return 0 in _night_fields(_night_split(winreg.QueryValueEx(key, "Data")[0])[1])
+    except (OSError, ValueError):
+        return None
+
+
+def set_night_light(on):
+    """Turns Night light on or off now, as its switch in Quick Settings does, the schedule as it was. False if it
+    already was."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, NIGHT_STATE, 0,
+                            winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE) as key:
+            data = winreg.QueryValueEx(key, "Data")[0]
+            if (0 in _night_fields(_night_split(data)[1])) == bool(on):
+                return False
+            winreg.SetValueEx(key, "Data", 0, winreg.REG_BINARY, night_light_value(data, on))
+    except FileNotFoundError:
+        raise RuntimeError("Night light isn't set up yet: switch it on once in Settings") from None
+    except ValueError as exc:
+        raise RuntimeError("I can't switch Night light directly on this version of Windows") from exc
+    return True
 
 
 def lock():
@@ -379,6 +746,41 @@ def restart(delay=10):
 def abort_shutdown():
     """Cancel a pending Windows shutdown or restart."""
     subprocess.Popen(["shutdown.exe", "/a"])
+
+
+class SYSTEM_POWER_STATUS(ctypes.Structure):
+    _fields_ = [("ACLineStatus", ctypes.c_ubyte), ("BatteryFlag", ctypes.c_ubyte), ("BatteryLifePercent", ctypes.c_ubyte),
+                ("SystemStatusFlag", ctypes.c_ubyte), ("BatteryLifeTime", DWORD), ("BatteryFullLifeTime", DWORD)]
+
+
+_sig(kernel32.GetSystemPowerStatus, [ctypes.POINTER(SYSTEM_POWER_STATUS)])
+
+
+def charging():
+    """True while the battery is charging, False when it isn't (on battery, or plugged in and as full as it'll get:
+    a Lenovo's conservation mode stops at about 60 percent), None with no battery or when Windows won't say."""
+    s = SYSTEM_POWER_STATUS()
+    if not kernel32.GetSystemPowerStatus(ctypes.byref(s)) or s.BatteryFlag in (128, 255):
+        return None
+    return bool(s.BatteryFlag & 8)
+
+
+DOWNLOADS_ID = "{374DE290-123F-4565-9164-39C4925E467B}"  # the Downloads folder's ID in User Shell Folders
+
+
+def downloads_folder():
+    """Where browsers save what they download unless told otherwise: Windows' Downloads folder, which can be moved
+    off C (on Hari's PC it's on D), else the one in the user folder."""
+    for key in (r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"):
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+                path = os.path.expandvars(str(winreg.QueryValueEx(k, DOWNLOADS_ID)[0]))
+        except OSError:
+            continue
+        if os.path.isdir(path):
+            return path
+    return os.path.join(os.path.expanduser("~"), "Downloads")
 
 
 # --------------------------------------------------------------------------- apps
@@ -553,6 +955,14 @@ def app_windows(app):
     cb = WNDENUMPROC(lambda h, _: found.append(h) or True)
     user32.EnumWindows(cb, 0)
     return [h for h in found if _is_app_window(h) and app.matches(window_exe(h))]
+
+
+def open_windows():
+    """Every app window on screen, minimised ones too, front-most first: [(hwnd, exe path, title)]."""
+    found = []
+    cb = WNDENUMPROC(lambda h, _: found.append(h) or True)
+    user32.EnumWindows(cb, 0)
+    return [(h, window_exe(h), window_title(h)) for h in found if _is_app_window(h)]
 
 
 def _app_processes(app):
@@ -1150,6 +1560,25 @@ def show_no_activate(hwnd, x, y, w, h):
     user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW)
 
 
+def set_click_through(hwnd, on):
+    """Clicks go through the overlay to what's under it (on), or it takes them, as the island does while you point
+    at its buttons. It never takes the focus either way."""
+    style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    new = (style | WS_EX_TRANSPARENT) if on else (style & ~WS_EX_TRANSPARENT)
+    if new != style:
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new)
+
+
+_sig(user32.GetCursorPos, [ctypes.POINTER(wintypes.POINT)])
+
+
+def cursor_pos():
+    """Where the mouse is, in real pixels."""
+    pt = wintypes.POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    return pt.x, pt.y
+
+
 def hide_window(hwnd):
     user32.ShowWindow(hwnd, SW_HIDE)
 
@@ -1288,6 +1717,44 @@ def screenshot():
     return np.frombuffer(buf, np.uint8).reshape(h, w, 4)[:, :, 2::-1].copy(), (left, top, left + w, top + h)
 
 
+PW_RENDERFULLCONTENT = 2  # what a browser or an app drawn by DirectComposition shows too, not a black box
+_sig(user32.PrintWindow, [HWND, wintypes.HDC, UINT])
+
+
+def window_image(hwnd):
+    """One window as it looks, even behind others, from the window itself (PrintWindow), not the screen: (height,
+    width, 3) RGB. None if it's gone or minimised, or Windows wouldn't draw it. For a watch on a window you're not
+    looking at (watchers.py), so nothing else on the screen is in it."""
+    import numpy as np
+    if not hwnd or not user32.IsWindow(hwnd) or user32.IsIconic(hwnd):
+        return None
+    with _real_pixels():
+        r = RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+            return None
+        w, h = r.right - r.left, r.bottom - r.top
+        if w < 8 or h < 8:
+            return None
+        screen = user32.GetDC(None)
+        mem = gdi32.CreateCompatibleDC(screen)
+        bmp = gdi32.CreateCompatibleBitmap(screen, w, h)
+        old = gdi32.SelectObject(mem, bmp)
+        try:
+            buf = ctypes.create_string_buffer(w * h * 4)
+            bits = BITMAPINFOHEADER(biSize=ctypes.sizeof(BITMAPINFOHEADER), biWidth=w, biHeight=-h, biPlanes=1,
+                                    biBitCount=32)
+            if not user32.PrintWindow(hwnd, mem, PW_RENDERFULLCONTENT) or \
+                    gdi32.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(bits), 0) != h:
+                return None
+        finally:
+            gdi32.SelectObject(mem, old)
+            gdi32.DeleteObject(bmp)
+            gdi32.DeleteDC(mem)
+            user32.ReleaseDC(None, screen)
+    rgb = np.frombuffer(buf, np.uint8).reshape(h, w, 4)[:, :, 2::-1]
+    return None if not rgb.any() else rgb.copy()  # all black: it wouldn't draw itself
+
+
 def window_at(x, y):
     """The .exe of the window at a point on the screen, in real pixels, or ""."""
     hwnd = root_at(x, y)
@@ -1335,6 +1802,11 @@ def front_area():
 def window_exists(hwnd):
     """True if hwnd is still a window: Outlook's new mail closes once it's sent, a dialog in front of it doesn't."""
     return bool(hwnd) and bool(user32.IsWindow(hwnd))
+
+
+def minimised(hwnd):
+    """True if the window is minimised to the taskbar."""
+    return bool(hwnd) and bool(user32.IsIconic(hwnd))
 
 
 def click(x, y, button="left", double=False):
@@ -1799,6 +2271,75 @@ def browser_site():
     return site_of(ui_value(box)) if box is not None else None
 
 
+# A site is a tab, not an app: "Close the YouTube" on 22 October got "YouTube isn't running". Its tab is found by
+# its title, the site's own name a part of it ("Akka Official Trailer | Keerthy Suresh - YouTube", "(3) Feed |
+# LinkedIn", "Home / X"), never the name as a word in it: "download youtube videos - Google Search" isn't YouTube
+TAB_BROWSERS = BROWSER_EXES | {"firefox.exe"}
+TITLE_PARTS = re.compile(r"\s+[-|/\u00b7\u2013\u2014]\s+")
+TITLE_COUNT = re.compile(r"^\(\d[\d,]*\+?\)\s*")  # "(3) YouTube": what's unread
+
+
+def shows_site(title, names):
+    """True if a window or tab title is one of the site's own: one of names ("YouTube", "Google Search") is a part of
+    it, as a site puts its name in its pages' titles."""
+    names = [names] if isinstance(names, str) else names
+    parts = {" ".join(TITLE_COUNT.sub("", p).split()).lower() for p in TITLE_PARTS.split(BIDI.sub("", title or ""))}
+    return any(" ".join(str(n).split()).lower() in parts for n in names if str(n).strip())
+
+
+def browser_windows():
+    """Browser windows on screen, minimised ones too, front-most first."""
+    found = []
+    cb = WNDENUMPROC(lambda h, _: found.append(h) or True)
+    user32.EnumWindows(cb, 0)
+    return [h for h in found if _is_app_window(h) and os.path.basename(window_exe(h)).lower() in TAB_BROWSERS]
+
+
+def _tab_items(hwnd):
+    """The tabs in a browser window's tab strip, as (UI Automation element, name)."""
+    a = uia()
+    root = a.ElementFromHandle(hwnd)
+    found = root.FindAll(4, a.CreatePropertyCondition(30003, ROLES["tab"])) if root else None
+    items = [found.GetElement(i) for i in range(min(100, found.Length if found else 0))]
+    return [(el, clean_name(el.CurrentName)) for el in items]
+
+
+def close_site_tab(names):
+    """Closes the browser tab showing a site (names as shows_site has them): one in front of its window is brought
+    forward and closed with Ctrl+W, else one behind another tab is picked in the tab strip first. The tab's title.
+    LookupError if no tab shows it, RuntimeError if it couldn't be brought to the front, so the keys can't go to
+    another window."""
+    windows = browser_windows()
+    target = next((h for h in windows if shows_site(window_title(h), names)), None)
+    for hwnd in windows if target is None else ():
+        try:
+            tab = next((el for el, name in _tab_items(hwnd) if shows_site(name, names)), None)
+        except Exception as exc:  # slow or not answering: the next window
+            print(f"  ui automation: {exc!r}")
+            continue
+        if tab is None:
+            continue
+        bring_to_front(hwnd)
+        _sleep(0.15)
+        pick = _pattern(tab, 10010, "IUIAutomationSelectionItemPattern")  # SelectionItem: the tab to the front
+        if pick is not None:
+            pick.Select()
+        else:
+            ui_act(tab)
+        _sleep(0.3)
+        target = hwnd
+        break
+    if target is None:
+        raise LookupError("no tab shows it")
+    bring_to_front(target)
+    _sleep(0.15)
+    title = window_title(target)
+    if user32.GetForegroundWindow() != target or not shows_site(title, names):
+        raise RuntimeError("its browser window didn't come to the front")
+    press("ctrl", "w")
+    return title
+
+
 # What a snapshot reads of each control, all in the one call: name, role, AutomationId, off screen, enabled,
 # password, where it is, keyboard focus, what's typed in it, and whether it's a switch and how it's set
 SNAP_PROPS = (30005, 30003, 30011, 30022, 30010, 30019, 30001, 30008, 30045, 30041, 30086)
@@ -2023,4 +2564,73 @@ def open_folder(path_or_uri):
 def open_snipping_tool():
     """Launch Windows Snipping Tool / screenclip protocol."""
     os.startfile("ms-screenclip:")
+
+
+# Windows' own tools and Settings pages, by what people call them, for an "open" step (windows_page): on 25 October
+# "Open device manager" searched Google, Device Manager not being in the Start menu, and a task in Settings went to
+# https://display for ms-settings:display. Only these open by name: a Settings page can't run anything, and none of
+# these tools starts a program by itself (Run, Task Scheduler, the registry and command windows are left out)
+WINDOWS_PAGES = {
+    "windows update": "ms-settings:windowsupdate", "windows updates": "ms-settings:windowsupdate",
+    "updates": "ms-settings:windowsupdate", "update settings": "ms-settings:windowsupdate",
+    "check for updates": "ms-settings:windowsupdate-action",
+    "display": "ms-settings:display", "display settings": "ms-settings:display", "screen settings": "ms-settings:display",
+    "sound settings": "ms-settings:sound", "sound": "ms-settings:sound", "audio settings": "ms-settings:sound",
+    "bluetooth": "ms-settings:bluetooth", "bluetooth settings": "ms-settings:bluetooth",
+    "bluetooth and devices": "ms-settings:bluetooth", "devices": "ms-settings:bluetooth",
+    "wifi": "ms-settings:network-wifi", "wi fi": "ms-settings:network-wifi", "wifi settings": "ms-settings:network-wifi",
+    "network settings": "ms-settings:network", "internet settings": "ms-settings:network",
+    "network and internet": "ms-settings:network", "hotspot": "ms-settings:network-mobilehotspot",
+    "mobile hotspot": "ms-settings:network-mobilehotspot", "vpn": "ms-settings:network-vpn",
+    "airplane mode": "ms-settings:network-airplanemode", "flight mode": "ms-settings:network-airplanemode",
+    "installed apps": "ms-settings:appsfeatures", "apps and features": "ms-settings:appsfeatures",
+    "apps settings": "ms-settings:appsfeatures", "default apps": "ms-settings:defaultapps",
+    "startup apps": "ms-settings:startupapps", "storage": "ms-settings:storagesense",
+    "storage settings": "ms-settings:storagesense", "battery settings": "ms-settings:batterysaver",
+    "battery saver": "ms-settings:batterysaver", "power settings": "ms-settings:powersleep",
+    "power and battery": "ms-settings:powersleep", "night light settings": "ms-settings:nightlight",
+    "personalization": "ms-settings:personalization", "personalisation": "ms-settings:personalization",
+    "wallpaper": "ms-settings:personalization-background", "background": "ms-settings:personalization-background",
+    "themes": "ms-settings:themes", "colors": "ms-settings:colors", "colours": "ms-settings:colors",
+    "lock screen settings": "ms-settings:lockscreen", "taskbar settings": "ms-settings:taskbar",
+    "notification settings": "ms-settings:notifications", "notifications settings": "ms-settings:notifications",
+    "focus": "ms-settings:focus", "do not disturb": "ms-settings:notifications",
+    "privacy": "ms-settings:privacy", "privacy settings": "ms-settings:privacy",
+    "camera settings": "ms-settings:privacy-webcam", "camera privacy": "ms-settings:privacy-webcam",
+    "camera permissions": "ms-settings:privacy-webcam", "microphone settings": "ms-settings:privacy-microphone",
+    "microphone privacy": "ms-settings:privacy-microphone", "mic settings": "ms-settings:privacy-microphone",
+    "location settings": "ms-settings:privacy-location", "date and time": "ms-settings:dateandtime",
+    "time settings": "ms-settings:dateandtime", "language settings": "ms-settings:regionlanguage",
+    "keyboard settings": "ms-settings:typing", "mouse settings": "ms-settings:mousetouchpad",
+    "touchpad settings": "ms-settings:devices-touchpad", "printers": "ms-settings:printers",
+    "printers and scanners": "ms-settings:printers", "accounts": "ms-settings:yourinfo",
+    "sign in options": "ms-settings:signinoptions", "about": "ms-settings:about", "about this pc": "ms-settings:about",
+    "system settings": "ms-settings:display", "accessibility": "ms-settings:easeofaccess",
+    "windows security": "windowsdefender:", "virus protection": "windowsdefender:",
+    "device manager": "devmgmt.msc", "disk management": "diskmgmt.msc", "event viewer": "eventvwr.msc",
+    "task manager": "taskmgr.exe", "control panel": "control.exe", "system information": "msinfo32.exe",
+    "resource monitor": "resmon.exe", "character map": "charmap.exe", "network connections": "ncpa.cpl",
+    "programs and features": "appwiz.cpl", "sound control panel": "mmsys.cpl", "power options": "powercfg.cpl",
+    "system properties": "sysdm.cpl", "mouse properties": "main.cpl"}
+SETTINGS_PAGE = re.compile(r"ms-settings:[a-z0-9-]*", re.I)  # any Settings page, as a model may name one
+
+
+def windows_page(name):
+    """What opens one of Windows' tools or Settings pages called name ("Device Manager", "the Windows Update page",
+    "camera settings"), else None."""
+    key = " ".join(re.sub(r"[^a-z0-9]+", " ", str(name or "").lower().replace("wi-fi", "wifi")).split())
+    key = re.sub(r"^(?:open |the |my )+", "", key)
+    for k in (key, re.sub(r" (?:page|window|app|tool|settings? page)$", "", key), re.sub(r"^windows ", "", key)):
+        if k in WINDOWS_PAGES:
+            return WINDOWS_PAGES[k]
+    return None
+
+
+def open_windows_page(target):
+    """Opens one of WINDOWS_PAGES' tools or pages, or a Settings page (ms-settings:...): nothing else, as
+    os.startfile would run whatever it's handed."""
+    target = str(target or "").strip()
+    if target not in WINDOWS_PAGES.values() and not SETTINGS_PAGE.fullmatch(target):
+        raise RuntimeError("I can only open Windows' own settings and tools that way")
+    os.startfile(target)
 

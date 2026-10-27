@@ -327,6 +327,46 @@ class Asking(Routing):
             with self.subTest(words=words):
                 self.assertTrue(siri.could_be_request(words))
 
+    def test_sending_said_without_her_name(self):
+        """23 October: "Send a message to Amma" was let go as room talk, the model never seeing it."""
+        for words in ("Send a message to Amma", "message Amma hi", "Text Ravi I'm running late", "reply to him",
+                      "Send a WhatsApp to Bunty", "email Ravi the report"):
+            with self.subTest(words=words):
+                self.assertTrue(siri.could_be_request(words))
+        for words in ("The message was nice", "I got your text", "Text me later", "Message me tonight"):
+            with self.subTest(words=words):
+                self.assertFalse(siri.could_be_request(words))
+
+
+class LateNo(unittest.TestCase):
+    """23 October: "No" to "Is that them?", said once her few seconds for it had gone, was let go as room talk."""
+
+    def setUp(self):
+        saved = dict(siri.PENDING)
+        self.addCleanup(lambda: siri.PENDING.update(saved))
+        siri.PENDING.update(plan={"steps": [{"do": "contact_found", "id": "x"}]}, soon=time.time() + 10,
+                            until=time.time() + 60, origin="voice")
+
+    def route(self, words, sure=0.9):
+        return siri.route(speech.heard(words, sure), "other", open_mic=True)
+
+    def test_a_no_still_answers_her(self):
+        for words in ("No.", "Nope", "No, no.", "No, not him.", "Not her", "That's not them", "Wrong one"):
+            with self.subTest(words=words):
+                self.assertEqual(self.route(words)[2], True)
+
+    def test_talk_with_a_no_in_it_doesnt(self):
+        for words in ("No problem", "Wait, I'm coming", "Not bad", "No worries yaar"):
+            with self.subTest(words=words):
+                self.assertIsNone(self.route(words))
+
+    def test_not_once_a_no_isnt_taken_or_mumbled(self):
+        self.assertIsNone(self.route("No", sure=0.4))
+        siri.PENDING["soon"] = time.time() - 1
+        self.assertIsNone(self.route("No"))
+        siri.PENDING.update(soon=time.time() + 10, origin="phone")
+        self.assertIsNone(self.route("No"))
+
 
 class Power(Routing):
     """R2: shutting down and restarting the PC are planned on the PC, and always asked about first."""
