@@ -218,10 +218,16 @@ PLAN_ACTING = [0, threading.Lock()]  # her plans' steps running in a turn now (s
 # not typing that moment (TYPING); a job's question waits this long for its yes (as Hermes' approvals and her
 # questions on the phone do); and one go of a job, which no turn cuts off at siri.SCREEN_WAIT
 LULL, LULL_MOST, TYPING, JOB_HOLD_FOR, JOB_SECONDS = 2.0, 30.0, 0.6, 300.0, 600.0
+# Seconds a plan of yours starting waits, at most, for a job's action under way with the screen to finish (plan_acting):
+# never the 10 s close() waits, as that's the voice fast path. And how long after opening an app or a site a job looks
+# for its window to come up in front (opened): Outlook, Word or a cold Chrome take seconds, and pinning what was in
+# front before it came up had the job working in your window as if it were its own
+PLAN_WAIT, PIN_WAIT = 0.5, 6.0
 JUDGE_MOST = 3  # goes Hermes' goal judge may send a job on for (its /goal allows 20 turns; a voice job is shorter)
 # Steps that need the screen: what goes to the window in front (keys, typing at the cursor, a scroll), a click at a
 # point (click with no id), and what puts a window in front. A click by id is done on the job's own window by UI
-# Automation, with the screen left to you
+# Automation, with the screen left to you, when its control takes it by a pattern (winplatform.ui_focus_free); one
+# that would be clicked by the mouse or pasted into needs the screen too (needs_screen)
 SCREEN_STEPS = {"type", "keys", "scroll", "open", "website", "switch"}
 NO_SCREEN = "I'd need the screen for that and didn't have it, so I've left it."
 DONE_ENDS = {"done", "looked", "unverified"}  # how a job's go ends that says it did what it could
@@ -243,6 +249,7 @@ class Job:
         self.origin = dict(origin or {})
         self.budget, self.runs, self.continued = IterationBudget(TASK_ROUNDS), [], 0
         self.tid, self.leased, self.asked = None, False, None
+        self.yours = None  # the window you had in front when it took the screen: never one it pins (opened)
         # from a run handed over to it (siri.hand_over): the window it worked on, what it got done, whether it read
         # someone else's words; and where to tell how far it's got (the Tasks tab's progress)
         self.pin, self.hints, self.read, self.on_progress = None, "", False, None
@@ -301,15 +308,13 @@ def background_jobs():
 
 
 def plan_acting(n):
-    """One more of her plans acting in a turn (1) or one fewer (-1), siri.run_plan's steps. One more is counted
-    holding ACT: a job's action under way finishes first, and none starts after it (act), so a job's keys never land
-    between a turn's."""
-    got = ACT.acquire(timeout=10) if n > 0 else False
-    try:
-        _count(PLAN_ACTING, n)
-    finally:
-        if got:
-            ACT.release()
+    """One more of her plans acting in a turn (1) or one fewer (-1), siri.run_plan's steps. Counted at once, so no
+    job's action starts after it (act checks turn_acting holding ACT); then, only while a job has the screen, up to
+    PLAN_WAIT for its action under way to finish, so its keys don't land between a turn's. It took ACT for up to 10 s
+    till 27 October, and a job's paste, open or Invoke on a dialog held the voice fast path up seconds."""
+    _count(PLAN_ACTING, n)
+    if n > 0 and any(job.leased for job in list(JOBS.values())) and ACT.acquire(timeout=PLAN_WAIT):
+        ACT.release()
 
 
 def turn_acting():
@@ -317,9 +322,25 @@ def turn_acting():
     return RUNNING.is_set() or PLAN_ACTING[0] > 0
 
 
-def needs_screen(s):
-    """True if step s of a job's needs the screen (SCREEN_STEPS, or a click at a point)."""
-    return s.get("do") in SCREEN_STEPS or (s.get("do") == "click" and s.get("id") is None)
+def needs_screen(s, obs=None):
+    """True if step s of a job's needs the screen: SCREEN_STEPS, a click at a point, or a click by id on a control
+    in obs (what it saw of its window) that takes it by no pattern (focus_free), so the mouse or a paste would."""
+    if s.get("do") in SCREEN_STEPS or (s.get("do") == "click" and s.get("id") is None):
+        return True
+    if s.get("do") != "click" or obs is None:
+        return False
+    item = next((it for it in obs.get("items") or () if str(it["id"]) == str(s.get("id"))), None)
+    return item is not None and not focus_free(item.get("el"), s)
+
+
+def focus_free(el, s):
+    """True if click step s is done on control el by its own pattern alone (winplatform.ui_focus_free). A control
+    that couldn't be asked isn't."""
+    try:
+        return bool(win.ui_focus_free(el, s.get("text"), s.get("state") if s.get("state") in ("on", "off") else None))
+    except Exception as exc:
+        print(f"  couldn't tell how a control is pressed: {exc!r}")
+        return False
 
 
 def front(r=None):
@@ -336,9 +357,13 @@ def pin(r):
 
 
 def site_in(r, exe):
-    """The site run r's window shows: the address bar in front for a turn's run, the job's last read of its own."""
+    """The site run r's window shows: the address bar in front for a turn's run, a job's own window's, read now
+    (winplatform.window_site), as a page's link may have taken it elsewhere since it looked. Its last look's was
+    always None till 27 October, so allowed_site, OFF_LIMITS and chat sites never judged a job's page."""
     if r is not None and r.job is not None:
-        return (r.seen or {}).get("site") if r.pin else None
+        if not r.pin or exe not in win.BROWSER_EXES:
+            return None
+        return win.window_site(r.pin, exe) or (r.seen or {}).get("site")
     return win.browser_site() if exe in win.BROWSER_EXES else None
 
 
@@ -366,7 +391,7 @@ def screen(r):
             raise Halted()
     try:
         _lull(r)
-        yours = win.front_window()
+        yours = r.job.yours = win.front_window()
         r.job.leased = True
         activity.update(activity.KEY.get(), note="Using the screen")
         r.job.progress("Using the screen")
@@ -375,7 +400,7 @@ def screen(r):
                 win.bring_to_front(r.pin)
             yield
         finally:
-            r.job.leased = False
+            r.job.leased, r.job.yours = False, None
             activity.update(activity.KEY.get(), note="Working on it")
             try:
                 if yours and yours != r.pin and win.window_exists(yours):
@@ -716,7 +741,13 @@ def do_held(r, held):
             el = win.find_ui(target.get("name"), target.get("role"), target.get("aid"), hwnd=pin(r))
             if el is None:
                 return finish(r, "gone", GONE)
-            act(win.ui_act, el, s.get("text"), s.get("state"))
+            if r.job is not None and not r.job.leased and not focus_free(el, s):
+                with screen(r):  # the mouse or a paste on a job's window: with the screen, as needs_screen has it
+                    act(win.ui_act, el, s.get("text"), s.get("state"))
+            elif r.job is not None and not r.job.leased:
+                act(win.ui_act, el, s.get("text"), s.get("state"), focus_free=True)
+            else:
+                act(win.ui_act, el, s.get("text"), s.get("state"))
             # found again: kept with it, so a switch is learned with its state (record), never as a bare press
             target = {**target, "el": el}
             if s.get("text") is not None:  # a box filled in: Enter after it asks, and a send reads it back
@@ -1497,6 +1528,10 @@ def gate(r, i, s, el=None, checked=False, trusted=()):
         return "ask", f"{url_site} isn't a site you asked for"
     if text is not None and site and site not in trusted and not allowed_site(r, site, text):
         return "ask", f"typing on {site}, which you didn't ask for"
+    # a job's page whose site couldn't be read (another browser, or its address bar wouldn't say): unknown, so its
+    # typing asks, rather than passing for a site you named. A turn's run has you watching the page; a job hasn't
+    if text is not None and r.job is not None and exe in WEB_EXES and not site:
+        return "ask", "typing on a page whose site I couldn't read"
     return None, ""
 
 
@@ -2224,7 +2259,8 @@ def _rounds(r, notify=None):
                 continue
             return finish(r, "stuck", host.tidy(reply.get("say")) or "I couldn't see how to do that, so I've stopped.")
         try:  # a job's steps that need the screen are done holding it, the round's together, and settle there too
-            with screen(r) if r.job is not None and any(needs_screen(s) for s in steps) else contextlib.nullcontext():
+            with screen(r) if r.job is not None and any(needs_screen(s, obs) for s in steps) else \
+                    contextlib.nullcontext():
                 line = act_round(r, steps, obs, shot, reply)
         except Yielded:  # a turn of yours started acting: it lets go of the screen, and looks again
             r.notes.append("let go of the screen as you were using the PC")
@@ -2531,7 +2567,7 @@ def observe(r):
     hwnd, exe, title = front(r)
     if own and hwnd is None:
         r.pin = None  # closed: it opens or switches to what it needs again
-    site = None if own else win.browser_site() if exe in win.BROWSER_EXES else None
+    site = None if exe not in win.BROWSER_EXES else win.window_site(hwnd, exe) if own else win.browser_site()
     obs = {"hwnd": hwnd, "exe": exe, "title": title, "site": site, "items": None, "focus": None, "total": None,
            "focused": None, "cut": False, "own": own,
            "full": hwnd is not None if own else r.full or (not r.task and sees_window(r, exe, title, site))}
@@ -2782,7 +2818,7 @@ def do_one(r, s, obs, shot, finishing=None, at=-1):
     at: see gate_vision. True once done. A job's step on its own window, in front or not; one that needs the screen
     only while it has it (screen), never else (NO_SCREEN), and only with its window still in front: you may have
     taken the focus back meanwhile."""
-    screens = r.job is not None and needs_screen(s)
+    screens = r.job is not None and needs_screen(s, obs)
     if screens and not r.job.leased:
         raise Refused(NO_SCREEN)
     hwnd, _, title = front(r)
@@ -2825,6 +2861,7 @@ def do_one(r, s, obs, shot, finishing=None, at=-1):
     r.finishing, r.before_act = finishing, obs  # kept for after your yes too, if the gate holds it
     el = gate_vision(s, point, el, at)
     twins = _twins(obs, el) if do in ("click", "type") else None  # before she acts: a Send's gone after it
+    before = win.front_window() if r.job is not None and do in OPENS else None
     try:
         result = pause(s.get("seconds") or 1) if do == "wait" else act(perform, s, el, point)
     except (Halted, Yielded):
@@ -2836,9 +2873,8 @@ def do_one(r, s, obs, shot, finishing=None, at=-1):
         return False
     r.finishing, r.acted, r.did_any, r.full = None, True, True, True  # from here on, the window she's working in
     r.hwnd = None if do in OPENS else obs["hwnd"]  # what opened is a window she's yet to read
-    if r.job is not None and do in OPENS:  # what it opened or switched to, in front now, is its own window from here
-        pause(host.WAIT_AFTER.get(do, 0.5))
-        r.pin = win.front_window()
+    if r.job is not None and do in OPENS:  # what it opened or switched to is its own window from here
+        r.pin = result["hwnd"] if do == "switch" and isinstance(result, dict) else opened(r, s, before)
     text = s.get("text") if do in ("type", "click") else None
     if text is not None:
         note_typed(text)
@@ -2859,11 +2895,15 @@ def perform(s, el, point):
     or opening an app or a site (siri.do_step). Returns what ui_act says happened, or the step."""
     do = s["do"]
     if do == "click" and point is None:
-        # a job fills in a box of its own window by its Value, never at the cursor in yours: the gate judged its
-        # window's program already (a command window refused there), so what you have in front isn't in it
-        if s.get("text") is not None and (RUN.get() is None or RUN.get().job is None):
+        state = s.get("state") if s.get("state") in ("on", "off") else None
+        r = RUN.get()
+        if r is not None and r.job is not None and not r.job.leased:
+            # a job without the screen, on its own window behind yours: by a pattern only, never the focus and a
+            # paste or the mouse (needs_screen took the screen for those), which would land in your window
+            return win.ui_act(el["el"], s.get("text"), state, focus_free=True)
+        if s.get("text") is not None:  # a paste goes to the window in front: never a command window
             host.not_into_shell()
-        return win.ui_act(el["el"], s.get("text"), s.get("state") if s.get("state") in ("on", "off") else None)
+        return win.ui_act(el["el"], s.get("text"), state)
     if do == "click":
         win.click(*point, button="right" if s.get("button") == "right" else "left", double=bool(s.get("double")))
         return "clicked"
@@ -2877,10 +2917,40 @@ def perform(s, el, point):
     elif do == "scroll":
         win.scroll(5 if str(s.get("direction") or "").lower() == "up" else -5)
     elif do == "switch":
-        switch_to(s.get("to") or s.get("app"))
+        return switch_to(s.get("to") or s.get("app"))  # the window, which a job pins (do_one)
     else:
         host.do_step({k: v for k, v in s.items() if k in ("do", "app", "url")})
     return do
+
+
+def opened(r, s, before):
+    """The window job run r's open or website step s brought up, to pin as its own, or None to look again: the one
+    in front once it's neither yours (Job.yours) nor what was in front before it (unless that was its own already, a
+    new tab in its browser), and is the app's or a browser for a site (is_opened). Waited for up to PIN_WAIT: on 27
+    October it pinned what was in front after half a second, your window when the app was slow to come up, and read
+    and pressed your document as its own."""
+    avoid = {r.job.yours} | ({before} if before != r.pin else set())
+    end = _clock() + PIN_WAIT
+    pause(host.WAIT_AFTER.get(s["do"], 0.5))
+    while True:
+        hwnd = win.front_window()
+        if hwnd and hwnd not in avoid and is_opened(s, hwnd):
+            return hwnd
+        if _clock() >= end:
+            r.notes.append(f"{note_of(s)}, but couldn't tell which window it opened")
+            return None
+        pause(0.25)
+
+
+def is_opened(s, hwnd):
+    """True if window hwnd is what step s opens: a browser for a site, else a window whose program or title has a
+    word of the app's name ("Code.exe" for VS Code, "Document1 - Word" for Word)."""
+    _, exe, title = win.window_of(hwnd)
+    if s["do"] == "website":
+        return exe in WEB_EXES
+    words = re.findall(r"[a-z0-9]{3,}", str(s.get("app") or "").lower())
+    where = f"{exe} {title}".lower()
+    return not words or any(w in where for w in words)
 
 
 def switch_to(name):

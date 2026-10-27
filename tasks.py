@@ -95,8 +95,11 @@ class Store:
             self._ready = True
 
     def recover(self):
-        """Recover work left running by a previous process. Call once, only from task_worker at app startup."""
+        """Recover work left running by a previous process. Call once, only from task_worker at app startup. Returns
+        the ids of those that changed the PC and wait on your yes again, which a job's are asked about (siri.ask_again,
+        keyed by a fresh hold, so only a yes to that question restarts it)."""
         self.init()
+        again = []
         with self._db() as con:
             # A command may have changed something before the app stopped. Never repeat it automatically: remove
             # its approval and ask again. Read-only lookups/reminders/research are safe to retry.
@@ -105,7 +108,12 @@ class Store:
                 if row["kind"] in CHANGES_PC:
                     payload = _json(row["payload"], {})
                     payload.pop("approved", None)
-                    payload.pop("hold", None)  # a job's held step was in memory: approved now, it starts again
+                    # a job's held step was in memory, gone with it: approved now, it starts again. The question
+                    # it's asked again with gets a key of its own, as a held step's has (wait_for_approval)
+                    payload.pop("hold", None)
+                    if row["kind"] == "agent":
+                        payload["hold"] = os.urandom(6).hex()
+                    again.append(row["id"])
                     con.execute("UPDATE tasks SET payload=?, status='waiting_approval', error=?, started=NULL, "
                                 "updated=? WHERE id=?", (json.dumps(payload, ensure_ascii=False),
                                 f"Jev stopped while this {'job' if row['kind'] == 'agent' else row['kind']} was "
@@ -113,6 +121,7 @@ class Store:
                 else:
                     con.execute("UPDATE tasks SET status='queued', started=NULL, updated=? WHERE id=?", (now, row["id"]))
         WAKE.set()
+        return again
 
     @staticmethod
     def _row(row):

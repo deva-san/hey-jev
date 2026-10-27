@@ -4698,7 +4698,7 @@ def _known(steps):
     unknown = [s["do"] for s in steps if s["do"] not in KNOWN_STEPS]
     if unknown:
         print(f"  no such steps, left out: {', '.join(unknown)}")
-    steps = [{k: v for k, v in s.items() if k not in ("read", "exact", "learned")} if s["do"] in agent.DISPATCH else s
+    steps = [{k: v for k, v in s.items() if k not in ("read", "exact", "learned")} if s["do"] in MARKED else s
              for s in steps]
     return one_window([s for s in steps if s["do"] in KNOWN_STEPS])
 
@@ -5437,7 +5437,7 @@ def _think(text, gate, notify=None, sure=1.0):
     # messages, which could try to steer her, any change does
     read = bool(used & ({"messages", "picture"} | TAINTS))  # TAINTS: web, read, news, and windows, files, clipboard
     for s in plan["steps"] if read or view else []:
-        if s["do"] in agent.DISPATCH:  # a task in an app that what was read could steer: stricter there (agent.gate)
+        if s["do"] in MARKED:  # a task in an app that what was read could steer: stricter there (agent.gate)
             s["read"] = True
     extra = unasked(plan["steps"], text, gate, planned=True) if gate else None
     if extra:  # without her name, and the words don't ask for it: let go, not asked about
@@ -5633,6 +5633,12 @@ class JobAsk(str):
         return line
 
 
+# Steps whose "read" only she sets (think, _known): the tasks in an app run_plan dispatches, and a job in the
+# background, which runs as one (agent.background). Till 27 October a job planned after reading a mail ran unread,
+# and its clicks and typing no longer asked first as the same task in a turn's would
+MARKED = agent.DISPATCH | {"background"}
+
+
 def queue_job(goal, description=None, **more):
     """A job for goal queued in the background: a task row of kind agent, with your words of this turn pinned to it
     (agent.SAID, never later turns'), whether you asked plainly (agent.NAMED, which learning from it needs), and
@@ -5693,6 +5699,15 @@ def ask_job(task, asked):
     ANNOUNCE.put(JobAsk(question, tid, asked["hold"], asked.get("verb")))
 
 
+def ask_again(task):
+    """A job Jev stopped in the middle of (tasks.Store.recover), asked about where it was asked from, as its held
+    steps are: on the phone with buttons keyed by it and the fresh key recover gave it, else out loud once she's free.
+    Till 27 October it only waited on the island, and nobody was asked."""
+    ask_job(task, {"hold": task["payload"].get("hold") or "", "verb": "start|start it|start it again",
+                   "question": f"I'd stopped in the middle of {task['description'].rstrip('.')}. Should I start it "
+                               f"again?"})
+
+
 def job_asked(line):
     """After she said a job's question out loud (heads_ups' tell, holding busy): the next yes is for that job and that
     step only, a task_control approve carrying both ids (Store.approve checks them), with the step's own verbs; a no
@@ -5741,8 +5756,9 @@ def backgrounded(plan, words):
         return plan
     goal = str(steps[at].get("goal") or steps[at].get("task"))
     print("  (asked for in the background: a job of its own)")
-    return {**plan, "steps": [s for s in steps[:at] if s.get("do") not in ("open", "website")] +
-            [{"do": "background", "goal": goal}] + steps[at + 1:]}
+    job = {"do": "background", "goal": goal, **({"read": True} if steps[at].get("read") else {})}  # as think marked it
+    return {**plan, "steps": [s for s in steps[:at] if s.get("do") not in ("open", "website")] + [job] +
+            steps[at + 1:]}
 
 
 def hand_over(step, r):
@@ -5897,7 +5913,8 @@ def prepare_task_steps(plan):
                 notices.append(f"Task {task_id} is scheduled for {tasking.describe_due(due)}{again}.")
                 continue
             if do == "background":  # a job done while you go on talking to her (run_job)
-                task_id = queue_job(step.get("goal") or step.get("task"), step.get("description"))
+                task_id = queue_job(step.get("goal") or step.get("task"), step.get("description"),
+                                    read=bool(step.get("read")))
                 kept.append({"do": "task_queued", "id": task_id})
                 notices.append(f"I'll do that in the background as task {task_id}, and tell you when it's done.")
                 continue
@@ -5938,10 +5955,12 @@ def task_worker():
     installs and research run on a thread of their own, still one at a time, so reminders and PC checks don't wait:
     a reminder due during a 30 minute install was said when the install finished."""
     TASK_STORE.init()
-    TASK_STORE.recover()
+    again = TASK_STORE.recover() or []
     for row in TASK_STORE.list(80, active=True):  # waiting on your yes from before she started: on the island too
         if row["status"] == "waiting_approval":
             show_task(row, "waiting_yes")
+            if row["kind"] == "agent" and row["id"] in again:
+                ask_again(row)
     print("[tasks: ready]")
     slow = threading.Event()  # set while a command, install or research runs
     # Hermes' late rule is for work that came due while the PC was off or asleep, never for a task that only waited

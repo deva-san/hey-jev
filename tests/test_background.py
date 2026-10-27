@@ -20,6 +20,7 @@ from unittest import mock
 
 from tests.support import TRIPPED, siri, winplatform  # first: temp APPDATA and the tripwires
 from tests.test_agent import Control, Live
+from tests.test_timers import StopsWorker
 
 import activity
 import agent
@@ -354,6 +355,100 @@ class Lease(Jobs):
         with agent.screen(r):
             entered.set()
 
+    def test_a_click_by_id_the_mouse_or_a_paste_would_do_takes_the_screen(self):
+        """27 October's review: a list item or tab with no Invoke is clicked by the real mouse at its middle, and a box
+        with no Value it may write is focused and pasted into, both landing on your window in front. Without the
+        screen that's refused, as keys are; with it, it's done in its own window in front, a paste after the check
+        that it isn't a command window."""
+        w = self.app.window("settings", "systemsettings.exe", "Settings")
+        tab, box = Control("Display", "tabitem"), Control("Find a setting", "edit", value="")
+        tab.falls_back = box.falls_back = True
+        w.controls = [tab, box]
+        shell = []
+        self.patch(siri, "not_into_shell", lambda keys=(): shell.append(self.app.front.exe))
+
+        def go(job, r):
+            r.pin = w.hwnd
+            obs = agent.observe(r)
+            steps = ({"do": "click", "id": 1}, {"do": "click", "id": 2, "text": "night"})
+            self.assertTrue(all(agent.needs_screen(s, obs) for s in steps))
+            for s in steps:
+                with self.subTest(s.get("text") or "click"), self.assertRaises(agent.Refused):
+                    agent.do_one(r, s, obs, None)
+            self.assertEqual(self.app.done, [])
+            with agent.screen(r):
+                return [agent.do_one(r, s, agent.observe(r), None) for s in steps]
+        self.assertEqual(self.run_in_job(5, go, goal="search night in settings"), [True, True])
+        self.assertEqual(self.app.done, [("Display", "press"), ("Find a setting", "night")])
+        self.assertEqual(shell, ["systemsettings.exe"])  # its own window in front for the paste
+        self.assertEqual(self.app.front.exe, "explorer.exe")  # yours given back
+
+    def test_without_the_screen_it_acts_by_a_pattern_only(self):
+        """What changed between its look and its press still never reaches the mouse: ui_act is told focus_free."""
+        w = self.app.window("notepad", "notepad.exe", "Untitled - Notepad")
+        w.controls = [Control("Text editor", "edit", value="")]
+        self.patch(siri, "not_into_shell", lambda keys=(): self.fail("your window in front was judged"))
+
+        def go(job, r):
+            r.pin = w.hwnd
+            el = agent.observe(r)["items"][0]
+            w.controls[0].falls_back = True  # its Value went read-only between the check and the press
+            with self.assertRaisesRegex(RuntimeError, "needs the screen"):
+                agent.act(agent.perform, {"do": "click", "id": 1, "text": "Lima"}, el, None)
+        self.run_in_job(5, go, goal="type Lima in Notepad")
+        self.assertEqual(w.controls[0].value, "")
+
+    def test_a_plan_of_yours_never_waits_long_on_a_jobs_action(self):
+        """A job's action holds ACT (a paste, an open, an Invoke on a dialog): a plan of yours starting counts itself
+        at once, waits for it only while a job has the screen, and then PLAN_WAIT at most. It waited up to 10 s."""
+        agent.ACT.acquire()
+        try:
+            began = time.monotonic()
+            agent.plan_acting(1)
+            self.assertLess(time.monotonic() - began, 0.3)
+            self.assertTrue(agent.turn_acting())  # no job's action starts after this (act)
+            agent.plan_acting(-1)
+            job = agent.job_for(9, "a job")
+            job.leased = True
+            began = time.monotonic()
+            agent.plan_acting(1)
+            self.assertLess(time.monotonic() - began, agent.PLAN_WAIT + 0.4)
+        finally:
+            agent.ACT.release()
+            agent.plan_acting(-1)
+
+    def test_a_slow_app_isnt_pinned_till_it_comes_up_and_yours_never_is(self):
+        """After opening Outlook, Word or a cold Chrome, what's in front for a while is still yours: it pinned that
+        after half a second, and read and pressed your document as its own."""
+        mail = self.mail()
+        late = [None]
+
+        def slow(step):  # nothing comes up in front at once
+            self.app.opened.append(step)
+            late[0] = self.clock[0] + 3.0
+        self.patch(siri, "do_step", slow)
+        sleep = agent._sleep
+
+        def tick(secs):
+            sleep(secs)
+            if late[0] is not None and self.clock[0] >= late[0]:
+                self.app.show("mail")
+                late[0] = None
+        self.patch(agent, "_sleep", tick)
+
+        def go(job, r, comes_up):
+            with agent.screen(r):
+                obs = agent.observe(r)
+                if not comes_up:
+                    self.patch(siri, "do_step", lambda step: self.app.opened.append(step))
+                agent.do_one(r, {"do": "open", "app": "mail"}, obs, None)
+                return r.pin
+        self.assertEqual(self.run_in_job(5, lambda job, r: go(job, r, True)), mail.hwnd)
+        self.app.show("explorer")
+        began = self.clock[0]
+        self.assertIsNone(self.run_in_job(6, lambda job, r: go(job, r, False)))  # never yours, Program Manager
+        self.assertGreaterEqual(self.clock[0] - began, agent.PIN_WAIT)
+
     def test_it_reads_only_its_own_window_never_yours(self):
         bank = self.app.window("bank", "chrome.exe", "My Bank - Net Banking", "mybank.com")
         bank.controls = [Control("Balance", "text", value="12,000")]
@@ -365,6 +460,41 @@ class Lease(Jobs):
         self.assertNotIn("Bank", text)
         self.assertIn("no window open yet", text)
         self.assertEqual(self.app.snapshots, 0)
+
+
+class Sites(Jobs):
+    """A job's page is judged by its own window's address bar, read when it acts: it was always None, so a link to a
+    site you never named was typed on with no question."""
+
+    def typing(self, exe, site):
+        w = self.app.window("page", exe, "Sign in", site)
+        w.controls = [Control("Your name", "edit", value="")]
+
+        def go(job, r):
+            r.pin = w.hwnd
+            obs = agent.observe(r)
+            r.read = False  # a page read asks for each step anyway (gate's read rule): this is the site's own rule
+            el = {"name": "Your name", "role": "edit", "aid": "", "password": False, "el": w.controls[0]}
+            return obs["site"], agent.gate(r, 0, {"do": "click", "id": 1, "text": "Hari"}, el)
+        return self.run_in_job(5, go, goal="fill in the form on the shop page")
+
+    def test_typing_on_a_site_you_never_named_asks(self):
+        site, verdict = self.typing("chrome.exe", "phish.test")
+        self.assertEqual(site, "phish.test")
+        self.assertEqual(verdict, ("ask", "typing on phish.test, which you didn't ask for"))
+
+    def test_a_page_whose_site_it_cant_read_asks_too(self):
+        self.assertEqual(self.typing("firefox.exe", None)[1], ("ask", "typing on a page whose site I couldn't read"))
+
+    def test_its_site_is_read_afresh_where_a_link_took_it(self):
+        w = self.app.window("page", "chrome.exe", "Shop", "shop.example")
+
+        def go(job, r):
+            r.pin = w.hwnd
+            agent.observe(r)
+            w.site = "mybank-netbanking.test"  # a link on the page, followed since
+            return agent.site_in(r, "chrome.exe")
+        self.assertEqual(self.run_in_job(5, go), "mybank-netbanking.test")
 
 
 class Stopping(Jobs):
@@ -599,6 +729,29 @@ class Asking(Jobs):
         with self.assertRaisesRegex(RuntimeError, "didn't catch"):
             siri.background_payload({"kind": "agent", "goal": "  "})
 
+    def test_a_job_planned_after_a_read_runs_read(self):
+        """"Read my latest email and, in the background, reply to it": think marks the task step read, and the job
+        keeps it, so each click and typing asks first as it would in a turn. It ran unread till 27 October."""
+        plan = {"steps": [{"do": "screen", "task": "reply to Asha in the mail app", "read": True}], "say": ""}
+        got = siri.backgrounded(plan, "reply to it in the background")
+        self.assertEqual(got["steps"], [{"do": "background", "goal": "reply to Asha in the mail app", "read": True}])
+        self.assertIn("background", siri.MARKED)  # think marks the planner's own background step read too
+        self.assertNotIn("read", siri._known([{"do": "background", "goal": "x", "read": True}])[0])  # only she sets it
+        said, name = agent.SAID.set(WORDS), agent.NAMED.set(True)
+        try:
+            (queued,) = siri.prepare_task_steps(got)["steps"]
+        finally:
+            agent.SAID.reset(said)
+            agent.NAMED.reset(name)
+        self.assertTrue(self.store.get(queued["id"])["payload"]["read"])
+        self.mail()
+        self.model({"steps": [{"do": "open", "app": "mail"}]},
+                   lambda: {"steps": [{"do": "click", "id": 1, "text": "ravi@example.com"}]})
+        siri.run_job(self.claim(queued["id"]))
+        self.assertEqual(self.store.get(queued["id"])["status"], "waiting_approval")
+        self.assertEqual(self.app.windows["mail"].controls[0].value, "")  # asked before typing, not after
+        self.assertIsInstance(self.told.get_nowait(), siri.JobAsk)
+
     def test_a_task_still_going_when_her_turn_stops_waiting_is_handed_over(self):
         release = threading.Event()
 
@@ -620,6 +773,33 @@ class Asking(Jobs):
         self.assertIn(f"in the background as task {row['id']}", self.said[-1])
 
 
+class Restart(Jobs):
+    """A job Jev stopped in the middle of is asked about again at start, keyed by it, by voice or on the phone."""
+
+    def test_it_asks_again_and_only_that_yes_starts_it(self):
+        store = StopsWorker(self.store.path)
+        self.patch(siri, "TASK_STORE", store)
+        tid = store.create("Write to Ravi", "agent", {"goal": "write to Ravi", "approved": True})
+        store.claim_due()  # running when Jev stopped
+        worker = threading.Thread(target=siri.task_worker, daemon=True)
+        worker.start()
+        try:
+            asked = self.told.get(timeout=5)
+        finally:
+            store.stopped = True
+            tasks.WAKE.set()
+            worker.join(5)
+        self.assertIsInstance(asked, siri.JobAsk)
+        self.assertEqual(asked, f"Task {tid} asks: I'd stopped in the middle of Write to Ravi. Should I start it "
+                                f"again?")
+        self.assertEqual(asked.hold, store.get(tid)["payload"]["hold"])
+        self.assertFalse(siri.job_tap(f"task:{tid + 1}:{asked.hold}", True))  # another job's key
+        self.assertTrue(siri.job_asked(asked))
+        self.assertTrue(siri.said_yes("yes, start it again", siri.PENDING["plan"]))
+        self.assertTrue(siri.job_tap(f"task:{tid}:{asked.hold}", True))
+        self.assertEqual(store.get(tid)["status"], "queued")
+
+
 class Store(unittest.TestCase):
     """tasks.py for jobs: the agent kind changes the PC, a progress column, and approvals keyed by step."""
 
@@ -630,11 +810,13 @@ class Store(unittest.TestCase):
         store = tasks.Store(self.path)
         tid = store.create("Write to Ravi", "agent", {"goal": "write to Ravi", "approved": True, "hold": "ab12"})
         store.claim_due()
-        store.recover()
+        self.assertEqual(store.recover(), [tid])
         row = store.get(tid)
         self.assertEqual(row["status"], "waiting_approval")
         self.assertNotIn("approved", row["payload"])
-        self.assertNotIn("hold", row["payload"])  # its held step was in memory, gone with it: it starts again
+        # its held step was in memory, gone with it: it starts again, asked about with a key of its own
+        self.assertNotIn(row["payload"]["hold"], ("", "ab12"))
+        self.assertFalse(store.approve(tid, "ab12"))
         self.assertIn("this job was running", row["error"])
 
     def test_one_due_while_the_pc_was_off_asks_again_too(self):

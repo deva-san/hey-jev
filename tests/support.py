@@ -85,6 +85,8 @@ WIN_ACTIONS = (
     "selected_files", "clipboard_text",
     # and what a job in the background reads (27 October): its own window, where it is, and how long since you typed
     "window_of", "window_rect", "idle_seconds",
+    # and how it tells a control it may press with your window in front, and its own window's site, from UI Automation
+    "ui_focus_free", "window_site",
 )
 WIN_ORIGINAL = {}  # the real ones, for a test of one that never lets it reach the PC (it patches what that calls)
 for _name in WIN_ACTIONS:
