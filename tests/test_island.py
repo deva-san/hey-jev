@@ -172,6 +172,8 @@ def bare(**kw):
     isl.k, isl.cw, isl.ch, isl.border, isl.theme_name, isl.light, isl.shapes = 1.5, 1200, 300, False, "amoled", False, {}
     isl.eyes = face.Eyes()
     isl.pinned, isl.rest_pos, isl.rest_at = None, None, 0.0
+    # the black pill: what these tests were written for, drawn as it always was. The capsule's own are below (Capsule)
+    isl.style, isl.pupil, isl.face_at, isl.patch_at, isl.level = "pill", (0, 0), None, (0, 0), 0.0
     for name, value in kw.items():
         setattr(isl, name, value)
     return isl
@@ -517,6 +519,271 @@ class TasksPlugin(unittest.TestCase):
         self.assertNotIn(threading.current_thread(), opened)  # the thread that polled and pressed
         self.assertIn("island-press", [t.name for t in opened])
         self.assertEqual(store.get(task)["status"], "cancelled")
+
+
+def painted(isl, lay, now=None):
+    """lay drawn into the island's window picture by _draw, as a frame comes out at rest: the picture, (h, w, 4)
+    blue, green, red and alpha, premultiplied, and the island's box in it."""
+    isl.m = round(isl.MARGIN * isl.k)
+    isl.ch = int(isl.m + isl.island_max_h + 200 * isl.k)
+    isl.buf = np.zeros((isl.ch, isl.cw, 4), np.uint8)
+    isl.align, isl.drawn, isl.cap_key, isl.cap_picture = "center", None, None, None
+    isl.layout, isl.prev, isl.content, isl.prev_alpha, isl.alpha = lay, None, 1.0, 0.0, 1.0
+    isl.cap_alpha = 1.0 if lay.cap else 0.0
+    isl.W, isl.H = SimpleNamespace(x=lay.w), SimpleNamespace(x=lay.h)
+    isl.CW = SimpleNamespace(x=lay.cap.w if lay.cap else 0.0)
+    isl.CH = SimpleNamespace(x=lay.cap.h if lay.cap else 0.0)
+    isl._draw(time.time() if now is None else now)
+    return isl.buf, isl.island_rect
+
+
+def straight(px):
+    """A premultiplied blue, green, red, alpha pixel as (red, green, blue) 0 to 1, and its alpha 0 to 1."""
+    a = px[3] / 255
+    return np.asarray(px[2::-1], np.float32) / 255 / max(a, 1e-6), a
+
+
+@needs_windows
+class Capsule(unittest.TestCase):
+    """27 October 2026: the owner's pick, a floating glass capsule with her as a small cartoon, the time beside her
+    when nothing's on, a task's title and how far it's got with a line under it, and a glass card. The black pill
+    stays as it was (Drawing, Cards: drawn the same, pixel for pixel)."""
+
+    def capsule(self, **kw):
+        return fonted(self, **dict({"style": "capsule"}, **kw))
+
+    def test_the_setting_is_the_capsule_until_the_pill_is_picked(self):
+        self.addCleanup(settings.put, "island_style", None)
+        self.assertEqual(settings.DEFAULTS["island_style"], "capsule")
+        isl = bare()
+        for saved, want in (("pill", "pill"), ("capsule", "capsule"), ("nonsense", "capsule"), (None, "capsule")):
+            settings.put("island_style", saved)
+            isl._read_settings()
+            self.assertEqual(isl.style, want, saved)
+        isl.theme_name = "amoled"
+        self.assertIs(isl.theme(), island.GLASS["dark"])
+        isl.style = "pill"
+        self.assertIs(isl.theme(), island.THEMES["amoled"])
+
+    def test_it_floats_under_the_top_with_round_ends(self):
+        isl = self.capsule(align="center", off_x=0, off_y=0, visible_window=False)
+        isl.corner = 6
+        isl.m = round(isl.MARGIN * isl.k)
+        isl._place((0, 0, 1920, 1040))
+        self.assertEqual(isl.origin.y + isl.m, round(isl.FLOAT * isl.k))  # Down at 0: still 10 px off the top
+        isl.style = "pill"
+        isl._place((0, 0, 1920, 1040))
+        self.assertEqual(isl.origin.y + isl.m, 0)  # the pill sits where Down says
+        for style, round_ in (("capsule", True), ("pill", False)):  # Corners at 6: the capsule's ends stay round
+            isl.style, isl.shapes = style, {}
+            buf, (x0, y0, x1, y1) = painted(isl, isl._idle())
+            corner = buf[int(y0), int(x0 + 0.25 * (y1 - y0)), 3]
+            self.assertEqual(corner < 60, round_, style)
+
+    def test_glass_is_see_through_with_a_hairline_and_solid_words(self):
+        isl = self.capsule()
+        buf, (x0, y0, x1, y1) = painted(isl, isl._idle())
+        self.assertTrue((buf[..., :3].max(-1) <= buf[..., 3]).all())  # premultiplied, as Windows needs
+        cy = int((y0 + y1) / 2)
+        colour, a = straight(buf[cy, int(x1 - 5 * isl.k)])  # bare glass, right of the clock
+        self.assertAlmostEqual(a, 0.78, delta=0.02)
+        self.assertLess(np.abs(colour - 0.13).max(), 0.03)
+        line, _ = straight(buf[int(y0), int((x0 + x1) / 2)])  # the top edge: the light hairline over the glass
+        self.assertGreater(line.min(), colour.max() + 0.08)
+        self.assertEqual(buf[int(y0):int(y1), int(x0):int(x1), 3].max(), 255)  # her face and the time: solid
+
+    def test_light_glass(self):
+        isl = self.capsule(theme_name="light")
+        self.assertIs(isl.theme(), island.GLASS["light"])
+        buf, (x0, y0, x1, y1) = painted(isl, isl._idle())
+        colour, a = straight(buf[int((y0 + y1) / 2), int(x1 - 5 * isl.k)])
+        self.assertAlmostEqual(a, 0.85, delta=0.02)
+        self.assertGreater(colour.min(), 0.95)
+        line, _ = straight(buf[int(y0), int((x0 + x1) / 2)])
+        self.assertLess(line.max(), colour.min() - 0.08)  # a dark hairline on light glass
+
+    def test_idle_is_her_face_and_the_time_and_waits_for_the_minute(self):
+        isl = self.capsule()
+        lay = isl._idle()
+        self.assertEqual((lay.kind, lay.face, lay.animated, lay.rate), ("idle", True, False, 0))
+        col = drawn(lay)
+        h, w = col.shape[:2]
+        self.assertGreater((col[:, :w // 3].min(-1) > 0.9).sum(), 20)  # the whites of her eyes on the left
+        self.assertGreater(col[:, w // 2:].max(), 0.9)  # the time on the right
+        now = time.time()
+        isl.eyes.next_blink, isl.eyes.blink_at, isl.eyes.mood = now + 1000, None, None
+        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), 60.02 - now % 60, places=3)  # nothing till then
+        isl.eyes.next_blink = now + 3
+        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), min(3, 60.02 - now % 60), places=3)  # a blink
+        isl.eyes.blink_at = now
+        self.assertEqual(isl._capsule_wait(now, lay, False), 0.016)  # while she blinks, every frame
+        isl.eyes.blink_at, isl.eyes.next_blink = None, now - 1  # a smile doesn't blink: no frames while it lasts
+        isl.eyes.react("happy", now)
+        self.assertAlmostEqual(isl._capsule_wait(now, lay, False), face.REACT_FOR["happy"] + 0.01, places=3)
+
+    def test_her_pupils_follow_the_pointer_and_only_a_pixel_redraws(self):
+        isl = self.capsule()
+        wakes = []
+        isl._wake = lambda: wakes.append(1)
+        isl.face_at = (100.0, 50.0)
+        reach = face.pupil_reach(isl.FACE_SIZE * isl.k)
+        self.assertLess(reach + 2.0 * isl.k, 4.3 * isl.k)  # a pupil at its furthest is still inside the eye
+        isl._follow(900, 50)
+        self.assertEqual(isl.pupil, (round(reach), 0))
+        isl._follow(901, 52)  # moved, but not by a pixel of hers
+        isl._follow(100, -600)
+        self.assertEqual(isl.pupil, (0, -round(reach)))
+        isl._follow(100, 50)
+        self.assertEqual(isl.pupil, (0, 0))
+        self.assertEqual(len(wakes), 3)
+        for x, y in ((-500, 900), (130, 70), (2000, -40)):
+            isl._follow(x, y)
+            self.assertLessEqual(np.hypot(*isl.pupil), reach + 0.75)
+
+    def test_no_frame_while_the_pointer_and_her_mood_stay_put(self):
+        isl = bare(style="capsule", runner=mock.Mock(), look_at=None, visible_window=True, hover=False)
+        isl.origin, isl.island_rect, isl.face_at = SimpleNamespace(x=0, y=0), (400, 15, 600, 66), (420, 40)
+        isl.hover_at = isl.away_at = time.time()
+        isl.layout = island.Layout(("idle",), "idle", 200, 51, None, eyes="open", face=True)
+        isl.root, isl.top, isl.hwnd = mock.Mock(), mock.Mock(), 1
+        wakes = []
+        isl._wake = lambda: wakes.append(1)
+        with mock.patch.object(island.win, "set_click_through", lambda hwnd, on: None), \
+                mock.patch.object(island.win, "cursor_pos", lambda: (900, 500)):
+            for _ in range(5):
+                isl._hover_poll()
+        self.assertEqual(len(wakes), 1)  # her pupils went to the pointer once, then nothing
+
+    def test_a_blink_closes_her_eyes_from_the_top(self):
+        def whites(open_):
+            col = np.zeros((40, 40, 3), np.float32)
+            face.cartoon(face.Canvas(col), 20, 20, 26, "open", open_, fg=(0.4, 0.4, 0.4))  # her brows aren't white
+            return col.min(-1) > 0.9, col
+        wide, _ = whites(1.0)
+        shut, col = whites(0.1)
+        self.assertLess(shut.sum(), 0.25 * wide.sum())
+        rows = np.nonzero(wide.any(1))[0]
+        self.assertFalse(shut[:rows[0] + 6].any())  # what's left of them is at the bottom: the lid came down
+
+    def test_her_moods_brows_and_mouth(self):
+        looks = {name: face.CARTOON[name][:2] for name in face.CARTOON}
+        self.assertEqual(looks["open"], ("soft", "smile"))
+        self.assertEqual(looks["listen"], ("up", "o"))
+        self.assertEqual(looks["speak"][1], "talk")
+        self.assertEqual(looks["focus"][1], "flat")
+        self.assertEqual(looks["happy"], ("up", "grin"))
+        self.assertEqual(looks["sad"], ("sad", "frown"))
+        self.assertEqual(looks["think"][0], "think")
+        self.assertGreater(face.BROWS["sad"][1], 0)  # worried: the inner ends up
+        self.assertGreater(face.BROWS["high"][0], face.BROWS["up"][0])
+        self.assertTrue(face.CARTOON["happy"][2] and face.CARTOON["love"][2])  # pink cheeks
+        self.assertEqual(face.CARTOON["love"][3], "hearts")
+        for state, look in (("listening", "listen"), ("dictating", "listen"), ("thinking", "think"),
+                            ("speaking", "speak"), ("doing", "focus"), ("error", "sad"), ("looking", "glasses")):
+            self.assertEqual(island.CARTOON_FOR[state], look)
+        self.assertEqual([island.TASK_LOOKS[s] for s in ("running", "done", "failed", "waiting_yes")],
+                         ["focus", "happy", "sad", "surprised"])
+        for look in face.CARTOON:  # each one draws, and talking opens her mouth wider as her voice gets louder
+            col = np.zeros((40, 40, 3), np.float32)
+            face.cartoon(face.Canvas(col), 20, 20, 26, look, ring=island.VIOLET)
+            self.assertGreater(col.max(), 0.9, look)
+        quiet, loud = (np.zeros((40, 40, 3), np.float32) for _ in range(2))
+        face.cartoon(face.Canvas(quiet), 20, 20, 26, "speak", level=0.0, t=0.0)
+        face.cartoon(face.Canvas(loud), 20, 20, 26, "speak", level=1.0, t=0.0)
+        self.assertGreater(loud[27:].sum(), quiet[27:].sum())
+
+    def test_a_task_shows_its_title_how_far_and_a_line_under_it(self):
+        stop = {"name": "stop", "label": "Stop", "data": {"key": "task:1", "needs": ""}}
+        poem = {"title": "Writing the poem", "state": "running", "progress": 0.4, "status": "2/5", "buttons": [stop]}
+        isl = self.capsule()
+        lay = isl._make(("live", tasks_card([poem])), time.time())
+        self.assertEqual((lay.kind, lay.key[0], lay.key[2], lay.key[3], lay.rate), ("card", "card-row",
+                                                                                     "Writing the poem", "40%", 1))
+        buf, (x0, y0, x1, y1) = painted(isl, lay)
+        y = int(y1 + 5.5 * isl.k)
+        lit = [x for x in range(isl.cw) if buf[y, x, 3] > 200 and np.abs(straight(buf[y, x])[0] -
+                                                                          island.ORANGE).max() < 0.1]
+        H = y1 - y0
+        self.assertAlmostEqual((lit[-1] - lit[0] + 1) / (x1 - x0 - H), 0.4, delta=0.04)  # under the capsule, 40%
+        self.assertAlmostEqual(lit[0], x0 + H / 2, delta=2)
+        two = isl._make(("live", tasks_card([dict(poem, title="x" * 300), poem], short="2 tasks")), time.time())
+        self.assertTrue(two.key[2].endswith("…"))  # the first one's title, cut short
+        self.assertEqual(two.key[-1], 2)  # and "2" beside it
+        self.assertLessEqual(two.w, isl.CAPSULE_MAX_W * isl.k + 1)
+        drawn(two)
+        research = dict(poem, progress=None, status="", since=time.time() - 75, kind="research")
+        unknown = isl._make(("live", tasks_card([research])), time.time())
+        self.assertEqual(unknown.key[3], "")  # its clock instead, 1:15
+        buf, (x0, y0, x1, y1) = painted(isl, unknown)
+        y = int(y1 + 5.5 * isl.k)
+        lit = [x for x in range(isl.cw) if buf[y, x, 3] > 200 and np.abs(straight(buf[y, x])[0] -
+                                                                          island.VIOLET).max() < 0.1]
+        self.assertAlmostEqual((lit[-1] - lit[0] + 1) / (x1 - x0 - (y1 - y0)), 0.28, delta=0.04)  # a piece of it
+
+    def test_its_card_has_her_rows_bars_and_stop_and_deny(self):
+        stop = {"name": "stop", "label": "Stop", "data": {"key": "task:1", "needs": ""}}
+        deny = {"name": "deny", "label": "Deny", "data": {"key": "ask", "needs": "q1"}}
+        rows = [{"title": "Writing the poem", "state": "running", "progress": 0.4, "status": "2/5",
+                 "lines": ["Second verse"], "buttons": [stop]},
+                {"title": "Send it?", "state": "waiting_yes", "progress": None, "status": "Needs you",
+                 "lines": ["Home by eight"], "buttons": [deny]}]
+        isl = self.capsule(hover=True)
+        lay = isl._make(("live", tasks_card(rows, more=2, short="4 tasks")), time.time())
+        self.assertEqual((lay.kind, lay.key[0], lay.radius, lay.rate), ("card", "card", 18 * isl.k, 1))
+        self.assertLessEqual(lay.h, isl._tallest_card())
+        self.assertEqual([h[0] for h in lay.hot], ["b0", "b1", "pin"])
+        self.assertEqual(lay.press["b0"], ("tasks", "stop", {"key": "task:1", "needs": ""}, False))
+        self.assertEqual(lay.press["b1"], ("tasks", "deny", {"key": "ask", "needs": "q1"}, False))
+        for name, bx0, by0, bx1, by1 in lay.hot[:2]:  # on the right of their rows, inside the card
+            self.assertTrue(lay.w / 2 < bx0 < bx1 <= lay.w and 0 < by0 < by1 < lay.h, name)
+        col = drawn(lay)
+        for colour in (island.ORANGE, island.BLUE):  # each row's bar in its colour
+            self.assertGreater((np.abs(col - np.asarray(colour, np.float32)).max(-1) < 0.05).sum(), 30, colour)
+        weather = plugins.Activity("weather", "card", {"title": "Rain at 4", "lines": ["Take an umbrella"]}, live=True)
+        drawn(isl._make(("live", weather), time.time()))  # any plugin's card, which says nothing of a state
+
+    def test_her_turn_in_the_capsule(self):
+        stop = {"name": "stop", "label": "Stop", "data": {"key": "turn:1", "needs": ""}}
+        row = {"key": "turn:1", "title": "Night light on", "state": "running", "status": "5/30", "progress": 4 / 30,
+               "buttons": [stop], "lines": []}
+        act = plugins.Activity("tasks", "card", {"rows": [row], "more": 0, "short": None, "badge": 1, "turn": row},
+                               live=True)
+        isl = self.capsule(jev={"state": "listening", "text": "Set a timer"}, you="", since=time.time(),
+                           lives={"tasks": act})
+        isl._front_icon = lambda size: None
+        lay = isl._make(("jev",), time.time())
+        self.assertEqual((lay.kind, lay.face, lay.animated, lay.key[3], lay.key[4]), ("jev", True, True, 1,
+                                                                                         ("5/30", 4 / 30)))
+        self.assertIsNotNone(lay.cap)  # her words under it, as ever
+        buf, _ = painted(isl, lay)
+        self.assertTrue((buf[..., :3].max(-1) <= buf[..., 3]).all())
+        isl.hover = True  # pointing at her: the card with Stop, on glass
+        self.assertEqual(isl._make(("jev",), time.time()).press["b0"][1], "stop")
+
+    def test_the_other_plugins_on_glass(self):
+        now = time.time()
+        isl = self.capsule(runner=SimpleNamespace(plugin=lambda pid: None))
+        for scene in (("popup", plugins.Activity("battery", "battery", {"percent": 18, "charging": False,
+                                                                         "event": "low"})),
+                      ("live", plugins.Activity("timers", "timer", {"label": "Tea", "end": now + 60, "total": 90.0},
+                                                live=True)),
+                      ("live", plugins.Activity("media", "media", {"title": "Song", "artist": "Band", "app": "Spotify",
+                                                                   "playing": True, "art": None}, live=True))):
+            lay = isl._make(scene, now)
+            self.assertTrue(lay.face, scene[1].kind)  # her face where the pill has her eyes
+            drawn(lay)
+        note = plugins.Activity("notifications", "notification", {"app": "WhatsApp", "app_id": "", "title": "Mum",
+                                                                  "text": "Home by eight", "phone": False})
+        self.assertEqual(isl._make(("popup", note), now).radius, 18 * isl.k)
+
+    def test_the_pill_is_as_it_was(self):
+        isl = fonted(self)
+        self.assertIs(isl.theme(), island.THEMES["amoled"])
+        lay = isl._idle()
+        self.assertEqual((lay.face, lay.eyes), (False, "open"))
+        buf, (x0, y0, x1, y1) = painted(isl, lay)
+        self.assertEqual(buf[int((y0 + y1) / 2), int(x1 - 5 * isl.k), 3], 255)  # solid black
+        self.assertIsNone(isl._shape(x0, x1 - x0, y1 - y0, 10, y0)[3])  # and no line round it unless asked
 
 
 class Drawing(unittest.TestCase):

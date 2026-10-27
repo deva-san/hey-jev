@@ -8,6 +8,10 @@ keep it open); a notification pops up from the apps you pick, what's playing sho
 when you point at it, the battery when you plug in or it runs low, and a running timer counts down. Light, dark and
 AMOLED (pure black) themes, its place, size and corners, and the plugins are all in the Island tab.
 
+Two styles (27 October 2026): the glass capsule, the default, floats a little under the top of the screen, see-through
+with a hairline round it, and has her as a small cartoon whose pupils follow the mouse, with the time beside her when
+nothing's on; and the black pill it was before, with Nixi's glowing eyes, drawn exactly as it was.
+
 It's one layered window drawn with numpy, like bubble.Island: clicks go through it except while you point at its
 buttons, it never takes the focus, and it's left out of her screenshots, so the model never sees its buttons. Between
 blinks nothing is drawn, and a long job moves once a second.
@@ -55,6 +59,23 @@ JEV = {
     "error": ("sad", RED, "still", None), "phone": ("open", BLUE, "still", None),
     "note": ("side", None, "still", None),
 }
+# The glass capsule's themes (27 October 2026): see-through ("fill", how opaque the glass is) with a hairline round it
+# ("line" at "line_a"). AMOLED and dark are dark glass; light is light glass. No blur: it would cost every frame.
+GLASS = {
+    "dark": {"body": (0.12, 0.12, 0.14), "cap": (0.12, 0.12, 0.14), "fill": 0.78, "text": (0.96, 0.96, 0.97),
+             "muted": (0.66, 0.66, 0.7), "eyes": (0.97, 0.97, 0.98), "glow": True, "line": (1.0, 1.0, 1.0),
+             "line_a": 0.18, "shadow": 0.3, "track": (0.34, 0.34, 0.37)},
+    "light": {"body": (0.98, 0.98, 0.99), "cap": (0.98, 0.98, 0.99), "fill": 0.85, "text": (0.07, 0.07, 0.08),
+              "muted": (0.38, 0.38, 0.41), "eyes": (0.11, 0.11, 0.12), "glow": False, "line": (0.0, 0.0, 0.0),
+              "line_a": 0.12, "shadow": 0.2, "track": (0.8, 0.8, 0.83)},
+}
+# Her cartoon face in the capsule (island_face.cartoon) for each of her turns, and for how a task is going
+CARTOON_FOR = {"listening": "listen", "read": "listen", "again": "listen", "dictating": "listen", "thinking": "think",
+               "looking": "glasses", "doing": "focus", "finishing": "focus", "speaking": "speak", "error": "sad"}
+TASK_LOOKS = {"running": "focus", "done": "happy", "failed": "sad", "waiting_yes": "surprised"}
+# the ring round her face while a reaction lasts: done, thanks, a notification, something wrong
+MOOD_RINGS = {"happy": GREEN, "love": face.PINK, "surprised": BLUE, "sad": RED, "x": RED}
+BLINKS = {"open", "surprised", "focus", "think", "glasses", "headphones", "sleepy", "side"}  # as face.Eyes blinks
 MIC_STATES = {"listening", "read", "again", "dictating"}
 HINTS = ("Say \u201cstop", "Say \"stop", "Go ahead", "Let go")  # the window's hints, not words you said
 CLICKABLE = ("media", "notification", "card")  # what takes clicks while you point at it: all else lets them through
@@ -96,13 +117,14 @@ class Layout:
     eyes: her expression in it, if her eyes are in it; wander: they may look about. press: for a card, what each
     hot place does, (plugin, what, data, careful)."""
     __slots__ = ("key", "kind", "w", "h", "radius", "draw", "cap", "hot", "eyes", "animated", "rate", "wander",
-                 "press")
+                 "press", "face")
 
     def __init__(self, key, kind, w, h, draw, radius=None, cap=None, hot=(), eyes=None, animated=False, rate=0,
-                 wander=True, press=None):
+                 wander=True, press=None, face=False):
         self.key, self.kind, self.w, self.h, self.draw, self.radius = key, kind, w, h, draw, radius
         self.cap, self.hot, self.eyes, self.animated, self.rate = cap, list(hot), eyes, animated, rate
         self.wander, self.press = wander, dict(press or {})
+        self.face = face  # her cartoon face is in it (the capsule): its pupils follow the mouse, _follow
 
 
 class Caption:
@@ -123,6 +145,9 @@ class DynamicIsland:
     CARD_W, CAP_MAX_W, CAP_PAD_X, CAP_PAD_Y = 380, 700, 16, 11
     EYES, SMALL_EYES = 19, 13
     CARD_PAD, ROW_GAP, BUTTON_H = 14, 9, 22  # a card's rows: round them, between them, and their buttons' height
+    # the capsule (27 October 2026): how far it floats under the top at least, how wide its row gets at most, her
+    # cartoon face across, and the glass cards' corners
+    FLOAT, CAPSULE_MAX_W, FACE_SIZE, GLASS_CORNER = 10, 330, 26, 18
 
     def __init__(self, root):
         self.root = root
@@ -148,6 +173,9 @@ class DynamicIsland:
         self.icon, self.icon_for = None, None
         self.frame_ms, self.dt = 0.0, 0.016
         self.eye = ("open", 1.0, 0.0, 0.0, False)  # this frame's eyes (face.Eyes.update), the same for every layout
+        # the capsule's cartoon: where her pupils sit (whole px from the middle of her eyes) and where her face was
+        # last drawn in the window, for the mouse to be looked at (_follow); the patch drawn into, for that
+        self.pupil, self.face_at, self.patch_at = (0, 0), None, (0, 0)
         self.texts = {}
         self.root.after(250, self._events)
         self.runner.start()
@@ -156,6 +184,7 @@ class DynamicIsland:
     # ------------------------------------------------------------------ settings
     def _read_settings(self):
         g = settings.get
+        self.style = g("island_style") if g("island_style") in ("capsule", "pill") else "capsule"
         self.face_style = g("island_face") if g("island_face") in ("eyes", "wave") else "eyes"
         self.theme_name = g("island_theme") if g("island_theme") in ("system", "light", "dark", "amoled") else "amoled"
         self.border = bool(g("island_border"))
@@ -172,6 +201,8 @@ class DynamicIsland:
         name = self.theme_name
         if name == "system":
             name = "light" if self.light else "dark"
+        if self.style == "capsule":
+            return GLASS["light" if name == "light" else "dark"]
         return THEMES[name]
 
     def reload(self):
@@ -264,7 +295,9 @@ class DynamicIsland:
             x = right - (16 + self.off_x) * k - self.cw + m
         else:
             x = (left + right) / 2 + self.off_x * k - self.cw / 2
-        self.origin = wt.POINT(int(round(x)), int(round(top + self.off_y * k - m)))
+        # the capsule floats: never closer to the top than FLOAT, whatever Down says
+        down = max(self.off_y, self.FLOAT) if self.style == "capsule" else self.off_y
+        self.origin = wt.POINT(int(round(x)), int(round(top + down * k - m)))
         if self.visible_window:
             win.show_no_activate(self.hwnd, self.origin.x, self.origin.y, self.cw, self.ch)
 
@@ -415,7 +448,7 @@ class DynamicIsland:
         self.popup = None
         if self.lives:  # what stays while it lasts, the one that matters most (Plugin.priority): tasks, a timer, music
             return ("live", self.lives[max(self.lives, key=plugins.priority)])
-        if self.always and self.face_style == "eyes":
+        if self.always and (self.face_style == "eyes" or self.style == "capsule"):  # the capsule always has her face
             return ("idle",)
         return None
 
@@ -484,6 +517,8 @@ class DynamicIsland:
         cap = self._caption(state, text, bars)
         badge = sum(int(a.data.get("badge") or 0) for a in self.lives.values() if isinstance(a.data, dict))
         turn = self._turn()[1]  # how far her turn's got (step 3/5, round 5/30), beside her dots
+        if self.style == "capsule":  # her cartoon, which the capsule always has: the Face setting is the pill's
+            return self._capsule_jev(state, colour, mode, cap, badge, turn)
         key = ("jev", state, self.face_style, badge, turn and (turn.get("status"), turn.get("progress")))
         if self.face_style == "wave":
             W, H = self.WAVE[0] * k, self.WAVE[1] * k
@@ -680,6 +715,9 @@ class DynamicIsland:
         """The small island: something on the left, her eyes, something on the right. left and right are
         (width, draw(cv, x, cy, a, now)) or None."""
         k, th = self.k, self.theme()
+        if self.style == "capsule":  # her cartoon face where her eyes would be
+            return self._capsule(key, kind, [left, self._face(expr), right], hot=hot, rate=rate, animated=animated,
+                                 press=press)
         H = self.COMPACT_H * k
         size = self.SMALL_EYES * k
         eyes_w = 2.6 * size if self.face_style == "eyes" else 0
@@ -705,6 +743,8 @@ class DynamicIsland:
                       wander=wander, press=press)
 
     def _idle(self):
+        if self.style == "capsule":
+            return self._capsule_idle()
         return self._row(("idle",), "idle", "open")
 
     def _slot_text(self, text, colour, font=None):
@@ -820,7 +860,7 @@ class DynamicIsland:
                 cover = self.f_small.render(rest)
                 cv.text(cover, x1 - cover.shape[1] + 2, ty, th["muted"], a)
         return Layout(("media-card", d["title"], d["artist"], d["playing"], id(d.get("art"))), "media", W, H, draw,
-                      radius=self.corner * k, hot=hot, rate=2)
+                      radius=self._corner(), hot=hot, rate=2)
 
     def _notification(self, act):
         k, th = self.k, self.theme()
@@ -853,14 +893,17 @@ class DynamicIsland:
                 cv.text(self.f_label.render(line), ox + tx - 2, y, th["text"], a * 0.86)
                 y += self.f_label.line
         return Layout(("note", d["app"], d["title"], d.get("text", ""), id(act)), "notification", W, H, draw,
-                      radius=self.corner * k, hot=hot)
+                      radius=self._corner(), hot=hot)
 
     # ------------------------------------------------------------------ cards (island_plugins.Activity)
     def _tallest_card(self):
         """A card's height with every row at its tallest (buttons, two lines and a bar) and "+N more" under them."""
         k = self.k
         row = max(self.f_label.line, self.BUTTON_H * k) + 2 * k + 2 * self.f_small.line + 9 * k
-        return 2 * self.CARD_PAD * k + plugins.CARD_ROWS * (row + self.ROW_GAP * k) + self.f_small.line + 5 * k
+        # and room for the glass card's header (her face and "2 tasks") and its bars a little lower: the window is
+        # built once for either style, and only what changed is ever sent (_push), so the pill's picture is the same
+        glass = (self.FACE_SIZE + 10) * k + plugins.CARD_ROWS * 3 * k
+        return 2 * self.CARD_PAD * k + plugins.CARD_ROWS * (row + self.ROW_GAP * k) + self.f_small.line + 5 * k + glass
 
     @staticmethod
     def _card_rows(d):
@@ -892,6 +935,8 @@ class DynamicIsland:
     def _compact(self, act):
         """A card's small island while you aren't pointing at it: how its first row's going (_glyph), her eyes, and
         a few words: how far it's got, how long it's been going, or how many there are."""
+        if self.style == "capsule":
+            return self._capsule_task(act)
         k = self.k
         d = act.data
         rows, more = self._card_rows(d)
@@ -921,6 +966,8 @@ class DynamicIsland:
         it's going (_glyph), its title, a few words at its right, a line or two under it, a bar for how far it's got
         and its buttons, then "+N more". The Tasks plugin's list is one; any plugin can show one without this file
         knowing it (island_plugins.Activity). A clock that's running moves once a second, never every frame."""
+        if self.style == "capsule":
+            return self._glass_card(act)
         k, th = self.k, self.theme()
         rows, more = self._card_rows(act.data)
         W = self.CARD_W * k
@@ -1003,6 +1050,304 @@ class DynamicIsland:
                              GREEN if row.get("state") == "done" else BLUE, a)
         return h, draw
 
+    # ------------------------------------------------------------------ the glass capsule (27 October 2026)
+    def _corner(self):
+        """A card's corners: the Corners setting on the pill, the glass card's own 18 px on the capsule."""
+        return (self.GLASS_CORNER if self.style == "capsule" else self.corner) * self.k
+
+    def _mood(self, now):
+        """Her reaction while it lasts (thanks, done, a notification), or None. Read here, not from face.Eyes.update:
+        the capsule asks for no frame while one lasts, only one when it's over (_capsule_wait)."""
+        e = self.eyes
+        return e.mood if e.mood and now < e.mood_until else None
+
+    def _face(self, look, ring=None):
+        """Her cartoon face as a part of a capsule's row: (width, draw, True). look: island_face.CARTOON's, unless a
+        reaction's on; ring: the colour of what's going on, round her."""
+        k, th = self.k, self.theme()
+        size = self.FACE_SIZE * k
+
+        def draw(cv, x, cy, a, now):
+            mood = self._mood(now)
+            cx = x + size / 2
+            self.face_at = (cx + self.patch_at[0], cy + self.patch_at[1])  # in the window, for _follow
+            face.cartoon(cv, cx, cy, size, mood or look, self.eye[1], self.pupil,
+                         self.level if look == "speak" else 0.0, now - self.t0, th["text"], MOOD_RINGS.get(mood, ring),
+                         a)
+        return size, draw, True
+
+    def _capsule(self, key, kind, parts, hot=(), rate=0, animated=False, press=None, cap=None, under=None):
+        """The capsule's row: parts, (width, draw(cv, x, cy, a, now)) each, her face (_face) among them, side by
+        side. A face at an end sits in the round end, as far from the edge as from the top. under: drawn after
+        them, below the capsule if it likes (a task's progress line)."""
+        k = self.k
+        H = self.COMPACT_H * k
+        parts = [p for p in parts if p]
+        gap = 10 * k
+        edge = (H - self.FACE_SIZE * k) / 2
+        left = edge if len(parts[0]) == 3 else 15 * k
+        right = edge if len(parts[-1]) == 3 else 15 * k
+        inner = sum(p[0] for p in parts) + gap * (len(parts) - 1)
+        W = max(H, left + inner + right)
+
+        def draw(cv, ox, oy, Wn, Hn, a, now):
+            x = ox + left + (Wn - (left + inner + right)) / 2
+            cy = oy + Hn / 2
+            for p in parts:
+                p[1](cv, x, cy, a, now)
+                x += p[0] + gap
+            if under is not None:
+                under(cv, ox, oy, Wn, Hn, a, now)
+        # eyes: "open" so face.Eyes keeps her blinks and reactions; never wandering, her pupils follow the mouse
+        return Layout(key, kind, W, H, draw, cap=cap, hot=hot, eyes="open", animated=animated, rate=rate,
+                      wander=False, press=press, face=True)
+
+    def _capsule_idle(self):
+        """Nothing going on: her face, ringed in violet, and the time. Drawn again when the minute changes, she
+        blinks, a reaction comes and goes or her pupils move a pixel after the mouse, and never in between."""
+        k, th = self.k, self.theme()
+        font = self.f_compact
+
+        def clock(cv, x, cy, a, now):
+            cv.text(font.render(time.strftime("%H:%M", time.localtime(now))), x - 2, cy - font.line / 2 - 1,
+                    th["text"], a)
+        return self._capsule(("idle",), "idle", [self._face("open", VIOLET), (font.measure("88:88") + k, clock)])
+
+    def _capsule_jev(self, state, colour, mode, cap, badge, turn):
+        """Her turn in the capsule: her face for it (CARTOON_FOR) ringed in its colour, the app you're in, the dots
+        that move with a voice, how far her turn's got and how many go on meanwhile, the words under it as ever."""
+        k = self.k
+        icon = self._front_icon(round(17 * k))
+        n, step, r = 5, 8.6 * k, 2.4 * k
+        gr = 5.5 * k
+        parts = [self._face(CARTOON_FOR.get(state, "open"), colour)]
+        if icon is not None:
+            parts.append((icon.shape[1], lambda cv, x, cy, a, now: cv.image(icon, x, cy - icon.shape[0] / 2, a)))
+
+        def dots(cv, x, cy, a, now):  # as the pill has them (_jev)
+            t = now - self.t0
+            if mode == "ring":
+                total = float(getattr(sys.modules.get("siri"), "FOLLOW_UP", 8.0))
+                left = max(0.0, 1 - (now - self.since) / total)
+                face.ring(cv, x + (n - 1) * step / 2 + r, cy, 6.5 * k, 2.2 * k, left, ORANGE, self.theme()["track"],
+                          a)
+            else:
+                dots_mode = "voice" if mode in ("voice", "her") else "busy" if mode == "busy" else "still"
+                face.dots_row(cv, x + r, cy, n, step, r, colour, self.level if mode in ("voice", "her") else 0.0, t,
+                              dots_mode if dots_mode != "still" else "voice", a * (0.75 if mode == "still" else 1))
+        parts.append(((n - 1) * step + 2 * r, dots))
+        if turn:
+            parts.append((2 * gr, lambda cv, x, cy, a, now: self._glyph(cv, x + gr, cy, gr, turn, now, a)))
+        if badge:
+            br = self._badge_r(badge)
+            parts.append((2 * br, lambda cv, x, cy, a, now: self._badge(cv, x + br, cy, badge, a)))
+        key = ("jev", state, "capsule", badge, turn and (turn.get("status"), turn.get("progress")))
+        return self._capsule(key, "jev", parts, animated=state not in ("error", "note", "phone"), cap=cap)
+
+    def _badge_r(self, n):
+        """Half the width of _badge's pill for n."""
+        return max(7.5 * self.k, (self.f_small.measure(str(n) if n < 10 else "9+") + 4) / 2 + 3 * self.k)
+
+    def _glass_colour(self, row):
+        """A row's colour on the capsule: amber running (violet for research), blue waiting on you, green done,
+        red failed, grey stopped or next; violet for a plugin's card that says nothing of a state."""
+        state = row.get("state")
+        if state is None:
+            return VIOLET
+        if state == "running":
+            return VIOLET if row.get("kind") == "research" else ORANGE
+        return {"waiting_yes": BLUE, "done": GREEN, "failed": RED}.get(state, self.theme()["muted"])
+
+    def _line(self, cv, x0, x1, y, lw, frac, colour, now, track, a):
+        """A rounded progress line from x0 to x1 on y, lw thick: frac of it in colour over its track, or, when how
+        far isn't known (None), a short piece that steps along it once a second."""
+        cv.shape(lambda xs, ys: face.rbox(xs, ys, (x0 + x1) / 2, y, (x1 - x0) / 2, lw / 2, lw / 2),
+                 (x0 - 1, y - lw, x1 + 1, y + lw), track, a)
+        if frac is None:
+            piece = 0.28 * (x1 - x0)
+            s0 = x0 + (x1 - x0 - piece) * ((int(now) % 4) / 3)
+            s1 = s0 + piece
+        else:
+            s0, s1 = x0, x0 + (x1 - x0) * max(0.0, min(1.0, frac))
+        if s1 - s0 > 0.5:
+            cv.shape(lambda xs, ys: face.rbox(xs, ys, (s0 + s1) / 2, y, max(lw / 2, (s1 - s0) / 2), lw / 2, lw / 2),
+                     (s0 - 1, y - lw, s1 + 1, y + lw), colour, a)
+
+    def _capsule_task(self, act):
+        """What she's working on, small, in the capsule: her face ringed in its colour, the first one's title, how
+        far it's got ("40%") or how long it's been going, how many there are, and a thin line under the capsule
+        for how far (or a piece stepping along it once a second when that isn't known)."""
+        k, th = self.k, self.theme()
+        d = act.data
+        rows, more = self._card_rows(d)
+        lead = rows[0] if rows else {}
+        n = len(rows) + more
+        state = lead.get("state")
+        colour = self._glass_colour(lead)
+        font = self.f_compact
+        done = lead.get("progress")
+        since = None
+        if state == "running" and done is not None:
+            words = f"{int(round(done * 100))}%"
+        else:
+            words = lead.get("status") or ""
+            since = lead.get("since") if not words else None
+        words_w = font.measure("88:88") + 2 * k if since is not None else font.measure(words)
+        br = self._badge_r(n) if n > 1 else 0
+        size, gap = self.FACE_SIZE * k, 10 * k
+        avail = self.CAPSULE_MAX_W * k - (self.COMPACT_H * k - size) / 2 - 15 * k - size - gap - \
+            (words_w + gap if words_w else 0) - (2 * br + gap if br else 0)
+        title = font.fit(" ".join(str(lead.get("title") or "").split()), max(30 * k, avail))
+        parts = [self._face(TASK_LOOKS.get(state, "open"), colour),
+                 self._slot_text(title, th["text"]) if title else None]
+        if words_w:
+            def tell(cv, x, cy, a, now):
+                cv.text(font.render(words or _clock(max(0.0, now - since))), x - 2, cy - font.line / 2 - 1, colour, a)
+            parts.append((words_w, tell))
+        if br:
+            parts.append((2 * br, lambda cv, x, cy, a, now: self._badge(cv, x + br, cy, n, a)))
+        under = None
+        if state == "running" or done is not None:
+            def under(cv, ox, oy, Wn, Hn, a, now):  # just under the capsule, along its straight part
+                self._line(cv, ox + Hn / 2, ox + Wn - Hn / 2, oy + Hn + 5.5 * k, 2 * k, done, colour, now,
+                           th["track"], a)
+        live = any((r.get("state") or "running") == "running" for r in rows)
+        return self._capsule(("card-row", act.plugin, title, words, since is not None, repr(lead), n), "card", parts,
+                             hot=[("pin", 0, 0, 10000, 10000)], rate=1 if live else 0,
+                             press={"pin": (act.plugin, "pin", None, False)}, under=under)
+
+    def _glass_card(self, act):
+        """A plugin's card on the capsule, open while you point at it or after a click on it: a glass panel with
+        her face and "2 tasks" (or the card's title) at its top, then each row's title, its note and a bar in its
+        colour, with Stop or Deny as on the pill: the same places to click, doing the same."""
+        k, th = self.k, self.theme()
+        d = act.data
+        rows, more = self._card_rows(d)
+        lead = rows[0] if rows else {}
+        n = len(rows) + more
+        W = self.CARD_W * k
+        pad, gap, size = self.CARD_PAD * k, self.ROW_GAP * k, self.FACE_SIZE * k
+        if d.get("rows") is not None:
+            head = d.get("short") or d.get("title") or (f"{n} tasks" if n != 1 else "1 task")
+        else:  # the card is its one row: its plugin's name over it, not its title twice
+            head = act.plugin.replace("_", " ").capitalize()
+        tx = pad + size + 10 * k
+        head = self.f_title.fit(str(head), W - tx - pad)
+        me = self._face(TASK_LOOKS.get(lead.get("state"), "open"), self._glass_colour(lead))
+        hot, press, parts, y = [], {}, [], pad + size + 8 * k
+        for row in rows:
+            h, draw_row = self._glass_row(row, y, W, pad, act.plugin, hot, press)
+            parts.append(draw_row)
+            y += h + gap
+        tail = f"+{more} more" if more else ""
+        H = min(self.island_max_h, y - gap + pad + (self.f_small.line + 5 * k if tail else 0))
+        hot.append(("pin", 0, 0, W, H))  # anywhere else on it keeps it open, or lets it go again
+        press["pin"] = (act.plugin, "pin", None, False)
+
+        def draw(cv, ox, oy, Wn, Hn, a, now):
+            hy = oy + pad + size / 2
+            me[1](cv, ox + pad, hy, a, now)
+            cv.text(self.f_title.render(head), ox + tx - 2, hy - self.f_title.line / 2 - 1, th["text"], a)
+            for draw_row in parts:
+                draw_row(cv, ox, oy, a, now)
+            if tail:
+                cv.text(self.f_small.render(tail), ox + pad - 2, oy + y - gap + 5 * k, th["muted"], a)
+        live = any((r.get("state") or "running") == "running" for r in rows)
+        return Layout(("card", act.plugin, repr(rows), more), "card", W, H, draw, radius=self._corner(), hot=hot,
+                      eyes="open", rate=1 if live else 0, wander=False, press=press, face=True)
+
+    def _glass_row(self, row, y0, W, pad, plugin, hot, press):
+        """One row of a glass card from y0: (its height, draw(cv, ox, oy, a, now)): its title with a few words at
+        its right and its buttons, its note in quieter words, and a 3 px bar in its colour. Its buttons go in hot
+        and press just as the pill's do (_card_row)."""
+        k, th = self.k, self.theme()
+        small, label = self.f_small, self.f_label
+        bh, bpad, bgap = self.BUTTON_H * k, 10 * k, 6 * k
+        buttons, x = [], W - pad
+        for b in reversed(row.get("buttons") or []):
+            words = str(b.get("label") or b.get("name") or "")
+            bw = small.measure(words) + 2 * bpad
+            buttons.insert(0, (b, words, x - bw, x))
+            x -= bw + bgap
+        right = x if buttons else W - pad
+        status, since = row.get("status") or "", row.get("since")
+        since = since if not status else None
+        sw = small.measure(status) if status else small.measure("88:88") if since is not None else 0
+        tx = pad
+        title = label.fit(" ".join(str(row.get("title") or "").split()), max(20 * k, right - tx - sw - 8 * k))
+        lines = [small.fit(" ".join(str(t).split()), W - pad - tx) for t in (row.get("lines") or [])[:2] if t]
+        h1 = max(label.line, bh if buttons else 0)
+        h = h1 + (2 * k + small.line * len(lines) if lines else 0) + 10 * k
+        cy = y0 + h1 / 2
+        for b, words, bx0, bx1 in buttons:
+            name = f"b{len(press)}"
+            press[name] = (plugin, b.get("name"), b.get("data"), bool(b.get("careful", b.get("name") == "approve")))
+            hot.append((name, bx0 - 2 * k, cy - bh / 2 - 2 * k, bx1 + 2 * k, cy + bh / 2 + 2 * k))
+        colour = self._glass_colour(row)
+        state, done = row.get("state"), row.get("progress")
+        frac = done if done is not None else 1.0 if state in ("done", "failed", "waiting_yes") else \
+            None if state in ("running", None) else 0.0
+
+        def draw(cv, ox, oy, a, now):
+            cv.text(label.render(title), ox + tx - 2, oy + cy - label.line / 2 - 1, th["text"], a)
+            words = status or (_clock(max(0.0, now - since)) if since is not None else "")
+            if words:
+                cover = small.render(words)
+                cv.text(cover, ox + right - cover.shape[1] + 2, oy + cy - small.line / 2 - 1, colour, a)
+            for b, text, bx0, bx1 in buttons:
+                approve = b.get("name") == "approve"
+                fill, ink = (GREEN, (0.02, 0.02, 0.03)) if approve else \
+                    (th["track"], RED if b.get("name") == "stop" else th["text"])
+                bx, by, bw = ox + (bx0 + bx1) / 2, oy + cy, (bx1 - bx0) / 2
+                cv.shape(lambda xs, ys, bx=bx, by=by, bw=bw: face.rbox(xs, ys, bx, by, bw, bh / 2, bh / 2),
+                         (ox + bx0 - 1, by - bh / 2 - 1, ox + bx1 + 1, by + bh / 2 + 1), fill, a)
+                cover = small.render(text)
+                cv.text(cover, bx - cover.shape[1] / 2, by - small.line / 2 - 0.5, ink, a)
+            ly = oy + y0 + h1 + 2 * k
+            for line in lines:
+                cv.text(small.render(line), ox + tx - 2, ly, th["muted"], a)
+                ly += small.line
+            if state is not None or done is not None:
+                self._line(cv, ox + tx, ox + W - pad, ly + 5 * k, 3 * k, frac, colour, now, th["track"], a)
+        return h, draw
+
+    def _capsule_wait(self, now, lay, moving):
+        """Seconds till the capsule's next frame: at once while it moves or she blinks, 30 a second while the dots
+        go with a voice, once a second for a long job, and otherwise only at her next blink, when a reaction ends
+        or the minute changes (the clock), with her pupils moved by _follow in between. Never a frame for
+        nothing."""
+        e = self.eyes
+        if moving or e.blink_at is not None:
+            return 0.016
+        if lay.animated or (lay.cap is not None and lay.cap.animated):
+            wait = 0.033
+        elif lay.rate:
+            wait = 1.0 / lay.rate
+        else:
+            wait = 3600.0
+        mood = self._mood(now)
+        if mood:
+            wait = min(wait, max(0.016, e.mood_until - now + 0.01))
+        if mood is None or mood in BLINKS:  # a smile or hearts don't blink: the next one waits till it's over
+            wait = min(wait, max(0.016, e.next_blink - now))
+        if lay.kind == "idle":
+            wait = min(wait, 60.02 - now % 60)
+        return wait
+
+    def _follow(self, x, y):
+        """Her pupils toward the pointer at x, y (in the window): a frame only when that moves one by a whole pixel,
+        so a still or slow mouse costs nothing between the 70 ms looks at it (_hover_poll)."""
+        if self.face_at is None:
+            return
+        reach = face.pupil_reach(self.FACE_SIZE * self.k)
+        dx, dy = x - self.face_at[0], y - self.face_at[1]
+        d = math.hypot(dx, dy)
+        f = reach * min(1.0, d / (60 * self.k)) / d if d > 0.5 else 0.0  # all the way once it's 60 px off
+        pupil = (int(round(dx * f)), int(round(dy * f)))
+        if pupil != self.pupil:
+            self.pupil = pupil
+            self._wake()
+
     # ------------------------------------------------------------------ the frames
     def _wake(self):
         """A frame now, even if the next was set for later (her eyes resting between blinks can wait seconds)."""
@@ -1076,7 +1421,9 @@ class DynamicIsland:
         for spring in (self.W, self.H, self.CW, self.CH):
             spring.step(dt)
         lay = self.layout or self.prev
-        if lay is not None and lay.eyes is not None:  # once a frame, whatever's fading in or out
+        if lay is not None and lay.face:  # the cartoon takes only her blinks and reactions: never a glance to draw
+            self.eye = self.eyes.update(now, dt, lay.eyes, wander=False, look_at=(0.0, 0.0))
+        elif lay is not None and lay.eyes is not None:  # once a frame, whatever's fading in or out
             self.eye = self.eyes.update(now, dt, lay.eyes, wander=lay.wander, look_at=self.look_at)
         if lay is not None and lay.kind == "jev":
             src = "mic" if self.jev and self.jev["state"] in MIC_STATES else \
@@ -1102,7 +1449,9 @@ class DynamicIsland:
         eyes_moving = lay is not None and lay.eyes is not None and (self.eyes.blink_at is not None or
                                                                      self.eyes.mood is not None or self._looking())
         idle = lay is not None and lay.kind == "idle"
-        if moving or (animated and self.face_style == "wave") or \
+        if lay is not None and lay.face:
+            wait = self._capsule_wait(now, lay, moving)
+        elif moving or (animated and self.face_style == "wave") or \
                 (eyes_moving and (not idle or self.eyes.blink_at is not None)):
             wait = 0.016
         elif animated or eyes_moving:  # the dots and bars that go with a voice, and her eyes glancing about while
@@ -1132,7 +1481,7 @@ class DynamicIsland:
         corners every column is alike, so the middle is worked out once (a 700 px bar costs what a 90 px one
         does)."""
         key = (round(x0 * 2), round(W * 2), round(H * 2), round(r * 2), round(y_top * 2), self._theme_name(),
-               self.border)
+               self.border, self.style)
         hit = self.shapes.get(key)
         if hit is not None:
             return hit
@@ -1153,7 +1502,11 @@ class DynamicIsland:
         far = face.rbox(xs, ys - 3 * k, cx, cy, W / 2, H / 2, r)
         shadow = self.theme()["shadow"] * np.clip(0.5 - far / (11 * k), 0.0, 1.0) ** 2
         alpha = cover + shadow * (1 - cover)
-        edge = np.clip(0.5 - (np.abs(sd + 0.7 * k) - 0.6 * k), 0.0, 1.0) if self.border else None
+        if self.style == "capsule":  # glass always has its hairline, about a pixel just inside its edge
+            lw = max(1.0, k)
+            edge = np.clip(0.5 - (np.abs(sd + 0.5 * lw) - 0.5 * lw), 0.0, 1.0) * cover
+        else:
+            edge = np.clip(0.5 - (np.abs(sd + 0.7 * k) - 0.6 * k), 0.0, 1.0) if self.border else None
         if i0 is not None:
             cover, alpha = _spread(cover, i0, i1), _spread(alpha, i0, i1)
             edge = _spread(edge, i0, i1) if edge is not None else None
@@ -1169,11 +1522,21 @@ class DynamicIsland:
         h, w = cover.shape
         col = np.empty((h, w, 3), np.float32)
         col[:] = body
-        cv = face.Canvas(col)
+        op = self._glass(col, cover)
+        cv = face.Canvas(col, op=op)
         for draw, ia in items:
             if ia > 0.01:
                 draw(cv, min(ia, 1.0))
-        self._compose(self.buf[sl], col, cover, alpha, edge, a, over)
+        self._compose(self.buf[sl], col, cover, alpha, edge, a, over, op)
+
+    def _glass(self, col, cover):
+        """On the capsule, how opaque its glass is at each pixel, with col (its body's colour) made premultiplied by
+        it, so what's drawn on it goes over both (face.Canvas); None on the pill, which is solid."""
+        if self.style != "capsule":
+            return None
+        op = cover * self.theme()["fill"]
+        col *= op[..., None]
+        return op
 
     def _paint_part(self, sl, cover, alpha, edge, body, box, draw, a):
         """Only box (x0, y0, x1, y1 in the patch) of a patch painted again: a caption's moving bars, over a
@@ -1185,14 +1548,19 @@ class DynamicIsland:
             return
         col = np.empty((y1 - y0, x1 - x0, 3), np.float32)
         col[:] = body
-        draw(face.Canvas(col, x0, y0), 1.0)
+        op = self._glass(col, cover[y0:y1, x0:x1])
+        draw(face.Canvas(col, x0, y0, op), 1.0)
         out = self.buf[sl[0].start + y0:sl[0].start + y1, sl[1].start + x0:sl[1].start + x1]
         self._compose(out, col, cover[y0:y1, x0:x1], alpha[y0:y1, x0:x1],
-                      edge[y0:y1, x0:x1] if edge is not None else None, a, None)
+                      edge[y0:y1, x0:x1] if edge is not None else None, a, None, op)
 
-    def _compose(self, out, col, cover, alpha, edge, a, over):
+    def _compose(self, out, col, cover, alpha, edge, a, over, op=None):
         """Colours (straight, 0 to 1) with their cover and alpha into out, the window's pixels: blue, green, red,
-        alpha, premultiplied. Four channels at a time and no more passes than it needs."""
+        alpha, premultiplied. Four channels at a time and no more passes than it needs. op: the glass's (_glass),
+        with col premultiplied by it."""
+        if op is not None:
+            self._compose_glass(out, col, cover, alpha, edge, a, over, op)
+            return
         if edge is not None:
             col += (np.asarray(self.theme()["line"], np.float32) - col) * edge[..., None]
         np.clip(col, 0.0, 1.0, out=col)
@@ -1200,6 +1568,35 @@ class DynamicIsland:
         src = np.empty((h, w, 4), np.float32)
         np.multiply(col[..., ::-1], (cover * (255.0 * a))[..., None], out=src[..., :3])
         sa = alpha * a if a < 1 else alpha
+        np.multiply(sa, 255.0, out=src[..., 3])
+        if over is not None and over[1] > over[0]:
+            r0, r1 = over
+            src[r0:r1] += out[r0:r1] * (1.0 - sa[r0:r1])[..., None]
+        src += 0.5
+        np.minimum(src, 255.0, out=src)
+        out[...] = src
+
+    def _compose_glass(self, out, col, cover, alpha, edge, a, over, op):
+        """_compose for the capsule's glass: col is premultiplied by op, how opaque each pixel is (the glass's fill
+        where nothing's drawn, 1 under words and glyphs, and also below the glass where its progress line is). The
+        hairline goes over it, the shadow (alpha less cover) under it, and what comes out stays premultiplied, as
+        UpdateLayeredWindowIndirect needs: no colour brighter than its alpha."""
+        th = self.theme()
+        if edge is not None:
+            e = edge * th["line_a"]
+            col *= (1.0 - e)[..., None]
+            col += np.asarray(th["line"], np.float32) * e[..., None]
+            op *= 1.0 - e
+            op += e
+        np.clip(op, 0.0, 1.0, out=op)
+        np.maximum(col, 0.0, out=col)
+        np.minimum(col, op[..., None], out=col)  # a glow adds light, not cover: never more than the pixel holds
+        h, w = cover.shape
+        src = np.empty((h, w, 4), np.float32)
+        np.multiply(col[..., ::-1], 255.0 * a, out=src[..., :3])
+        sa = op + np.maximum(alpha - cover, 0.0) * (1.0 - op)  # the shadow shows only where the glass doesn't
+        if a < 1:
+            sa *= a
         np.multiply(sa, 255.0, out=src[..., 3])
         if over is not None and over[1] > over[0]:
             r0, r1 = over
@@ -1239,7 +1636,7 @@ class DynamicIsland:
             # while the bar stands still with the same words, its picture is kept and only its bars drawn again
             one = caps[0][0] if len(caps) == 1 and caps[0][1] >= 0.999 and ca >= 0.999 else None
             key = (one.key, sl[0].start, sl[0].stop, sl[1].start, sl[1].stop, round(CW * 2), round(CH * 2),
-                   self._theme_name(), self.border) if one is not None else None
+                   self._theme_name(), self.border, self.style) if one is not None else None
             if key is not None and key == self.cap_key:
                 self.buf[sl] = self.cap_picture
             elif key is not None:
@@ -1260,10 +1657,16 @@ class DynamicIsland:
             self._grow(sl)
             cap_rows = (sl[0].start, sl[0].stop)
         lay = self.layout or self.prev
-        r = (lay.radius if lay is not None and lay.radius else min(H / 2, self.corner * k))
+        if lay is not None and lay.radius:
+            r = lay.radius
+        elif self.style == "capsule":  # fully round ends
+            r = H / 2
+        else:
+            r = min(H / 2, self.corner * k)
         r = min(r, H / 2)
         sl, cover, alpha, edge = self._shape(x0, W, H, r, y0)
         ox, oy = x0 - sl[1].start, y0 - sl[0].start
+        self.patch_at = (sl[1].start, sl[0].start)  # where her face is drawn from, in the window (_face)
         items = [(lambda cv, a, L=L: L.draw(cv, ox, oy, W, H, a, now), la) for L, la in
                  ((self.prev, self.prev_alpha), (self.layout, self.content)) if L is not None]
         over = None
@@ -1301,7 +1704,9 @@ class DynamicIsland:
                 self.dirty = True
                 self._wake()
         win.set_click_through(self.hwnd, not (self.hover and clickable))
-        if self.hover and lay is not None and lay.kind == "idle":  # her eyes follow the mouse
+        if lay is not None and lay.face:  # the capsule's cartoon looks at the pointer wherever it is
+            self._follow(x, y)
+        elif self.hover and lay is not None and lay.kind == "idle":  # her eyes follow the mouse
             cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
             self.look_at = (max(-1.0, min(1.0, (x - cx) / max(1.0, (x1 - x0) / 2))),
                             max(-1.0, min(1.0, (y - cy) / max(1.0, (y1 - y0)))))

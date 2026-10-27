@@ -47,6 +47,9 @@ DEFAULTS = {
     # Island card, bubble.Island) or "pill" (the Siri pill at the bottom)
     "popup_style": "island",
     # the island (island.py), all changed in the Island tab
+    # capsule (27 October 2026: a floating glass capsule with a cartoon face, the owner's pick from the mockups) or
+    # pill (the black pill with Nixi's eyes it was before)
+    "island_style": "capsule",
     "island_face": "eyes",  # eyes (Nixi's) or wave (the Siri wave)
     "island_theme": "amoled",  # system, light, dark or amoled (pure black)
     "island_border": False,  # a thin line round it

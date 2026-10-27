@@ -43,6 +43,7 @@ TABS = (("home", "Home"), ("todo", "To-do"), ("tasks", "Tasks"), ("contacts", "C
 # the Island tab's choices: what's saved, what it says
 POPUP_STYLES = {"island": "Her island at the top", "card": "The iPhone card at the top",
                 "pill": "The Siri pill at the bottom"}
+ISLAND_STYLES = {"capsule": "Glass capsule", "pill": "Black pill"}
 ISLAND_FACES = {"eyes": "Her eyes", "wave": "The Siri wave"}
 ISLAND_THEMES = {"amoled": "AMOLED black", "dark": "Dark", "light": "Light", "system": "Like Windows"}
 ISLAND_ALIGN = {"center": "In the middle", "left": "On the left", "right": "On the right"}
@@ -1188,6 +1189,8 @@ class AssistantWindow:
 
         combo(row("Popup", "Her island has her eyes and the plugins below. The card and the pill show only her "
                            "turns."), "popup_style", POPUP_STYLES, self.style_changed)
+        combo(row("Style", "The glass capsule floats under the top of the screen with her cartoon face; the black "
+                           "pill sits at the top with her glowing eyes."), "island_style", ISLAND_STYLES)
         combo(row("Face", "Her eyes blink, look about and react: hearts when you say thanks, glasses while she reads "
                           "the screen, headphones while music plays. Or the Siri wave as she listens and talks."),
               "island_face", ISLAND_FACES)

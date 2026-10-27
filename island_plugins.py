@@ -563,7 +563,7 @@ class Tasks(Plugin):
         status = SHORT.get(state) or (f"{step}/{total}" if total and step else "")
         return {"key": item["key"], "title": item["title"], "lines": [item["note"]] if item["note"] else [],
                 "status": status, "since": None if status else item["started"], "state": state,
-                "progress": progress, "buttons": buttons}
+                "progress": progress, "buttons": buttons, "kind": item["kind"]}  # research shows violet on the capsule
 
     def command(self, what, data=None):
         """Stop or Deny on a row (activity.press), on a thread of its own: a background task's goes through
