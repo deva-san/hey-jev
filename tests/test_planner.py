@@ -180,7 +180,14 @@ class BlocksByMeaning(unittest.TestCase):
         self.vectors = {"compile my app": unit(0.9, 0.1, 0.4), "what's on my plate today": unit(0.1, 0.9, 0.4),
                         "tell me a joke": unit(0, 0, 1)}
         self.asked = []
-        encoder = type("Encoder", (), {"encode": lambda _, text: self.asked.append(text) or self.vectors[text]})()
+        encoder = type("Encoder", (), {"last": None})()
+
+        def encode(text):  # keeps the last, as decider.Decider.encode does
+            self.asked.append(text)
+            encoder.last = (text, self.vectors[text])
+            return encoder.last[1]
+        encoder.encode = encode
+        self.encoder = encoder
         for p in (patch.object(siri.decider, "available", lambda: True),
                   patch.object(siri.decider, "get", lambda: encoder),
                   patch.object(siri.filesearch, "recent", lambda: None),
@@ -188,15 +195,36 @@ class BlocksByMeaning(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
+    def ranked(self, text):
+        """As think() does first: her skills ranked by the words, which leaves them the encoder's last."""
+        self.encoder.encode(text)
+        return text
+
     def test_close_in_meaning_is_written_out(self):
         self.assertFalse(siri.TASK_WORDS.search("compile my app") or siri.LIST_WORDS.search("what's on my plate today"))
-        tasks, lists, more = siri.gated_blocks("compile my app", [])
+        tasks, lists, more = siri.gated_blocks(self.ranked("compile my app"), [])
         self.assertEqual((tasks, lists), (True, False))
         self.assertEqual(more, siri.MORE_STEPS + siri.TASK_STEPS)
-        self.assertEqual(siri.gated_blocks("what's on my plate today", [])[2], siri.MORE_STEPS + siri.LIST_STEPS)
+        self.assertEqual(siri.gated_blocks(self.ranked("what's on my plate today"), [])[2],
+                         siri.MORE_STEPS + siri.LIST_STEPS)
 
     def test_far_in_meaning_is_left_out(self):
-        self.assertEqual(siri.gated_blocks("tell me a joke", []), (False, False, ""))
+        self.assertEqual(siri.gated_blocks(self.ranked("tell me a joke"), []), (False, False, ""))
+
+    def test_words_not_worked_out_yet_go_by_the_regexes_alone(self):
+        """Working them out took 19 ms (median) and 25 at worst, not clearly under 20: never on the voice thread."""
+        self.ranked("tell me a joke")
+        self.asked.clear()
+        self.assertEqual(siri.gated_blocks("compile my app", []), (False, False, ""))
+        self.assertEqual(self.asked, [])
+
+    def test_ranking_skills_leaves_the_words_asked_last_even_after_a_description_changed(self):
+        entry = {"dir": "build-helper", "description": "Builds things", "triggers": []}
+        self.vectors["build helper: Builds things. "] = self.vectors["tell me a joke"]
+        with patch.dict(siri._skill_vectors, clear=True):
+            siri.rank_skills("compile my app", [entry])
+        self.assertEqual(self.encoder.last[0], "compile my app")
+        self.assertTrue(siri.gated_blocks("compile my app", [])[0])
 
     def test_words_that_hit_both_regexes_arent_worked_out(self):
         self.assertEqual(siri.gated_blocks("run the build and add it to my to-do list", [])[:2], (True, True))

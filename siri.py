@@ -2773,18 +2773,33 @@ def paraphrased(words, gate):
     return make_plan(skill["plan"]["steps"], skill["plan"]["say"])
 
 
+def slotless_routines():
+    """routines() whose trigger has no slot, judged on the trigger as written: plain() turns "play {song}" into "play
+    song", which would then run with its slot unfilled if matched by meaning (review, 27 October)."""
+    routines()  # read again if it's time
+    return [(plain(t), s) for s in _skill_cache[1] if s["plan"] for t in s["triggers"] if "{" not in t and plain(t)]
+
+
+def warm_triggers():
+    """[(trigger, skill)] for the slotless routines, each trigger's numbers worked out once: from warm_decider when
+    the decider loads, so the first named miss after start doesn't wait about 20 ms a trigger on the voice thread
+    (13 sentences took 255 ms on this PC on 27 October); a trigger added or edited later is worked out on its turn."""
+    found = slotless_routines()
+    encode = decider.get().encode if found else None
+    for phrase, _ in found:
+        if phrase not in _trigger_vectors:
+            _trigger_vectors[phrase] = encode(phrase)
+    return found
+
+
 def closest_routine(said):
     """(how alike, trigger, skill) for the routine trigger closest in meaning to said, or None with no routines.
     The words are worked out with the same string think() ranks skills by, so a turn that goes on to the model
-    gets them free (decider.Decider.encode keeps the last); each trigger once."""
-    found = [(phrase, skill) for phrase, skill in routines() if phrase and "{" not in phrase]  # slotless only
+    gets them free (decider.Decider.encode keeps the last); each trigger once (warm_triggers)."""
+    found = warm_triggers()  # first, so the words asked are the last worked out
     if not found:
         return None
-    encode = decider.get().encode
-    for phrase, _ in found:  # first, so the words asked are the last worked out
-        if phrase not in _trigger_vectors:
-            _trigger_vectors[phrase] = encode(phrase)
-    q, best = encode(said), None
+    q, best = decider.get().encode(said), None
     for phrase, skill in found:
         score = float(q @ _trigger_vectors[phrase])
         if best is None or score > best[0]:
@@ -3335,8 +3350,9 @@ def blocks_by_meaning(text):
     """{block: how alike text is to its closest example}, {} without the decider or before its examples are worked
     out. The words are the ones think() just ranked her skills by (decider.Decider.encode keeps the last), and the
     turn's own meaning is worked out from them again once she's answered (remember_meaning), so this costs a few
-    dot products: 0.1 ms on this PC on 27 October over 46 requests, and 19 ms (median) for words not worked out
-    yet, as when she has no skills to rank. Only on the way to the model, never in quick()."""
+    dot products: 0.1 ms on this PC on 27 October over 46 requests. Words not worked out yet took 19 ms (median),
+    25 at worst, not clearly under the 20 ms this was allowed, so then it's {} and the regexes alone decide, as
+    when she has no skills to rank. Only on the way to the model, never in quick()."""
     if not text or not decider.available():
         return {}
     if not _block_vectors:
@@ -3345,7 +3361,10 @@ def blocks_by_meaning(text):
             threading.Thread(target=warm_blocks, daemon=True).start()
         return {}
     try:
-        q = decider.get().encode(str(text))
+        last = getattr(decider.get(), "last", None)
+        if not last or last[0] != str(text):
+            return {}
+        q = last[1]
         return {name: max(float(q @ v) for v in vectors) for name, vectors in _block_vectors.items()}
     except Exception as exc:
         print(f"  couldn't match the prompt blocks by meaning: {exc!r}")
@@ -3936,12 +3955,14 @@ def rank_skills(text, entries):
     about = {e["dir"]: f"{e['dir'].replace('-', ' ')}: {e['description']}. {' '.join(e['triggers'])}" for e in entries}
     if decider.available():
         try:
-            encode = decider.get().encode
-            q, scored = encode(str(text)), []
-            for name, a in about.items():
-                if _skill_vectors.get(name, (None,))[0] != a:
-                    _skill_vectors[name] = (a, encode(a))
-                scored.append((float(q @ _skill_vectors[name][1]), name))
+            d = decider.get()
+            q = d.encode(str(text))  # first: a turn without her name already worked them out (for_me)
+            changed = [name for name, a in about.items() if _skill_vectors.get(name, (None,))[0] != a]
+            for name in changed:
+                _skill_vectors[name] = (about[name], d.encode(about[name]))
+            if changed:  # the words asked stay the last worked out, for blocks_by_meaning to reuse
+                d.last = (str(text), q)
+            scored = [(float(q @ _skill_vectors[name][1]), name) for name in about]
             return [(name, score >= SKILL_FITS) for score, name in sorted(scored, reverse=True)]
         except Exception as exc:
             print(f"  couldn't match skills: {exc!r}")
@@ -8457,6 +8478,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     def warm_decider():
         relevant_skills("hello", (routines(), _skill_cache[1])[1])
         warm_blocks()  # and the prompt blocks' examples (gated_blocks), so no turn waits for them
+        warm_triggers()  # and the routines' words (closest_routine), even in shadow mode
         print(f"[decider loaded, {in_use()}]")
 
     if voiceid.mode() != "off":

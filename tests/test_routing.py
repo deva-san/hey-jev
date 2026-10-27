@@ -549,8 +549,14 @@ class ParaphrasedRoutines(Routing):
     """27 October: a routine ran only on its exact words. Words close in meaning, said by name, are logged in
     shadow mode (the default) and run only with "paraphrase_routines" on, never without her name."""
 
-    ROUTINE = {"dir": "work-mode", "plan": {"steps": [{"do": "open", "app": "Notepad"},
-                                                      {"do": "volume", "to": "mute"}], "say": "Work mode."}}
+    ROUTINE = {"dir": "work-mode", "triggers": ["work mode"],
+               "plan": {"steps": [{"do": "open", "app": "Notepad"}, {"do": "volume", "to": "mute"}], "say": "Work mode."}}
+
+    real_routines = staticmethod(siri.routines)  # Routing leaves her none; these go through the real one
+
+    def skills(self, *found):
+        """skills.list_skills' stand-in, read through the real routines() and its cache."""
+        return mock.patch.object(siri.skills, "list_skills", lambda: [json.loads(json.dumps(s)) for s in found])
 
     def setUp(self):
         super().setUp()
@@ -558,7 +564,8 @@ class ParaphrasedRoutines(Routing):
         self.encoder = FakeEncoder({"work mode": [1, 0, 0, 0], "start work mode": [0.95, 0.31, 0, 0],
                                     "what is work mode": [0.95, 0.31, 0, 0], "get ready for work": [0.6, 0.8, 0, 0],
                                     "can you start work mode please": [0.95, 0.31, 0, 0]})
-        for patch in (mock.patch.object(siri, "routines", lambda: [("work mode", self.ROUTINE)]),
+        for patch in (mock.patch.object(siri, "routines", self.real_routines), self.skills(self.ROUTINE),
+                      mock.patch.object(siri, "_skill_cache", [0.0, []]),
                       mock.patch.object(siri.decider, "available", lambda: True),
                       mock.patch.object(siri.decider, "get", lambda: self.encoder),
                       mock.patch.object(siri.decider, "folder", lambda: self.folder),
@@ -610,9 +617,20 @@ class ParaphrasedRoutines(Routing):
         self.assertEqual(self.encoder.asked[-1], "start work mode")
 
     def test_a_trigger_with_a_slot_is_never_matched_by_meaning(self):
+        """plain() turns "work mode {x}" into "work mode", so the slot is judged on the trigger as written."""
         self.mode("on")
-        with mock.patch.object(siri, "routines", lambda: [("work mode {x}", self.ROUTINE)]):
+        slotted = {**self.ROUTINE, "triggers": ["work mode {x}"]}
+        with self.skills(slotted), mock.patch.object(siri, "_skill_cache", [0.0, []]):
             self.assertIsNone(siri.closest_routine("start work mode"))
+            self.assertIsNone(self.quick("start work mode"))
+        self.assertEqual(self.logged(), [])
+
+    def test_the_triggers_are_worked_out_when_the_decider_loads_not_on_her_turn(self):
+        self.mode("shadow")
+        self.assertEqual([phrase for phrase, _ in siri.warm_triggers()], ["work mode"])
+        self.encoder.asked.clear()
+        self.quick("start work mode")
+        self.assertEqual(self.encoder.asked, ["start work mode"])  # only her words, on the voice thread
 
 
 if __name__ == "__main__":
