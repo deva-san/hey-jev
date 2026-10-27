@@ -151,7 +151,9 @@ class Eligible(Fresh):
             self.assertEqual(skills.why_hidden(tools), "")
         with mock.patch.object(skills, "tool_names", lambda: {"web", "open"}):
             self.assertIn("terminal", skills.why_hidden(tools))
-        self.assertIsNone(siri.registry_tools())  # no toolbox.py loaded
+        # with the tool registry (toolbox.py) in, a skill's requires_tools is checked against her own steps
+        self.assertIn("web", siri.registry_tools())
+        self.assertNotIn("terminal", siri.registry_tools())
 
     def test_always_skips_what_it_needs_but_not_the_os(self):
         with mock.patch.object(skills.shutil, "which", lambda b: None):
