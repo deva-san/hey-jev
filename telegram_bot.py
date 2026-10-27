@@ -742,6 +742,8 @@ class Bot:
         with self.progress_lock:
             if final or (not ok and message is None):  # done with, or its first message never went: afresh next time
                 self.progressing.pop(key, None)
+            elif not ok and entry["text"] == text:  # an edit that failed (a flood limit, _call's timeout): the same
+                entry["text"] = ""  # line goes again next time, never skipped as "the same", the phone left stale
         return ok
 
     def send_document(self, chat, path, caption=""):

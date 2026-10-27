@@ -102,6 +102,16 @@ class Progress(Case):
             self.assertFalse(bot.progress(7, "task:3", "Research flights"))
         self.assertEqual((fake.sent, fake.edits), ([], []))
 
+    def test_an_edit_that_failed_goes_again_with_the_same_line(self):
+        bot, fake = self.bot()
+        self.assertTrue(bot.progress(7, "task:3", "Research flights\nWorking"))
+        bot.progressing["task:3"]["at"] -= telegram_bot.PROGRESS_EVERY
+        with mock.patch.object(bot, "_call", lambda go: go().close() or False):  # a flood limit, or _call's timeout
+            self.assertFalse(bot.progress(7, "task:3", "Research flights\nWorking \u00b7 step 2 of 6"))
+        bot.progressing["task:3"]["at"] -= telegram_bot.PROGRESS_EVERY
+        self.assertTrue(bot.progress(7, "task:3", "Research flights\nWorking \u00b7 step 2 of 6"))  # not "the same"
+        self.assertEqual(fake.edits, [(7, 101, "Research flights\nWorking \u00b7 step 2 of 6")])
+
     def test_a_first_message_that_failed_is_tried_afresh(self):
         bot = telegram_bot.Bot(on_message=None, on_tap=None)  # not listening: no loop
         with contextlib.redirect_stdout(io.StringIO()):
@@ -206,9 +216,18 @@ class PhoneProgress(Clocked):
                                                        "pages \u00b7 1 min", False)])
         with mock.patch.object(activity, "QUICK", 1e9):  # gone from activity at once, as a quick success is
             activity.finish("task:3", "done")
-        siri.progress_tick()
+        with mock.patch.object(siri.TASK_STORE, "get", lambda tid: {"id": tid, "status": "completed"}):
+            siri.progress_tick()
         self.assertEqual(self.progress[-1], (7, "task:3", "Research flights\nDone", True))
         self.assertEqual(siri.PROGRESS_TO, {})
+
+    def test_a_failure_gone_from_activity_still_says_it_didnt_work(self):
+        self.follow()
+        siri.progress_tick(self.clock[0] + siri.PROGRESS_AFTER)
+        activity.clear()  # its failure lingered only activity.LINGER, and the tick came later
+        with mock.patch.object(siri.TASK_STORE, "get", lambda tid: {"id": tid, "status": "failed"}):
+            siri.progress_tick()
+        self.assertEqual(self.progress[-1], (7, "task:3", "Research flights\nDidn't work", True))
 
     def test_a_failure_says_so(self):
         self.follow()
@@ -251,7 +270,13 @@ class TasksCommand(Clocked):
             self.assertFalse(siri.PHONE_TASKS.fullmatch(said), said)
 
     def test_nothing_going(self):
-        self.assertEqual(siri.tasks_said(), "Nothing's running in the background right now.")
+        with mock.patch.object(siri, "task_summary", lambda scheduled: "No background tasks are running or waiting."):
+            self.assertEqual(siri.tasks_said(), "Nothing's running in the background right now.")
+
+    def test_a_job_waiting_since_a_restart_is_still_told(self):
+        # activity is this run's memory: a coding job recover() turned back into waiting_approval is in tasks.db only
+        with mock.patch.object(siri, "task_summary", lambda scheduled: "Task 4, fix it, waiting for approval."):
+            self.assertEqual(siri.tasks_said(), "Task 4, fix it, waiting for approval.")
 
     def test_what_waits_on_you_first_with_how_to_answer(self):
         activity.publish("task:3", title="Research flights", kind="research", state="running", step=2, total=6,
@@ -305,7 +330,8 @@ class JobQuestions(Clocked):
                          ("waiting_yes", str(task["id"]), "OpenCode wants to run npm install. Let it?"))
         line = self.said.get(timeout=5)
         self.assertEqual(line, f"Task {task['id']}: OpenCode wants to run npm install. Let it?")
-        self.assertEqual(line.confirm["steps"], [{"do": "task_control", "action": "approve", "id": task["id"]}])
+        self.assertEqual(line.confirm["steps"], [{"do": "task_control", "action": "approve", "id": task["id"],
+                                                  "ask": tasks.ASKS[task["id"]].ask}])  # that one question
         with contextlib.redirect_stdout(io.StringIO()):
             plan = siri.prepare_task_steps({"steps": [{"do": "task_control", "action": "approve",
                                                        "id": task["id"]}], "say": ""})  # "approve task N"
@@ -387,6 +413,39 @@ class JobQuestions(Clocked):
         self.assertTrue(got.get(timeout=5))
         self.assertEqual([s["do"] for s in ran[0]["steps"]], ["task_queued"])
         self.assertIsNone(siri.PENDING["plan"])
+
+    def test_a_yes_to_a_question_answered_meanwhile_never_reaches_the_next(self):
+        task = self.running()
+        got = self.asking(task)
+        old = self.said.get(timeout=5)  # held back through a turn or a dictation
+        heard = old.confirm["steps"][0]["ask"]
+        self.assertTrue(activity.press(f"task:{task['id']}", "deny", str(task["id"])))
+        self.assertFalse(got.get(timeout=5))
+        got_next = self.asking(task, question="OpenCode wants to run rm -r build. Let it?")
+        self.assertTrue(siri.question_gone(old))  # heads_ups drops it unsaid
+        siri.said_out_loud(old)
+        self.assertIsNone(siri.PENDING["plan"])  # no yes waits for a line about a question that's gone
+        with contextlib.redirect_stdout(io.StringIO()):
+            plan = siri.prepare_task_steps(dict(old.confirm))  # a yes to it all the same
+        self.assertIn("answered already", plan["say"])
+        self.assertFalse(siri.refuse_job(old.confirm))  # nor a no
+        self.assertEqual(self.store.get(task["id"])["status"], "waiting_approval")
+        self.assertTrue(got_next.empty())
+        new = self.said.get(timeout=5)
+        self.assertFalse(siri.question_gone(new))
+        with contextlib.redirect_stdout(io.StringIO()):
+            siri.prepare_task_steps(new.confirm)
+        self.assertTrue(got_next.get(timeout=5))  # only what she said, and you heard, is answered
+        self.assertFalse(self.store.approve(task["id"], heard))
+
+    def test_a_question_waiting_on_the_phone_keeps_its_slot(self):
+        mine = {"steps": [{"do": "message_send"}], "say": ""}
+        siri.PENDING.update(plan=mine, until=time.time() + 300, soon=time.time() + 30, origin="phone", id="abc")
+        task = self.running()
+        got = self.asking(task, wait=0.3)
+        siri.said_out_loud(self.said.get(timeout=5))
+        self.assertEqual((siri.PENDING["plan"], siri.PENDING["origin"], siri.PENDING["id"]), (mine, "phone", "abc"))
+        got.get(timeout=5)
 
     def test_a_no_to_her_saying_it_refuses_the_command_at_once(self):
         task = self.running()

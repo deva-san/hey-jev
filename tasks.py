@@ -37,6 +37,15 @@ WAKE = threading.Event()
 ASKS = {}
 
 
+def asking(task_id, ask=None):
+    """The answer(yes) of the question task_id's running job asks now, or None. ask: only if it's still that very
+    question (its answer's .ask, set by siri.job_ask), not one asked since the first was answered another way."""
+    answer = ASKS.get(int(task_id or 0))
+    if answer is None or (ask is not None and getattr(answer, "ask", None) != ask):
+        return None
+    return answer
+
+
 def _json(value, fallback):
     try:
         return json.loads(value) if isinstance(value, str) else value
@@ -177,14 +186,18 @@ class Store:
             activity.finish(f"task:{int(task_id)}", "stopped")
         return bool(cur.rowcount)
 
-    def approve(self, task_id):
+    def approve(self, task_id, ask=None):
+        """A yes to a task waiting on you: queued to run, or a running job's question answered. ask: the one question
+        a yes was said to (asking), so a yes heard for one command never answers the next one the job asks."""
         self.init()
         task = self.get(task_id)
         if not task or task["status"] != "waiting_approval":
             return False
         if "asking" in task["payload"]:  # a running job's question (ask): answered, never the job queued twice
-            answer = ASKS.get(int(task_id))
+            answer = asking(task_id, ask)
             return bool(answer is not None and answer(True))
+        if ask is not None:  # a yes to a job's question that's gone: never the whole job's yes instead
+            return False
         payload = dict(task["payload"])
         payload["approved"] = True
         with self._db() as con:

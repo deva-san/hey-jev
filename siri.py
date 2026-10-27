@@ -754,17 +754,40 @@ def said_out_loud(line):
     if isinstance(line, Said):
         line.cut = HER.stop.is_set()
         line.heard.set()
-        if line.confirm and not line.cut:
+        if line.confirm and not line.cut and question_live(line.confirm):
             ask_after(line.confirm)
+
+
+def job_steps(plan):
+    """The approve steps of a confirm plan for a running job's question (job_ask): (task id, its question's ask)."""
+    return [(int(step.get("id") or 0), step.get("ask")) for step in (plan or {}).get("steps") or []
+            if isinstance(step, dict) and step.get("do") == "task_control" and step.get("action") == "approve"]
+
+
+def question_live(plan):
+    """Whether the job question a confirm plan was made for is still the one its job asks: its line was held back
+    through a turn or a dictation, and meanwhile Deny, the phone or the clock answered it and the job asked another.
+    A yes to that old line must never reach the new question (27 October: one yes, one action, and only to what you
+    heard). A plan without an ask (typed "approve task N") is for whatever the island shows."""
+    steps = job_steps(plan)
+    return bool(steps) and all(tasking.asking(tid, ask) is not None for tid, ask in steps)
+
+
+def question_gone(line):
+    """A Said line asking a job's question that's been answered since it was queued: heads_ups drops it unsaid."""
+    return isinstance(line, Said) and bool(line.confirm) and bool(job_steps(line.confirm)) and \
+        not question_live(line.confirm)
 
 
 def ask_after(confirm):
     """A background job's question she's just said out loud ("Task 4: OpenCode wants to run npm install. Let it?"):
     a clear yes in the next few seconds runs confirm, as a yes to her own questions does (PENDING, STRICT_YES's clear
     yes for task_control). confirm names that one task's id, so the yes reaches only its question: approve() refuses
-    it once it's been answered another way. Never over a question of hers still waiting, whose yes it would take:
-    then it's "approve task N". Called inside tell, under busy. True if it waits for a yes."""
-    if voice_question_waiting():
+    it once it's been answered another way. Never over a question of hers still waiting, whose yes it would take,
+    and that includes one asked on the phone: PENDING is a single slot, and its Yes button checks the slot's origin
+    and id, so taking it would drop the owner's tap (27 October). Then it's "approve task N", the Tasks tab or the
+    island. Called inside tell, under busy. True if it waits for a yes."""
+    if voice_question_waiting() or (PENDING["plan"] is not None and time.time() < PENDING["until"]):
         return False
     soon = time.time() + FOLLOW_UP + 8
     PENDING.update(plan=confirm, soon=soon, until=soon, origin="voice", words="",
@@ -774,12 +797,12 @@ def ask_after(confirm):
 
 def refuse_job(plan):
     """A no to a running job's question she said out loud (ask_after): that job's step is refused at once, rather
-    than wait out its JOB_WAIT. Only the task its plan names, and only while it's still asking. True if one was."""
+    than wait out its JOB_WAIT. Only the task its plan names, and only while it still asks that very question (its
+    ask), never one it asked since. True if one was."""
     refused = False
-    for step in (plan or {}).get("steps") or []:
-        if isinstance(step, dict) and step.get("do") == "task_control" and step.get("action") == "approve":
-            answer = tasking.ASKS.get(int(step.get("id") or 0))
-            refused = bool(answer is not None and answer(False)) or refused
+    for tid, ask in job_steps(plan):
+        answer = tasking.asking(tid, ask) if ask is not None else None
+        refused = bool(answer is not None and answer(False)) or refused
     return refused
 
 
@@ -5138,6 +5161,7 @@ def job_ask(task, chat=None, wait=JOB_WAIT):
     def ask(question):
         question = tasking.redact(" ".join(str(question or "").split()))
         answered, got, lock, key = threading.Event(), [], threading.Lock(), None
+        nonce = os.urandom(4).hex()  # this one question: a yes said to it never answers the job's next (question_live)
 
         def answer(yes):
             with lock:
@@ -5146,6 +5170,7 @@ def job_ask(task, chat=None, wait=JOB_WAIT):
                 got.append(bool(yes))
                 answered.set()
                 return True
+        answer.ask = nonce
         if not TASK_STORE.ask(tid, question, answer):
             return False
         try:
@@ -5155,8 +5180,8 @@ def job_ask(task, chat=None, wait=JOB_WAIT):
                 key = f"job{tid}-{os.urandom(4).hex()}"  # an old button can't answer this question
                 JOB_KEYS[key] = answer
             if key is None or not PHONE["buttons"](chat, line, key):
-                ANNOUNCE.put(Said(line, {"steps": [{"do": "task_control", "action": "approve", "id": tid}],
-                                         "say": ""}))
+                ANNOUNCE.put(Said(line, {"steps": [{"do": "task_control", "action": "approve", "id": tid,
+                                                    "ask": nonce}], "say": ""}))
             end = time.time() + wait
             while not answered.wait(0.5):
                 if time.time() >= end or TASK_STORE.is_cancelled(tid):
@@ -5218,12 +5243,26 @@ def progress_tick(now=None):
         if to["chat"] != telegram_bot.owner():  # unpaired since: nothing more to that chat
             PROGRESS_TO.pop(key, None)
         elif item is None or item["state"] in activity.OVER:
-            if to["shown"]:  # a quick success goes from activity at once: "Done" all the same
-                PHONE["progress"](to["chat"], key, progress_line(item, now) if item else f"{to['title']}\nDone", True)
+            if to["shown"]:  # gone from activity already (a quick success at once, a failure after LINGER): its row
+                PHONE["progress"](to["chat"], key, progress_line(item, now) if item else ended_line(key, to), True)
             PROGRESS_TO.pop(key, None)
         elif to["shown"] or now - item["started"] >= PROGRESS_AFTER:
             if PHONE["progress"](to["chat"], key, progress_line(item, now), False):
                 to["shown"] = True
+
+
+ENDED = {"completed": "Done", "failed": "Didn't work", "cancelled": "Stopped"}
+
+
+def ended_line(key, to):
+    """A finished task's last word on the phone once its activity entry has gone: how its tasks.db row ended, one
+    read at the very end. A failure's entry lingers only activity.LINGER seconds, and a slow Telegram edit of another
+    job can outlast that, so "Done" by default would contradict the "didn't work" result line sent beside it."""
+    try:
+        row = TASK_STORE.get(int(key.split(":", 1)[1])) if key.startswith("task:") else None
+    except (ValueError, tasking.sqlite3.Error):
+        row = None
+    return f"{to['title']}\n" + ENDED.get((row or {}).get("status"), "Finished, the result's below")
 
 
 def send_report(task, path, caption=""):
@@ -5254,8 +5293,9 @@ def tasks_said(now=None):
     """The phone's "tasks": what she's working on now, from activity's memory, never tasks.db or a model: each
     one's title and how it's getting on, the ones waiting on you first, with how to answer a task's."""
     live = [i for i in activity.snapshot() if i["state"] not in activity.OVER]
-    if not live:
-        return "Nothing's running in the background right now."
+    if not live:  # activity is this run's memory only: a job waiting since a restart is in tasks.db, as "task status"
+        summary = task_summary(False)
+        return "Nothing's running in the background right now." if summary.startswith("No background") else summary
     lines = []
     for i in live[:8]:
         line = "• " + progress_line(i, now).replace("\n", ": ", 1)
@@ -5322,7 +5362,11 @@ def prepare_task_steps(plan):
                 task_id, action = int(step.get("id") or 0), str(step.get("action") or "").lower()
                 # a running job's question (job_ask) is answered, its job going on, not approved and queued
                 asking = action == "approve" and "asking" in ((TASK_STORE.get(task_id) or {}).get("payload") or {})
-                ok = TASK_STORE.approve(task_id) if action == "approve" else TASK_STORE.cancel(task_id) if action == "cancel" else False
+                heard = step.get("ask") if action == "approve" else None  # a yes to her saying that very question
+                ok = TASK_STORE.approve(task_id, heard) if action == "approve" else \
+                    TASK_STORE.cancel(task_id) if action == "cancel" else False
+                if not ok and heard is not None:
+                    raise RuntimeError(f"the question of task {task_id} you heard was answered already, so nothing ran")
                 if not ok:
                     raise RuntimeError(f"task {task_id} isn't waiting for that")
                 kept.append({"do": "task_queued", "id": task_id})
@@ -9164,7 +9208,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
                 later.append((ANNOUNCE.get(), "heads-up", None, None))
             while not noticed.empty():
                 later.append(noticed.get())
-            later = [item for item in later if item[0]]
+            # a job's question answered meanwhile (Deny, the phone, its wait): never said, so no yes can reach the next
+            later = [item for item in later if item[0] and not question_gone(item[0])]
             # never over a dictation, but once it stops: a reminder or a finished task that came up during one was
             # taken off the queue and lost, the reminder already marked done
             while later and not rec.dictating and tell(*later[0][:3]):
