@@ -188,7 +188,7 @@ class Mail(Jobs):
         siri.run_job(self.claim(tid))
         self.assertEqual(self.app.sent, [{"To": "ravi@example.com", "Message": "hi", "Send": None}])
         self.assertEqual(self.store.get(tid)["status"], "completed")
-        self.assertEqual(self.told.get_nowait(), f"Task {tid} finished: {row['description']}. Sent it to Ravi.")
+        self.assertEqual(self.told.get_nowait(), f"Task {tid}'s done. Sent it to Ravi.")
         self.assertEqual(len(self.judged), 1)  # one judge call, at the end
         news = siri.take_job_news()
         self.assertTrue(news.startswith(f"[Background job {tid} finished]\nGoal: send hi"), news)

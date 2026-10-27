@@ -6668,9 +6668,14 @@ def _task_result_line(task, text, success=True):
     text = " ".join(str(text or "").split())
     if len(text) > 240:
         text = text[-240:]
+    what = str(task.get("description") or "").strip().rstrip(".")
+    # a job in an app says what it did in a sentence of its own: run live on 27 October she said "Task 5 finished:
+    # Open Notepad and type a shopping list with milk, eggs and bread into it.. Your shopping list is in Notepad"
+    if success and text and task.get("kind") == "agent":
+        return f"Task {task['id']}'s done. {text}"
     if success:
-        return f"Task {task['id']} finished: {task['description']}." + (f" {text}" if text else "")
-    return f"Task {task['id']} failed: {task['description']}." + (f" {text}" if text else "")
+        return f"Task {task['id']} finished: {what}." + (f" {text}" if text else "")
+    return f"Task {task['id']} failed: {what}." + (f" {text}" if text else "")
 
 
 def task_worker():
