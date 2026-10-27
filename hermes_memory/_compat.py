@@ -1,5 +1,6 @@
 """What the Hermes Agent files in this folder take from the rest of Hermes, so they stand alone in Hey Jev: the home
-folder, atomic writes, file locks, and the few skill-folder helpers. sync_hermes.py points their imports here."""
+folder, atomic writes, file locks, the few skill-folder helpers, utils.py's JSON and yes-or-no readers, and the
+subagent look-ups a finished-job notice makes. sync_hermes.py points their imports here."""
 import json
 import os
 import tempfile
@@ -74,3 +75,39 @@ def is_external_skill_path(path) -> bool:
 
 def get_disabled_skill_names(*_, **__):
     return set()
+
+
+# utils.py, as Hermes has them at 1ae3c55e: interrupt.py turns on its debug log from the environment, and
+# tool_guardrails.py reads a tool's JSON result without trusting it to be JSON
+TRUTHY_STRINGS = frozenset({"1", "true", "yes", "on"})
+
+
+def is_truthy_value(value, default=False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in TRUTHY_STRINGS
+    return bool(value)
+
+
+def env_var_enabled(name: str, default: str = "") -> bool:
+    return is_truthy_value(os.getenv(name, default), default=False)
+
+
+def safe_json_loads(text, default=None):
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return default
+
+
+# tools/process_registry_notifications.py: Hermes names the subagent that started a process, and warns when its
+# configured subagent model was refused. Hey Jev runs no Hermes subagents and has no such setting, so there's
+# nobody to name and never that warning (Hermes' own import delegate_tool: 5,055 lines over 11 files, plus the
+# terminal tool).
+def get_subagent_attribution(task_id):
+    return None
+
+
+def delegation_notice_lines(results):
+    return []

@@ -1,4 +1,4 @@
-# From Hermes Agent by Nous Research, agent/skill_utils.py, hermes_state_common.py, hermes_state_search.py, agent/background_review.py at commit 3569fba6a686e17f9208da7500de8bd20b4c82f9
+# From Hermes Agent by Nous Research, agent/skill_utils.py, hermes_state_common.py, hermes_state_search.py, agent/background_review.py at commit 1ae3c55e4bb16f495ebf0536a5672782d903e15e
 # https://github.com/NousResearch/hermes-agent, MIT License, see LICENSE in this folder.
 # Copied by sync_hermes.py; only the imports are changed, see UPSTREAM.json. Don't edit by hand.
 
@@ -61,16 +61,32 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
 SKILL_PROMPT_DESC_LIMIT = 60
 
 
-def _normalize_skill_description(frontmatter: Dict[str, Any]) -> str:
+_LAST_WHITESPACE_RE = re.compile(r"\s\S*$")
+
+
+_CLIP_TRAIL_RE = re.compile(r"[\s.,;:\-\u2013\u2014(/]+$")
+
+
+def _normalize_skill_description(frontmatter: dict[str, Any]) -> str:
     """Normalize a skill's description field for comparison/truncation."""
     raw_desc = frontmatter.get("description", "")
     return str(raw_desc).strip().strip("'\"") if raw_desc else ""
 
 
-def extract_skill_description(frontmatter: Dict[str, Any]) -> str:
+def clip_skill_description(desc: str) -> str:
+    """*desc* fitted to SKILL_PROMPT_DESC_LIMIT, cut at a word boundary so the index never shows a half word."""
+    if len(desc) <= SKILL_PROMPT_DESC_LIMIT:
+        return desc
+    head = desc[:SKILL_PROMPT_DESC_LIMIT - 2]  # one char past the budget: whitespace there means the last word is whole
+    boundary = _LAST_WHITESPACE_RE.search(head)  # any whitespace (tab, NBSP, ...) separates words, not just " "
+    if not boundary or boundary.start() == 0:  # a single word longer than the budget has no boundary to cut at
+        return desc[:SKILL_PROMPT_DESC_LIMIT - 3] + "..."
+    return _CLIP_TRAIL_RE.sub("", head[:boundary.start()]) + "..."
+
+
+def extract_skill_description(frontmatter: dict[str, Any]) -> str:
     """Extract a system-prompt-length description from parsed frontmatter."""
-    desc = _normalize_skill_description(frontmatter)
-    return desc[:SKILL_PROMPT_DESC_LIMIT - 3] + "..." if len(desc) > SKILL_PROMPT_DESC_LIMIT else desc
+    return clip_skill_description(_normalize_skill_description(frontmatter))
 
 
 # --- hermes_state_common.py ---
@@ -105,7 +121,7 @@ def _is_cjk(cp: int) -> bool:
     return any(lo <= cp <= hi for lo, hi in _CJK_RANGES)
 
 
-def _non_operator_tokens(raw_query: str) -> List[str]:
+def _non_operator_tokens(raw_query: str) -> list[str]:
     return [t for t in raw_query.split() if t.upper() not in _FTS_OPERATORS]
 
 
@@ -131,7 +147,7 @@ def _sanitize_fts5_query(query: str) -> str:
     # left-to-right without backtracking); a leftover unmatched quote becomes whitespace.
     _quoted_parts: list = []
 
-    def _hold(m: "re.Match[str]") -> str:
+    def _hold(m: re.Match[str]) -> str:
         _quoted_parts.append(m.group(0))
         return f"\x00Q{len(_quoted_parts) - 1}\x00"
 
@@ -162,7 +178,7 @@ def _or_relaxed_query(query: str) -> Optional[str]:
     relaxation does not apply: fewer than two searchable units (a single term cannot relax)
     or explicit ``OR``/``NOT`` (the caller expressed exact semantics). Quoted phrases stay
     whole units: ``"docker networking" tls`` -> ``"docker networking" OR tls``."""
-    units: List[str] = []
+    units: list[str] = []
     for raw_token in _LIKE_TOKEN_RE.findall(query):
         upper = raw_token.upper()
         if upper in {"OR", "NOT"}:

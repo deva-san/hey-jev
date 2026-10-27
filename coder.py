@@ -1,7 +1,7 @@
 """Coding jobs in the background: the OpenCode CLI already on this PC (opencode.ai) does the work in one project
 folder while you carry on, and she tells you when it's done.
 
-It's driven the way Hermes Agent drives a coding agent (agent/copilot_acp_client.py, its helpers copied into
+It's driven the way Hermes Agent drives a coding agent (agent/acp_client.py, its helpers copied into
 hermes_memory/acp_bits.py): `opencode acp` on stdin and stdout, the Agent Client Protocol, one session per job.
 
 Kept on a short leash, because OpenCode itself lets an agent edit files and run commands without asking:
