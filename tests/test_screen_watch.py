@@ -134,7 +134,8 @@ class Watching(unittest.TestCase):
         self.assertIn('<untrusted_tool_result source="screen"', lines[0])  # someone else's words, as data
         self.assertIn("lofi beats - YouTube (youtube.com)", lines[0])
         self.assertIn("lofi beats to study to", lines[0])
-        self.assertIn("Before that: 1 min ago: Chrome: Inbox - Gmail (mail.google.com).", lines[1])
+        self.assertIn("Before that: 1 min ago: Chrome: Inbox - Gmail (mail.google.com).", lines[-1])
+        self.assertIn(screen_watch.POINT_NOTE, lines)  # at the PC: "this" is on the screen, so look
 
     def test_nothing_goes_with_it_when_watching_is_off_or_the_look_is_old(self):
         self.look()
@@ -235,6 +236,93 @@ class Watching(unittest.TestCase):
         quiet(self.w.tick)  # raises nothing
 
 
+class Pointing(unittest.TestCase):
+    """27 October, live: with the pointer on Claude's Context bar, "Then what is this", "I can you explain this" and
+    "Hey, what does it mean" were let go as said to someone in the room, and nothing said which "this"."""
+
+    def test_questions_about_whats_in_front_of_you(self):
+        for words in ("Then what is this", "I can you explain this", "Hey, what does it mean",
+                      "hey what is this and explain this", "what does this error mean", "is this right",
+                      "what am I looking at", "can you read this for me", "why is this greyed out"):
+            self.assertTrue(screen_watch.POINTED.fullmatch(siri.plain(words)), words)
+        for words in ("why is it so cold", "what is it with you", "is it raining", "what is that song called",
+                      "what time is it", "open this", "what is the capital of japan", "tell me a joke"):
+            self.assertIsNone(screen_watch.POINTED.fullmatch(siri.plain(words)), words)
+
+    def test_only_at_the_pc_with_watching_on(self):
+        ask = screen_watch.asked_of_screen
+        self.assertTrue(ask("what is this", "live", 3.0))
+        self.assertTrue(ask("what is this", "quiet", screen_watch.FRESH))
+        self.assertFalse(ask("what is this", "off", 3.0))
+        self.assertFalse(ask("what is this", "live", screen_watch.FRESH + 1))  # away from the PC: room talk again
+        self.assertFalse(ask("what is the time", "live", 3.0))
+        # every turn said cold comes through here: the time since your last key is read only once the words match
+        never = mock.Mock(side_effect=AssertionError("read for words that don't match"))
+        self.assertFalse(ask("what time does the match start", "live", never))
+        self.assertTrue(ask("what is this", "live", lambda: 2.0))
+        self.assertFalse(ask("what is this", "live", mock.Mock(side_effect=OSError)))  # Windows wouldn't say
+
+    def test_whats_under_the_pointer_goes_with_your_question(self):
+        screen = Screen()
+        idle = [3.0]
+        w = screen_watch.Watcher(read=screen.read, snapshot=screen.snapshot, site=screen.site, idle=lambda: idle[0],
+                                 shot=lambda: None, judge=None, announce=None, free=lambda: True, mode=lambda: "live",
+                                 clock=lambda: 1000.0, cursor=lambda: (640, 300),
+                                 at=lambda x, y: {"role": "text", "name": "Context 73%", "password": False})
+        quiet(w.tick)
+        lines = "\n".join(w.lines(1000.0))
+        self.assertIn("Under their mouse pointer", lines)
+        self.assertIn('text \\"Context 73%\\"', json.dumps(lines))
+        idle[0] = screen_watch.FRESH + 5
+        self.assertNotIn("Under their mouse pointer", "\n".join(w.lines(1000.0)))  # not at the PC: not "this"
+
+    def test_the_pointer_is_named_but_never_a_password_or_a_code(self):
+        import agent
+        self.assertIsNone(agent.pointed_text({"role": "edit", "name": "Password", "password": True}))
+        self.assertIsNone(agent.pointed_text(None))
+        self.assertEqual(agent.pointed_text({"role": "text", "name": "Order 4829104 shipped"}),
+                         'text "Order #### shipped"')
+        el = {"role": "edit", "name": "One-time code", "el": object()}
+        with mock.patch.object(agent.win, "ui_value", lambda e: "739104"):
+            self.assertEqual(agent.pointed_text(el), 'edit "One-time code"')  # what's in a code box isn't read
+            self.assertEqual(agent.pointed_text({"role": "edit", "name": "Search", "el": object()}),
+                             'edit "Search" = "####"')
+
+    def test_the_screenshot_rings_the_pointer(self):
+        import numpy as np
+        import vision
+        rgb = np.zeros((200, 300, 3), np.uint8)
+        ringed = vision.mark(rgb, 150, 100)
+        red = np.all(ringed == np.array(vision.POINTER_RING, np.uint8), -1)
+        ys, xs = np.nonzero(red)
+        self.assertAlmostEqual((xs.min() + xs.max()) / 2, 150, delta=1)  # round the pointer
+        self.assertAlmostEqual((ys.min() + ys.max()) / 2, 100, delta=1)
+        self.assertFalse(red[100, 150])  # a ring: what's under the pointer still shows
+        self.assertFalse(rgb.any())  # the picture it was given is untouched
+        self.assertTrue(np.array_equal(vision.mark(rgb, 999, 5), rgb))  # off the picture: as it was
+
+    def test_a_task_about_this_gets_the_ringed_screenshot_and_whats_there(self):
+        import agent
+        r = agent.Run(goal="what is this")
+        shot = SimpleNamespace(url="data:image/png;base64,AAAA", pointer=True, w=1280, h=800)
+        with mock.patch.object(agent.win, "cursor_pos", lambda: (640, 300)), \
+                mock.patch.object(agent.win, "ui_at", lambda x, y: {"role": "text", "name": "Context 73%"}), \
+                mock.patch.object(agent.vision, "capture", mock.Mock(return_value=shot)) as cap:
+            self.assertIs(agent.capture(r), shot)
+        cap.assert_called_once_with((640, 300))
+        self.assertEqual(r.pointed, 'text "Context 73%"')
+        obs = {"hwnd": 1, "exe": "claude.exe", "title": "Claude", "site": None, "items": [], "focus": None,
+               "full": True}
+        with mock.patch.object(agent.host, "lessons_for", lambda app: ""):
+            text = agent.messages(r, obs, shot)[1]["content"][0]["text"]
+        self.assertIn(agent.POINTER_NOTE, text)
+        self.assertIn("Context 73%", text)
+        other = agent.Run(goal="click the second video")  # not about the pointer: no ring
+        with mock.patch.object(agent.vision, "capture", mock.Mock(return_value=shot)) as cap:
+            agent.capture(other)
+        cap.assert_called_once_with()
+
+
 class Siri(unittest.TestCase):
     """Her side of it: the mode from Settings, "watch my screen" and the screen in what the model is told."""
 
@@ -273,6 +361,16 @@ class Siri(unittest.TestCase):
         self.saved["vision"] = False
         self.assertIn("turned off", siri.screen_command("watch my screen")["say"])
         self.assertNotIn("screen_watch", self.saved)
+
+    def test_what_is_this_goes_straight_to_a_look_at_the_screen(self):
+        """27 October, live: asked "what is this" with the pointer on one bar, she described the whole window from
+        its names, never having looked. Now it's a screen step, which rings the pointer (agent.capture)."""
+        with mock.patch.object(siri, "routines", lambda: []):
+            plan = quiet(siri.quick, "what is this")
+            self.assertEqual(plan["steps"], [{"do": "screen", "task": "what is this"}])
+            self.assertIsNone(quiet(siri.quick, "what is this", "cold"))  # from across the room: not this way
+            self.saved["vision"] = False
+            self.assertIsNone(quiet(siri.quick, "what is this"))  # Vision off: no look
 
     def test_never_from_across_the_room(self):
         with mock.patch.object(siri, "routines", lambda: []), mock.patch.object(siri, "screen_command") as cmd:

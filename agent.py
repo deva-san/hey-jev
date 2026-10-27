@@ -170,6 +170,13 @@ SNAP_CHARS = 2000  # of the window's controls written out for the model each rou
 DEICTIC = re.compile(r"\b(?:this|these|those|here|there|that one|first|second|third|last|top|bottom|"
                      r"(?:on|to|at) the (?:left|right))\b", re.I)
 POINTS = re.compile(DEICTIC.pattern + r"|\bscreen\b", re.I)
+# Asked about the thing under the mouse pointer: "what is this", "explain this", "what does it mean", "read that".
+# Then the screenshot has the pointer ringed (vision.mark) and the control under it is named (pointed_text): 27
+# October, live, the owner put the pointer on Claude's Context bar and asked "what is this", and nothing said which
+POINTING = re.compile(r"\b(?:what(?: is|'s| does)?|explain|read|summari[sz]e|translate|define|tell me about|means?|"
+                      r"is|why)\b.*\b(?:this|that|it|here)\b", re.I)
+POINTER_NOTE = ("A red ring on the screenshot marks where their mouse pointer is: \"this\" or \"it\" is most likely "
+                "what's under it. They can't see the ring, so never mention it: answer about the thing itself.")
 # Words for whichever one it is today ("the latest mail", "my unread ones", "the next video", "my new mail", "the one
 # that just came in", "today's"): a task with them isn't learned either, since she'd keep the one she opened this time
 # by its name and open that same one again, after a new mail came in: "open my new mail in Gmail" did. Not "a new"
@@ -510,6 +517,7 @@ class Run:
         self.rounds = self.stuck = self.moved = self.looks = 0
         self.full = self.look = self.acted = self.did_any = False  # see _rounds
         self.seen = self.shot = self.before_act = self.first = None  # what she saw last, and before she last acted
+        self.pointed = None  # what's under the mouse pointer, for "what is this?" (capture, pointed_text)
         self.hwnd = None  # the window she last acted in, where a check that a control's gone reads (_seen)
         self.finishing = None  # the reply that said it's done, its last step held for your yes
         self.task = self.looked = self.own_did = self.nudged = self.skipped = False  # see task and screen_off
@@ -2738,14 +2746,47 @@ def wants_shot(r, obs):
 
 def capture(r):
     """A screenshot of the screen in front for this round's model call: never kept, only sent. None if Windows
-    wouldn't give one (a lock screen, a UAC prompt), and she goes by the controls."""
+    wouldn't give one (a lock screen, a UAC prompt), and she goes by the controls. For "what is this?" (pointing) the
+    mouse pointer is ringed on it, and what's under it read (r.pointed)."""
+    pointer = None
+    if r.job is None and pointing(r):
+        try:
+            pointer = win.cursor_pos()
+            r.pointed = pointed_text(win.ui_at(*pointer))
+        except Exception as exc:  # the picture without the ring will do
+            print(f"  no pointer: {exc!r}")
     try:  # a job's own window, as it looks behind others too: never the screen you're using
-        shot = vision.of_window(r.pin) if r.job is not None else vision.capture()
+        shot = vision.of_window(r.pin) if r.job is not None else \
+            vision.capture(pointer) if pointer is not None else vision.capture()
     except Exception as exc:
         print(f"  no screenshot: {exc!r}")
         return None
     r.shots += 1
     return shot
+
+
+def pointing(r):
+    """True if the task asks about what's under the mouse pointer ("what is this", "explain that"): its words, or the
+    goal the planner wrote for them."""
+    return bool(POINTING.search(f"{r.words or ''} {r.goal or ''}"))
+
+
+def pointed_text(el):
+    """The control under the mouse pointer (winplatform.ui_at's), as a line for the model: its role, its name and
+    what's in it, codes and numbers masked (_masked), never a password or what's in a box for a code. None if
+    there's nothing to say of it."""
+    if not el or el.get("password"):
+        return None
+    name = _masked(" ".join(str(el.get("name") or "").split()))[:120]
+    value = ""
+    if el.get("el") is not None and not SECRET_FIELD.search(name):
+        try:
+            value = _masked(" ".join(str(win.ui_value(el["el"]) or "").split()))[:160]
+        except Exception:
+            value = ""
+    if not name and not value:
+        return None
+    return f"{el.get('role') or 'control'} \"{name}\"" + (f" = \"{value}\"" if value and value != name else "")
 
 
 def _sig(obs):
@@ -2815,6 +2856,8 @@ def messages(r, obs, shot, task=None):
         lines.append("That last go changed nothing on the screen: try another way, or if there isn't one, no steps "
                      "and say what's in the way.")
     lines.append(screen_text(obs, shot))
+    if shot is not None and getattr(shot, "pointer", False):  # "what is this?": the ringed pointer, and what's there
+        lines.append(POINTER_NOTE + (f"\nUnder it:\n{wrapped('screen', r.pointed)}" if r.pointed else ""))
     text = "\n".join(lines)
     content = [{"type": "text", "text": text}, {"type": "image_url", "image_url": {"url": shot.url}}] \
         if shot is not None else text

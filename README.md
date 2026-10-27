@@ -76,6 +76,8 @@ Every few minutes while the screen changes, and at once when something like an e
 
 She never reads password or payment pages (sign-in boxes, card forms, banking, PayPal, password managers: any window with a password box in it, or `agent.SENSITIVE`/`OFF_LIMITS` in its title or site), or private and incognito windows: she knows one's open, never what's in it, and never glances at it. Codes, card and phone numbers are masked before anything leaves the PC. What's on a screen is someone else's words: it's handed to the model as data, never orders, and a glance can only say something, never do anything.
 
+Point at something and ask: "what is this?", "explain this", "what does it mean?", "is this right?". While you're at the PC (the keyboard or mouse used in the last 20 seconds) with watching on, that's taken as said to her, her name or not, as on 27 October three of them said with the pointer on a bar were let go as talk to someone in the room. Your voice is still checked, so the TV can't ask it. It goes straight to a look at the screen: the screenshot has your mouse pointer ringed (only the model sees the ring), and what's under it is read too, so she answers about that, not the whole window.
+
 "Watch my screen" turns it on, "watch my screen quietly" keeps it watching without speaking up, and "stop watching my screen" turns it off, all by name. Settings > Vision has the same as "Watch it all the time" and "Speak up about it". With "Let her see the screen" off, she doesn't watch at all.
 
 ### Voice

@@ -1022,7 +1022,8 @@ def start_screen_watch(free):
         read=win.foreground, snapshot=lambda hwnd: win.ui_snapshot(hwnd, most=screen_watch.MOST_CONTROLS),
         site=win.window_site, idle=win.idle_seconds, shot=vision.capture, judge=screen_glance,
         announce=ANNOUNCE.put, free=free, mode=screen_mode, in_call=lambda: bool(win.call_apps()),
-        who=lambda: " ".join(str(settings.get("name") or "").split()) or "the user")
+        who=lambda: " ".join(str(settings.get("name") or "").split()) or "the user",
+        cursor=win.cursor_pos, at=win.ui_at)  # what's under the pointer, for "what is this?"
     SCREEN[:] = [watcher]
     threading.Thread(target=watcher.run, name="screen-watch", daemon=True).start()
     return watcher
@@ -3428,6 +3429,12 @@ def _quick(words, gate=False):
     if screen:
         print("  screen watch")
         return screen
+    # "what is this", "explain this": a look at the screen, the pointer ringed on it (agent.capture), not the model's
+    # guess from the window's names. 27 October, live: asked "what is this" with the pointer on one bar, she described
+    # the whole Claude window from its names, never having looked
+    if gate != "cold" and settings.get("vision") and screen_watch.POINTED.fullmatch(t):
+        print("  pointing at the screen")
+        return make_plan([{"do": "screen", "task": words}])
     # Without her name the model decides it was for her first: staging opens the chat with the words typed in
     # ("WhatsApp Mum: running late" from across the room), and an install sits through winget searches
     share = direct_share(words) if gate != "cold" else None
@@ -10334,6 +10341,13 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             window_from[0], window_strict[0] = None, False
             threading.Thread(target=win.chime, args=("wake",), daemon=True).start()
         else:
+            # "what is this", "explain this", said while you're at the PC with screen watching on: to her, name or
+            # no name (screen_watch.asked_of_screen). 27 October, live: three such, the pointer on Claude's Context
+            # bar, were let go as said to someone in the room. Your voice was checked above, so not the TV's
+            if what[2] == "cold" and screen_watch.asked_of_screen(plain(str(what[1])), screen_mode(),
+                                                                   win.idle_seconds):  # read only on a match
+                print("  (asked about the screen at the PC, so it's to her)")
+                what = (what[0], what[1], False)
             waiting = (PENDING["plan"] is not None and time.time() < PENDING["until"]) or asked_last()
             # said without her name: the decider's view, but never on what may be the answer to her own question
             judged = for_me(what[1], what[2]) if what[2] and not waiting else None
