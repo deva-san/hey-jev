@@ -1606,6 +1606,41 @@ def session_locked():
         wtsapi32.WTSFreeMemory(buf)
 
 
+class LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", UINT), ("dwTime", DWORD)]
+
+
+_sig(user32.GetLastInputInfo, [ctypes.POINTER(LASTINPUTINFO)])
+_sig(kernel32.GetTickCount, [], DWORD)
+
+
+def idle_seconds():
+    """Seconds since the last key or mouse input anywhere in this session (GetLastInputInfo): how a job in the
+    background knows you've stopped typing before it takes the screen (agent.screen). 0.0 if Windows won't say, so
+    it waits rather than go. Input she sends herself counts too, which only makes a job wait longer."""
+    info = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
+    if not user32.GetLastInputInfo(ctypes.byref(info)):
+        return 0.0
+    return ((kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000.0  # the tick count wraps after 49 days
+
+
+def window_of(hwnd):
+    """(hwnd, exe, title) of a window, as foreground() gives the one in front: a job's own window, read whether it's
+    in front or not. (None, "", "") once it's gone."""
+    if not hwnd or not user32.IsWindow(hwnd):
+        return None, "", ""
+    return hwnd, os.path.basename(window_exe(hwnd)).lower(), window_title(hwnd)
+
+
+def window_rect(hwnd):
+    """Where a window is, (left, top, right, bottom) in real pixels, or None: for a picture of it (vision.of_window)."""
+    r = RECT()
+    with _real_pixels():
+        if not hwnd or not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+            return None
+    return r.left, r.top, r.right, r.bottom
+
+
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"  # what starts when you sign in, also in Task Manager
 
 
@@ -2122,12 +2157,33 @@ def _pattern(el, pattern, interface):
         return None
 
 
-def ui_act(el, text=None, state=None, caret=False):
+NO_FOCUS_FREE = "That needs the screen: it has no way in but the keyboard or the mouse"
+
+
+def ui_focus_free(el, text=None, state=None):
+    """True if ui_act would do this to el by its own pattern alone, never the focus, a paste or the mouse: a switch
+    by Toggle, text by a Value it may write, a press by Invoke. A job in the background does only these on its own
+    window while yours is in front (agent.needs_screen): a list item or a tab with no Invoke, common in Chrome and
+    Settings, is clicked at its middle by the real mouse, which lands on whatever's on top there, and a box with no
+    writable Value is focused and pasted into, which Windows' foreground lock can leave as your window's paste."""
+    if state in ("on", "off"):
+        return True  # by Toggle, or refused if it has none: never a click
+    if text is not None:
+        value = _pattern(el, 10002, "IUIAutomationValuePattern")
+        try:
+            return value is not None and not value.CurrentIsReadOnly
+        except Exception:
+            return False
+    return _pattern(el, 10000, "IUIAutomationInvokePattern") is not None
+
+
+def ui_act(el, text=None, state=None, caret=False, focus_free=False):
     """Use a control as a person would, and say how: a switch turned "on" or "off" only if it isn't already
     ("already"); text put in by its Value pattern, else by focusing it and pasting, the clipboard put back after; else
     Invoked, the way its own keyboard shortcut would; else clicked in its middle. caret: the text is typed where the
     cursor is (a "type" step), never by the Value pattern, which puts it in place of everything in the box: a list in
-    Notepad, a draft or its signature in Gmail, and in an Edit its undo too."""
+    Notepad, a draft or its signature in Gmail, and in an Edit its undo too. focus_free: by a pattern only, for a job
+    in the background without the screen (ui_focus_free): RuntimeError rather than the focus and a paste, or a click."""
     if state in ("on", "off"):
         toggle = _pattern(el, 10015, "IUIAutomationTogglePattern")
         if toggle is None:
@@ -2141,6 +2197,8 @@ def ui_act(el, text=None, state=None, caret=False):
         if value is not None and not value.CurrentIsReadOnly:
             value.SetValue(str(text))
             return "set"
+        if focus_free:
+            raise RuntimeError(NO_FOCUS_FREE)
         el.SetFocus()
         kept = clipboard_snapshot()
         try:
@@ -2161,6 +2219,8 @@ def ui_act(el, text=None, state=None, caret=False):
                 raise
             print("  ui automation: Invoke timed out, taken as pressed")
         return "invoked"
+    if focus_free:
+        raise RuntimeError(NO_FOCUS_FREE)
     with _real_pixels():  # in the real pixels click uses: read outside, a screen scaled unlike the main one is off
         rect = el.CurrentBoundingRectangle
     click((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
@@ -2265,6 +2325,19 @@ def site_of(url):
 def browser_site():
     """The site in front, from the address bar of Chrome, Edge or Brave, as site_of has it. None for anything else."""
     hwnd, exe, _ = foreground()
+    if exe not in BROWSER_EXES:
+        return None
+    box = find_ui(OMNIBOX, "edit", hwnd=hwnd)
+    return site_of(ui_value(box)) if box is not None else None
+
+
+def window_site(hwnd, exe=None):
+    """The site a Chrome, Edge or Brave window shows, in front or behind others, from its own address bar, as site_of
+    has it: a job in the background reads its own window's (agent.site_in), never the one in front. None for another
+    program, or an address bar that couldn't be read."""
+    if not hwnd:
+        return None
+    exe = exe or os.path.basename(window_exe(hwnd)).lower()
     if exe not in BROWSER_EXES:
         return None
     box = find_ui(OMNIBOX, "edit", hwnd=hwnd)

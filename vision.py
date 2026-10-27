@@ -56,6 +56,15 @@ class Shot:
         return round(self.rect[0] + x * self.scale), round(self.rect[1] + y * self.scale)
 
 
+def of_window(hwnd):
+    """One window as it looks, behind others too (winplatform.window_image, PrintWindow), as a Shot: a job in the
+    background sees its own window this way, never what you have in front. Raises if Windows won't draw it."""
+    rgb, rect = win.window_image(hwnd), win.window_rect(hwnd)
+    if rgb is None or rect is None:
+        raise RuntimeError("that window couldn't be seen")
+    return Shot(rgb, (rect[0], rect[1], rect[0] + rgb.shape[1], rect[1] + rgb.shape[0]))
+
+
 def capture():
     """The window in front now, with what's open from it (winplatform.front_area), cut from the screen it's on, as a
     Shot. Not the whole screen: WhatsApp or your bank beside Settings went to the model with it, when only the window

@@ -1132,6 +1132,34 @@ class Automation(unittest.TestCase):
             self.assertEqual(self.win.ui_act(tab), "clicked")
         self.assertEqual((read, clicked), ([True], [(5, 10)]))
 
+    def test_a_job_without_the_screen_never_falls_back_to_the_mouse_or_a_paste(self):
+        """27 October: a job presses its own window behind yours by a pattern only (focus_free). A tab with no Invoke
+        is clicked at its middle by the real mouse, and a box with no Value it may write is focused and pasted into:
+        both land on whatever's in front, your window."""
+        invoke, value = Fake(done=[]), Fake(CurrentIsReadOnly=False, set=[])
+        invoke.Invoke, value.SetValue = lambda: invoke.done.append(1), value.set.append
+        tab, box = element("Display", 50019), element("Name", 50004, {10002: Fake(CurrentIsReadOnly=True)})
+        send, to = element("Send", 50000, {10000: invoke}), element("To", 50004, {10002: value})
+        self.assertEqual([self.win.ui_focus_free(tab), self.win.ui_focus_free(box, "Ravi"),
+                          self.win.ui_focus_free(send), self.win.ui_focus_free(to, "Ravi"),
+                          self.win.ui_focus_free(tab, state="on")], [False, False, True, True, True])
+        box.SetFocus = lambda: self.fail("focused")
+        with mock.patch.object(self.win, "click", lambda *a: self.fail("clicked")), \
+                mock.patch.object(self.win, "paste", lambda *a: self.fail("pasted")):
+            for el, text in ((tab, None), (box, "Ravi")):
+                with self.subTest(el.CurrentName), self.assertRaisesRegex(RuntimeError, "needs the screen"):
+                    self.win.ui_act(el, text, focus_free=True)
+            self.assertEqual(self.win.ui_act(to, "Ravi", focus_free=True), "set")
+            self.assertEqual(self.win.ui_act(send, focus_free=True), "invoked")
+        self.assertEqual((value.set, invoke.done), (["Ravi"], [1]))
+
+    def test_a_windows_own_site_is_read_from_its_own_address_bar(self):
+        """A job's window behind yours: its site from its own address bar, never the one in front."""
+        self.found([element(self.win.OMNIBOX, 50004, {10002: Fake(CurrentValue="https://www.phish.test/login")})])
+        self.assertEqual(self.win.window_site(7, "chrome.exe"), "phish.test")
+        self.assertIsNone(self.win.window_site(7, "notepad.exe"))
+        self.assertIsNone(self.win.window_site(None, "chrome.exe"))
+
     def test_whats_at_a_point_is_never_the_page_around_it(self):
         page, canvas = element("Mail - Example", 50030), element("", 50006)  # a picture on the page
         for el in (page, canvas):

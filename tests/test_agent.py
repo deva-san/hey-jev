@@ -134,7 +134,16 @@ class FakeApp:
         hits = self.find_all_ui(name, role)
         return hits[0] if hits and (len(hits) == 1 or not unique) else None
 
-    def ui_act(self, el, text=None, state=None, caret=False):
+    def ui_focus_free(self, el, text=None, state=None):  # no Invoke, or no Value it may write: a test's say
+        return not getattr(el, "falls_back", False)
+
+    def window_site(self, hwnd, exe=None):  # a window's own address bar, in front or not
+        w = next((w for w in self.windows.values() if w.hwnd == hwnd), None)
+        return w.site if w is not None and w.exe in winplatform.BROWSER_EXES else None
+
+    def ui_act(self, el, text=None, state=None, caret=False, focus_free=False):
+        if focus_free and getattr(el, "falls_back", False):  # as the real one: never the mouse or a paste then
+            raise RuntimeError(winplatform.NO_FOCUS_FREE)
         self.version += 1
         if state is not None:
             if el.state == state:
@@ -263,7 +272,8 @@ class Live(Home):
         self.app, self.said, self.shots, self.reviews, self.clock = FakeApp(), [], [], [], [0.0]
         for name in ("find_ui", "find_all_ui", "ui_act", "ui_info", "ui_value", "ui_toggle", "ui_snapshot",
                      "ui_focused", "ui_at", "ui_dialog_text", "ui_fields", "foreground", "browser_site", "window_at",
-                     "root_at", "owner_of", "window_exists", "foreground_exe", "click", "paste"):
+                     "root_at", "owner_of", "window_exists", "foreground_exe", "click", "paste", "ui_focus_free",
+                     "window_site"):
             self.patch(winplatform, name, getattr(self.app, name))
         for target, name, value in ((siri, "say", lambda line, notify: self.said.append(line)),
                                     (siri, "do_step", self.app.do_step), (siri, "press_keys", self.app.press_keys),

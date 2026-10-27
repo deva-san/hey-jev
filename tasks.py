@@ -24,8 +24,10 @@ from winplatform import APPDATA_DIR, CREATE_NO_WINDOW, POWERSHELL
 
 DB_PATH = os.path.join(APPDATA_DIR, "tasks.db")
 STATUSES = {"queued", "running", "waiting_approval", "completed", "failed", "cancelled"}
-KINDS = {"command", "reminder", "lookup", "research", "install", "code", "watch"}  # watch: see watchers.py
-CHANGES_PC = {"command", "install", "code"}  # never re-run by themselves after Jev stopped part-way: they ask again
+# watch: see watchers.py. agent: a job of several parts done in the background (27 October, siri.run_job), which may
+# work in apps, so it changes the PC as a command does
+KINDS = {"command", "reminder", "lookup", "research", "install", "code", "watch", "agent"}
+CHANGES_PC = {"command", "install", "code", "agent"}  # never re-run by themselves after Jev stopped part-way: asked again
 # Hermes Agent's cron rule (cron/jobs.py): a one-off job that comes due more than 2 minutes late, as after the PC was
 # off or asleep, doesn't run late by itself. One that changes the PC asks again; a reminder says when it was for
 LATE = 120.0
@@ -98,11 +100,18 @@ class Store:
                     updated REAL NOT NULL
                 )""")
                 con.execute("CREATE INDEX IF NOT EXISTS task_due ON tasks(status, due)")
+                # added on 27 October for a job's progress ("Part 2 of 4", "Using the screen"): a tasks.db from before
+                # gets the column here, nullable, so no row of it changes
+                if "progress" not in {row["name"] for row in con.execute("PRAGMA table_info(tasks)")}:
+                    con.execute("ALTER TABLE tasks ADD COLUMN progress TEXT")
             self._ready = True
 
     def recover(self):
-        """Recover work left running by a previous process. Call once, only from task_worker at app startup."""
+        """Recover work left running by a previous process. Call once, only from task_worker at app startup. Returns
+        the ids of those that changed the PC and wait on your yes again, which a job's are asked about (siri.ask_again,
+        keyed by a fresh hold, so only a yes to that question restarts it)."""
         self.init()
+        again = []
         with self._db() as con:
             # A command may have changed something before the app stopped. Never repeat it automatically: remove
             # its approval and ask again. Read-only lookups/reminders/research are safe to retry.
@@ -111,10 +120,16 @@ class Store:
                 if row["kind"] in CHANGES_PC:
                     payload = _json(row["payload"], {})
                     payload.pop("approved", None)
+                    # a job's held step was in memory, gone with it: approved now, it starts again. The question
+                    # it's asked again with gets a key of its own, as a held step's has (wait_for_approval)
+                    payload.pop("hold", None)
+                    if row["kind"] == "agent":
+                        payload["hold"] = os.urandom(6).hex()
+                    again.append(row["id"])
                     con.execute("UPDATE tasks SET payload=?, status='waiting_approval', error=?, started=NULL, "
                                 "updated=? WHERE id=?", (json.dumps(payload, ensure_ascii=False),
-                                f"Jev stopped while this {row['kind']} was running; approve it to retry", now,
-                                row["id"]))
+                                f"Jev stopped while this {'job' if row['kind'] == 'agent' else row['kind']} was "
+                                f"running; approve it to retry", now, row["id"]))
                 else:
                     con.execute("UPDATE tasks SET status='queued', started=NULL, updated=? WHERE id=?", (now, row["id"]))
             # A job that was asking about one of its steps when she stopped (ask) is gone with its question: the
@@ -130,6 +145,7 @@ class Store:
                                  now, row["id"]))
         ASKS.clear()
         WAKE.set()
+        return again
 
     @staticmethod
     def _row(row):
@@ -186,17 +202,22 @@ class Store:
             activity.finish(f"task:{int(task_id)}", "stopped")
         return bool(cur.rowcount)
 
-    def approve(self, task_id, ask=None):
-        """A yes to a task waiting on you: queued to run, or a running job's question answered. ask: the one question
-        a yes was said to (asking), so a yes heard for one command never answers the next one the job asks."""
+    def approve(self, task_id, hold=None):
+        """A yes to a task waiting on you, the one way every yes reaches a background job ("approve task 3", the Tasks
+        tab, the island, a spoken yes, the phone's buttons): a running coding job's question answered (ask), else the
+        task queued again, approved. hold: which question the yes was for. For a job asking (ask) it's that question's
+        own key (its answer's .ask, siri.job_ask), for an agent job's held step it's the step's id (wait_for_approval):
+        a yes to an old question of the job's, or to another job's, answers or releases nothing. None approves the
+        task as it waits, as "approve task 3" does."""
         self.init()
         task = self.get(task_id)
         if not task or task["status"] != "waiting_approval":
             return False
         if "asking" in task["payload"]:  # a running job's question (ask): answered, never the job queued twice
-            answer = asking(task_id, ask)
+            answer = asking(task_id, hold)
             return bool(answer is not None and answer(True))
-        if ask is not None:  # a yes to a job's question that's gone: never the whole job's yes instead
+        # a yes to a step or question that's gone (its key no longer the one waiting): never the whole job's yes instead
+        if hold is not None and str((task["payload"] or {}).get("hold") or "") != str(hold):
             return False
         payload = dict(task["payload"])
         payload["approved"] = True
@@ -231,11 +252,32 @@ class Store:
         finally:
             con.close()
 
-    def wait_for_approval(self, task_id, reason):
+    def wait_for_approval(self, task_id, reason, hold=None):
+        """A running task waits on your yes. hold: the id of the step a job held (agent.JOB_HELD), kept in its
+        payload so only a yes to that step approves it (approve), and any approval it had is used up: one yes, one
+        action."""
+        self.init()
+        if hold is None:
+            with self._db() as con:
+                con.execute("UPDATE tasks SET status='waiting_approval', error=?, started=NULL, updated=? WHERE id=? "
+                            "AND status='running'", (str(reason)[:500], time.time(), int(task_id)))
+            return
+        payload = dict((self.get(task_id) or {}).get("payload") or {})
+        payload.pop("approved", None)
+        payload["hold"] = str(hold)
+        with self._db() as con:
+            con.execute("UPDATE tasks SET status='waiting_approval', error=?, payload=?, started=NULL, updated=? "
+                        "WHERE id=? AND status='running'",
+                        (str(reason)[:500], json.dumps(payload, ensure_ascii=False), time.time(), int(task_id)))
+
+    def update_progress(self, task_id, text):
+        """How far a running job has got, for the Tasks tab ("Part 2 of 4", "Using the screen"): only while it runs,
+        so a late word from one that finished or was cancelled meanwhile changes nothing. True if it was kept."""
         self.init()
         with self._db() as con:
-            con.execute("UPDATE tasks SET status='waiting_approval', error=?, started=NULL, updated=? WHERE id=? AND "
-                        "status='running'", (str(reason)[:500], time.time(), int(task_id)))
+            cur = con.execute("UPDATE tasks SET progress=?, updated=? WHERE id=? AND status='running'",
+                              (str(text or "")[:200], time.time(), int(task_id)))
+        return bool(cur.rowcount)
 
     def ask(self, task_id, question, answer):
         """A running job asks about one of its own steps, as a coding job does before a command that needs your yes
