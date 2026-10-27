@@ -27,6 +27,9 @@ class Routing(unittest.TestCase):
         for patch in (
                 mock.patch.object(siri.win, "loaded_start_apps", lambda: []),
                 mock.patch.object(siri, "focused_on", lambda app: False),
+                # nothing in front for shortcut_plan either: with the real Notepad in front, "type the date" was its
+                # F5, which inserts the date (27 October, after a live run left Notepad up)
+                mock.patch.object(siri.win, "foreground_exe", lambda *a, **k: ""),
                 mock.patch.object(siri, "youtube_title", lambda: ""),
                 mock.patch.object(siri, "LAST_QUERY", [""]),
                 mock.patch.object(siri, "routines", lambda: []),
