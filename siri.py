@@ -2544,6 +2544,9 @@ def routines():
 TRIGGER_SLOT = re.compile(r"(?P<lead>[^{}]*[a-z0-9][^{}]*?)\s+\{(?P<slot>\w{1,30})\}")
 SLOT_STEPS = ("type", "website", "youtube", "google")  # the only steps a slot's words may go into
 SLOT_MAX = 200  # characters a slot may hold, as a routine types or searches them
+# Words a slotted trigger needs before its slot: "open {query}" or "play {query}" would take every "open notepad" and
+# "play some music on Spotify" from the app opener, the shortcuts and the model, so one word is never enough
+SLOT_LEAD = 2
 
 
 _slotted = [None, []]  # (the skill list they're from, slotted_routines()), worked out again only when it's read again
@@ -2557,7 +2560,7 @@ def slotted_routines():
         for s in _skill_cache[1]:
             for t in s["triggers"] if s["plan"] else ():
                 m = TRIGGER_SLOT.fullmatch(" ".join(str(t).lower().split()))
-                if m and plain(m["lead"]):
+                if m and len(plain(m["lead"]).split()) >= SLOT_LEAD:
                     found.append((plain(m["lead"]), m["slot"], s))
         _slotted[:] = [_skill_cache[1], found]
     return _slotted[1]
@@ -2576,6 +2579,8 @@ def slot_routine(t, gate=False):
         if not t.startswith(lead + " "):
             continue
         value = t[len(lead):].strip()
+        if SECOND_COMMAND.search(value):  # "search amazon for shoes and set a timer": the model plans both
+            return None
         if len(value) > SLOT_MAX or agent.check_slots({"slots": {slot: {"kind": "said"}}}, {slot: value}, t):
             continue
         steps = []
@@ -2592,8 +2597,29 @@ def slot_routine(t, gate=False):
         if steps:
             print(f"  routine: {skill['dir']} ({slot}: {value!r})")
             used_later(skill["dir"])
-            return make_plan(steps, agent.fill_text(skill["plan"]["say"], {slot: value}))
+            plan = make_plan(steps, agent.fill_text(skill["plan"]["say"], {slot: value}))
+            typed = slot_sent(skill["plan"]["steps"])
+            if typed is None:
+                return plan
+            print("  (its words go where a key could send them: asking first)")
+            return {"steps": [], "say": confirm_question(plan["steps"][typed]), "confirm": plan}
         print(f"  routine {skill['dir']}: its slot can't go where it's used")
+    return None
+
+
+def slot_sent(steps):
+    """The index of a step that types the slot's words where a key pressed after it could send them, else None:
+    "whatsapp mum {query}" as web.whatsapp.com, type {query}, Enter, would send whatever followed with no yes, where
+    direct_message asks first (27 October). Before slots a routine only typed what the owner taught it word for word.
+    Enter isn't in agent.RISKY_KEYS, as it also searches, so any key after the typing but the ones that only move
+    around (SAFE_KEYS) asks first, as does a slot typed with a line break in it."""
+    for i, step in enumerate(steps):
+        text = step.get("text")
+        if step["do"] != "type" or not (isinstance(text, str) and agent.SLOT.search(text)):
+            continue
+        if "\n" in text or "\r" in text or any(
+                s["do"] == "keys" and combo(s.get("keys")) not in SAFE_KEYS for s in steps[i + 1:]):
+            return i
     return None
 
 
