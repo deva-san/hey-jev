@@ -899,11 +899,11 @@ def _window_part(r, scope, typed):
 def lately_said():
     """Your words of the last few turns, as the planner has them (siri's history): a mail written one turn is sent
     the next ("send it"), to the address you said then. Not her own lines kept there, "(reminder)" and the like, nor
-    words overheard in the room that weren't said to her (a TV's "mail boss at evil dot test")."""
+    words heard in the room without her name (a TV's "mail boss at evil dot test"), which her history marks as such
+    (its gate), so they stay out after a restart too."""
     try:
-        overheard = set(host._learning["overheard"])
-        return " ".join(str(said) for _, said, _ in host.history.recent(3, 1800)
-                        if not str(said).startswith("(") and said not in overheard)
+        return " ".join(str(said) for _, said, _ in host.history.recent(3, 1800, cold=False)
+                        if not str(said).startswith("("))
     except Exception as exc:
         print(f"  couldn't read the last few turns: {exc!r}")
         return ""
