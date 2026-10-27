@@ -1,5 +1,5 @@
 """The island's plugins, the way MaterialYou Dynamic Island (github.com/Angel-Studio/MaterialYou-Dynamic-Island)
-has them: what she's working on, live, with Stop, Approve and Deny; a popup when a notification comes in, from the
+has them: what she's working on, live, with Stop and Deny; a popup when a notification comes in, from the
 apps you pick; what's playing, with its controls; the battery when you plug in or it runs low; and a running timer
 counting down. Each can be turned on and off, and has its own options, in the Island tab.
 
@@ -522,7 +522,6 @@ class Tasks(Plugin):
                    "the background, with Stop. Point at it for the list.")
     every = 0.5
     priority = 30  # over a timer and the music: it may be waiting on you
-    options = (("approve", "Approve from the island too (the pointer rests on it a moment first)", True),)
 
     def start(self):
         self.data, self.states = None, {}
@@ -554,9 +553,9 @@ class Tasks(Plugin):
         press = {"key": item["key"], "needs": item["needs"]}
         buttons = []
         if state == "waiting_yes" and item["needs"] and item["answers"]:
+            # no Approve here: the owner wants a yes said or tapped on the phone, so the island can only say no or
+            # stop (27 October)
             buttons.append({"name": "deny", "label": "Deny", "data": press})
-            if self.option("approve"):
-                buttons.append({"name": "approve", "label": "Approve", "data": press, "careful": True})
         elif state in ("running", "queued") and item["stops"]:
             buttons.append({"name": "stop", "label": "Stop", "data": press})
         progress = 1.0 if state == "done" else max(0.0, min(1.0, (step - 1) / total)) \
@@ -567,10 +566,9 @@ class Tasks(Plugin):
                 "progress": progress, "buttons": buttons}
 
     def command(self, what, data=None):
-        """Stop, Approve or Deny on a row (activity.press), on a thread of its own: a background task's goes through
+        """Stop or Deny on a row (activity.press), on a thread of its own: a background task's goes through
         tasks.db, and her question's through siri's controls loop."""
-        if what not in ("stop", "approve", "deny") or not isinstance(data, dict) or \
-                (what == "approve" and not self.option("approve")):
+        if what not in ("stop", "deny") or not isinstance(data, dict):  # never Approve, even an old card's button
             return
         threading.Thread(target=activity.press, args=(data.get("key"), what, data.get("needs", "")),
                          name="island-press", daemon=True).start()

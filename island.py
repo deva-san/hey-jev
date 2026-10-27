@@ -3,13 +3,13 @@ blink, look about and react, the app you're in and dots that move with your voic
 you're saying in a bar underneath, with the fillers and the words you put right struck out as you dictate.
 
 Its plugins (island_plugins.py, from MaterialYou Dynamic Island) use it when she isn't busy: what she's working on
-stays live, step by step, and opens into a card with Stop, Approve and Deny when you point at it (or click it to
+stays live, step by step, and opens into a card with Stop and Deny when you point at it (or click it to
 keep it open); a notification pops up from the apps you pick, what's playing shows with its cover and its controls
 when you point at it, the battery when you plug in or it runs low, and a running timer counts down. Light, dark and
 AMOLED (pure black) themes, its place, size and corners, and the plugins are all in the Island tab.
 
 It's one layered window drawn with numpy, like bubble.Island: clicks go through it except while you point at its
-buttons, it never takes the focus, and it's left out of her screenshots, so the model never sees Approve. Between
+buttons, it never takes the focus, and it's left out of her screenshots, so the model never sees its buttons. Between
 blinks nothing is drawn, and a long job moves once a second.
 """
 import ctypes

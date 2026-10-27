@@ -1,6 +1,6 @@
 """Her island (island.py): what dictation strikes out, her eyes, the plugins' rules, which scene shows, the drawing
 shortcuts that must give the same picture as the long way round, and what she's working on: the Tasks plugin, read
-from memory only, its card with Stop, Approve and Deny, and the guards on Approve."""
+from memory only, its card with Stop and Deny, and the guards on a careful button."""
 import contextlib
 import io
 import os
@@ -441,18 +441,17 @@ class TasksPlugin(unittest.TestCase):
         d = act.data
         self.assertEqual((len(d["rows"]), d["more"], d["short"], d["badge"]), (3, 2, "5 tasks", 4))
         ask, first, second = d["rows"]
-        self.assertEqual([(b["name"], b.get("careful", False)) for b in ask["buttons"]],
-                         [("deny", False), ("approve", True)])
-        self.assertEqual((ask["status"], ask["buttons"][1]["data"]), ("Needs you", {"key": "ask", "needs": "q1"}))
+        self.assertEqual([b["name"] for b in ask["buttons"]], ["deny"])  # a yes is said or tapped on the phone
+        self.assertEqual((ask["status"], ask["buttons"][0]["data"]), ("Needs you", {"key": "ask", "needs": "q1"}))
         self.assertEqual((first["status"], first["progress"], [b["name"] for b in first["buttons"]]),
                          ("2/6", 1 / 6, ["stop"]))
         self.assertEqual((second["status"], second["progress"]), ("", None))  # how far isn't known: a clock counts
         self.assertIsNotNone(second["since"])
 
-    def test_with_approve_off_in_the_island_tab_only_deny(self):
+    def test_the_island_never_approves_even_from_an_old_cards_button(self):
+        """27 October: the owner wants Deny and Stop on the island, and a yes only by voice or on the phone."""
         activity.publish("ask", title="Send the message?", state="waiting_yes", needs="q1", answer=lambda yes: True)
-        with mock.patch.dict(settings._load(), {"island_plugin_options": {"tasks": {"approve": False}}}), \
-                mock.patch.object(plugins.threading, "Thread") as thread:
+        with mock.patch.object(plugins.threading, "Thread") as thread:
             self.plugin.poll(time.time())
             self.plugin.command("approve", {"key": "ask", "needs": "q1"})  # an old card's button
         self.assertEqual([b["name"] for b in self.posted()[-1][2].data["rows"][0]["buttons"]], ["deny"])
