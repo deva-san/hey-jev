@@ -32,6 +32,11 @@ DEFAULTS = {
     "paraphrase_routines": "shadow",
     "voice": "",  # her Fish Audio voice, an ID from VOICES or a pasted fish.audio link. Empty: the first in VOICES
     "vision": True,  # she may look at the screen when you ask about it, see siri.see()
+    # her eyes on the screen all the time (screen_watch, 27 October 2026, the owner's ask): she reads the window in
+    # front on this PC so your questions come with what's on it, and with commentary on, glances at it now and then
+    # and speaks up when something there needs you. Never password or payment pages, or private windows
+    "screen_watch": True,
+    "screen_commentary": True,
     "heads_ups": True,  # she mentions what needs you: messages, a low battery, a nearly full drive, see watch.py
     "notifications": True,  # she may read Windows' notifications, for heads-ups and "any new messages?"
     # a background task's progress on your phone (siri.progress_to): "asked", only for those asked from the phone, or

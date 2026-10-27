@@ -1421,11 +1421,20 @@ class AssistantWindow:
             self.voice_menu.bind(event, lambda e: self.voice_changed())
 
         row(9, "Vision", "When you ask about the screen, or for something she has to see like \u201cclick the "
-                         "second video\u201d, she looks at a screenshot of it and acts on it. Never otherwise.")
+                         "second video\u201d, she looks at a screenshot of it and acts on it. Watching, she also reads "
+                         "the window in front on this PC all the time, so your questions come with what\u2019s on it, "
+                         "and speaking up, she glances at it now and then and tells you when something there needs "
+                         "you. Never password or payment pages, or private windows.")
+        eyes = tk.Frame(form, bg=BG)
+        eyes.grid(row=18, column=1, rowspan=2, sticky="e")
         self.vision_var = tk.BooleanVar(value=bool(settings.get("vision")))
-        ttk.Checkbutton(form, text="Let her see the screen", variable=self.vision_var,
-                        command=lambda: settings.put("vision", self.vision_var.get())).grid(row=18, column=1,
-                                                                                            rowspan=2, sticky="e")
+        ttk.Checkbutton(eyes, text="Let her see the screen", variable=self.vision_var,
+                        command=lambda: settings.put("vision", self.vision_var.get())).pack(anchor="e")
+        for key, text in (("screen_watch", "Watch it all the time"), ("screen_commentary", "Speak up about it")):
+            var = tk.BooleanVar(value=bool(settings.get(key)))
+            setattr(self, f"{key}_var", var)
+            ttk.Checkbutton(eyes, text=text, variable=var, command=lambda k=key, v=var: settings.put(k, v.get())
+                            ).pack(anchor="e")
         self.switches = {}
         for r, (key, title, sub, text) in enumerate((
                 ("no_name", "Without her name", "No \u201cHey Jev\u201d needed: she listens all the time, and the "

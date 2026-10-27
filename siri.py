@@ -10,6 +10,7 @@ import numpy as np, psutil, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
 import activity, agent, coder, decider, fast_intent, filesearch, hermes_memory, history, installer, messaging, opencode, outcomes, pocket, settings, shortcuts, telegram_bot, todo, speech, sysinfo, tasks as tasking, vision, voiceid, watch, watchers, web, winplatform as win
 import toolbox
+import screen_watch
 from hermes_memory import curator, daemon_pool, hermes_bits, skills, voice_bits
 from hermes_memory.threat_patterns import INVISIBLE_CHARS, first_threat_message
 from secrets_store import get_secret, missing_secrets
@@ -963,6 +964,68 @@ def watch_look(rgb, w):
         why = ""
     print(f"  looked at {w['name']}: {state} ({why})")
     return (state if state in ("done", "working", "waiting", "failed") else "working"), why
+
+
+SCREEN = []  # the screen watcher (screen_watch.Watcher) once she's started: what's on your screen, for context()
+# Said to switch it, whole (fullmatch, after plain()): never "look at my screen" or "see my screen", which ask for one
+# look now (wants_view) and are answered from a screenshot as before
+ASK_ = r"(?:(?:please|can you|could you|will you|would you) )?"
+_PLEASE = r"(?: please)?"
+SCREEN_ON = re.compile(ASK_ + r"(?:(?:always|keep) )?(?:watch|watching|monitor|monitoring|keep an eye on) (?:my|the) "
+                       r"screen(?: (?:all the time|always|for me|from now on))?" + _PLEASE)
+SCREEN_OFF = re.compile(ASK_ + r"(?:stop|don't|do not|quit) (?:watching|monitoring|keeping an eye on) (?:my|the) "
+                        r"screen" + _PLEASE + r"|stop screen (?:watching|monitoring)")
+SCREEN_QUIET = re.compile(ASK_ + r"(?:watch|monitor) (?:my|the) screen (?:quietly|without (?:talking|speaking up))"
+                          + _PLEASE + r"|(?:stop|don't|do not) (?:commenting|speaking up|talking) (?:on|about) "
+                          r"(?:my|the) screen")
+
+
+def screen_mode():
+    """How she watches your screen (screen_watch): "off", "quiet" (she knows what's on it for your questions) or
+    "live" (and speaks up when something there needs you). Never more than Vision allows: with it off, nothing."""
+    if not settings.get("vision") or not settings.get("screen_watch"):
+        return "off"
+    return "live" if settings.get("screen_commentary") else "quiet"
+
+
+def screen_command(t):
+    """"Watch my screen", "stop watching my screen", "watch my screen quietly": switched there and then, and said
+    back. None for anything else. 27 October: the owner asked for her to see the screen always, and to speak up."""
+    if SCREEN_OFF.fullmatch(t):
+        settings.put("screen_watch", False)
+        return make_plan([], "Okay, I've stopped watching your screen.")
+    if SCREEN_QUIET.fullmatch(t):
+        settings.put("screen_watch", True)
+        settings.put("screen_commentary", False)
+        return make_plan([], "Okay, I'll keep an eye on your screen, but only say something when you ask.")
+    if SCREEN_ON.fullmatch(t):
+        if not settings.get("vision"):
+            return make_plan([], "Looking at the screen is turned off in Settings, under Vision.")
+        settings.put("screen_watch", True)
+        settings.put("screen_commentary", True)
+        return make_plan([], "Okay, I'm watching your screen, and I'll tell you if something there needs you. "
+                             "Never password or payment pages, or private windows.")
+    return None
+
+
+def screen_glance(messages):
+    """The model that sees pictures (BACKUP_MODEL), for a glance at the screen (screen_watch.Watcher.glance): its
+    reply, as watch_look asks it. Raises when it doesn't answer."""
+    raw, _, _ = opencode.chat(OC_KEY, messages, max_tokens=80, timeout=30, model=BACKUP_MODEL)
+    return raw
+
+
+def start_screen_watch(free):
+    """Her eyes on the screen, on a thread of their own (screen_watch): free says when she's between turns, as a
+    glance never takes the model from a turn and is said only once she's free (ANNOUNCE)."""
+    watcher = screen_watch.Watcher(
+        read=win.foreground, snapshot=lambda hwnd: win.ui_snapshot(hwnd, most=screen_watch.MOST_CONTROLS),
+        site=win.window_site, idle=win.idle_seconds, shot=vision.capture, judge=screen_glance,
+        announce=ANNOUNCE.put, free=free, mode=screen_mode, in_call=lambda: bool(win.call_apps()),
+        who=lambda: " ".join(str(settings.get("name") or "").split()) or "the user")
+    SCREEN[:] = [watcher]
+    threading.Thread(target=watcher.run, name="screen-watch", daemon=True).start()
+    return watcher
 
 
 def watch_words(w):
@@ -3360,6 +3423,11 @@ def _quick(words, gate=False):
     if watching:
         print("  local watch")
         return watching
+    # "watch my screen", "stop watching my screen": switched at once, by name, never from across the room
+    screen = screen_command(t) if gate != "cold" else None
+    if screen:
+        print("  screen watch")
+        return screen
     # Without her name the model decides it was for her first: staging opens the chat with the words typed in
     # ("WhatsApp Mum: running late" from across the room), and an install sits through winget searches
     share = direct_share(words) if gate != "cold" else None
@@ -5089,6 +5157,8 @@ def context():
                      f"would, not in every reply.")
     if not settings.get("vision"):
         lines.append("They've turned off looking at the screen in Settings, so never use screen: say it's off there.")
+    if SCREEN:  # what's on the screen and where they've been lately, read on this PC (screen_watch)
+        lines += SCREEN[0].lines()
     try:
         session = win.media_session()
         title = win.media_title(session) if session else ""
@@ -10971,6 +11041,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
     threading.Thread(target=summarize_days, daemon=True).start()
     threading.Thread(target=look_around, daemon=True).start()
     threading.Thread(target=heads_ups, daemon=True).start()
+    start_screen_watch(lambda: not busy.locked())  # her eyes on the screen, between turns (screen_watch)
     threading.Thread(target=keep_warm, daemon=True).start()
     watch_return(lambda since: welcome(True, since))
     threading.Thread(target=listen_loop, daemon=True).start()
