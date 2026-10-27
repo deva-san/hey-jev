@@ -530,9 +530,15 @@ class Tasks(Plugin):
     def poll(self, now):
         items = activity.snapshot(now)
         rows = [self.row(item) for item in items]
+        # her turn's own row (run_plan's step i of n, a task in an app round by round) while it runs: her face is up
+        # all that time and covered it, so its round and its Stop were never seen (27 October, review). The island
+        # shows how far it's got beside her dots and opens the card over her face while you point at it; first in it
+        turn = next((r for r in rows if r["key"].startswith("turn:") and r["state"] == "running"), None)
+        rows.sort(key=lambda r: r is not turn)
         background = sum(item["origin"] == "task" and item["state"] not in activity.OVER for item in items)
         data = {"rows": rows[:CARD_ROWS], "more": max(0, len(rows) - CARD_ROWS),
-                "short": f"{len(rows)} tasks" if len(rows) > 1 else None, "badge": background}
+                "short": f"{len(rows)} tasks" if len(rows) > 1 else None, "badge": background + (turn is not None),
+                "turn": turn}
         states = {item["key"]: item["state"] for item in items}
         came = {state for key, state in states.items() if self.states.get(key) != state}
         self.states = states

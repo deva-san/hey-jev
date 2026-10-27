@@ -326,10 +326,37 @@ class Cards(unittest.TestCase):
                      lives={"tasks": busy})
         isl._front_icon = lambda size: None
         lay = isl._jev()
-        self.assertEqual(lay.key[-1], 1)
+        self.assertEqual(lay.key[3], 1)
         drawn(lay)
         isl.lives = {}
-        self.assertEqual(isl._jev().key[-1], 0)
+        self.assertEqual(isl._jev().key[3], 0)
+
+    def test_her_turns_own_work_shows_live_over_her_face(self):
+        """27 October, review: her face is up for her whole turn, so run_plan's "step 2 of 5" and a task in an app's
+        "Round 5 of 30", with their Stop, were only ever seen as done for 3 s after it. Now how far it's got shows
+        beside her dots, it counts in the badge, and pointing at her opens the card with Stop."""
+        stop = {"name": "stop", "label": "Stop", "data": {"key": "turn:1", "needs": ""}}
+        row = {"key": "turn:1", "title": "Night light on", "state": "running", "status": "5/30", "progress": 4 / 30,
+               "buttons": [stop], "lines": ["Round 5 of 30, clicked"]}
+        act = plugins.Activity("tasks", "card", {"rows": [row], "more": 0, "short": None, "badge": 1, "turn": row},
+                               live=True)
+        isl = fonted(self, jev={"state": "doing", "text": "Turning on night light"}, you="", since=time.time(),
+                     level=0.0, lives={"tasks": act})
+        isl._front_icon = lambda size: None
+        self.assertEqual(isl._scene(time.time()), ("jev",))
+        face_ = isl._make(("jev",), time.time())
+        self.assertEqual((face_.kind, face_.key[3], face_.key[4]), ("jev", 1, ("5/30", 4 / 30)))
+        drawn(face_)
+        isl.hover = True
+        card = isl._make(("jev",), time.time())
+        self.assertIn(card.kind, island.CLICKABLE)
+        self.assertEqual(card.press["b0"], ("tasks", "stop", {"key": "turn:1", "needs": ""}, False))
+        drawn(card)
+        row["buttons"] = []  # one that can't be stopped (a phone turn's): her face stays, pointed at or not
+        self.assertEqual(isl._make(("jev",), time.time()).kind, "jev")
+        isl.hover, isl.pinned = False, "tasks"  # nor does a card pinned before her turn cover her face
+        row["buttons"] = [stop]
+        self.assertEqual(isl._make(("jev",), time.time()).kind, "jev")
 
 
 class Clicks(unittest.TestCase):
@@ -452,6 +479,22 @@ class TasksPlugin(unittest.TestCase):
             self.plugin.poll(time.time())
             sad = self.posted()[-1][2].mood
         self.assertEqual((happy, sad), ("happy", "sad"))
+
+    def test_her_turns_row_goes_first_and_counts_in_the_badge(self):
+        """Her turn's own row, step by step, is what the island shows over her face (DynamicIsland._turn): first in
+        the card even behind three others, and in the badge on her face, which before counted only the background."""
+        for i in range(3):
+            activity.publish(f"task:{i}", title=f"Job {i}", origin="task", stop=lambda: True)
+        activity.publish("turn:1", title="Night light on", kind="turn", total=30, origin="voice", stop=lambda: True)
+        activity.step(5, 30, "Round 5 of 30, clicked", key="turn:1")
+        self.plugin.poll(time.time())
+        d = self.posted()[-1][2].data
+        self.assertEqual((d["turn"]["key"], d["rows"][0]["key"], d["badge"], d["more"]), ("turn:1", "turn:1", 4, 1))
+        self.assertEqual((d["turn"]["status"], [b["name"] for b in d["turn"]["buttons"]]), ("5/30", ["stop"]))
+        activity.finish("turn:1", "done")
+        self.plugin.poll(time.time())
+        d = self.posted()[-1][2].data
+        self.assertEqual((d["turn"], d["badge"]), (None, 3))  # done: its tick shows in the card, not over her face
 
     def test_it_reads_memory_never_tasks_db(self):
         """Its poll reads activity.snapshot(), and a press goes to a thread of its own: Deny on a task waiting here

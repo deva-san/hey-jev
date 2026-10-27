@@ -8836,15 +8836,22 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
 
     def island_tap(yes, ask):
         """Approve or Deny on the island (island_answer): a turn of hers like any other, under busy, so it never
-        overlaps one you're having with her."""
+        overlaps one you're having with her. Ended in the audio as run_turn ends one: she says "Sent." with the mic
+        listening, so her line's start is marked, and unmarked the always-listening loop parked all you said after,
+        "Hey Jev" too, as said over her until a timer or a heads-up marked one (27 October, review). "okay, and ..."
+        right after carries on, strictly, as after a timer (CARRY): a tap isn't a question back."""
         with busy:
             HER.begin()
+            shown[0] = None  # the turn sets the window's text from here
             try:
                 island_answer(yes, ask, notify)
             except Exception as exc:
                 print(f"\n  island tap failed: {exc!r}")
                 emit(notify, "Something went wrong", str(exc))
             finally:
+                if rec.marking:
+                    next_window[0], window_ask[0] = 0.0, None
+                    rec.ask(CARRY if rec.wake and not rec.dictating else 0.0, True)
                 HER.end()
 
     job_asks = {}  # a coding job's question on the phone: [answered, the answer]

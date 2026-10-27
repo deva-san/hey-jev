@@ -423,7 +423,10 @@ class DynamicIsland:
     def _make(self, scene, now):
         if scene is None:
             return None
-        if scene[0] == "jev":
+        if scene[0] == "jev":  # pointing at her face while her turn's own row can be stopped: its card, with Stop.
+            act, turn = self._turn()  # only while you point: a card pinned earlier never covers her face for a turn
+            if turn and turn.get("buttons") and self.hover:
+                return self._card(act)
             return self._jev()
         if scene[0] == "idle":
             return self._idle()
@@ -467,6 +470,12 @@ class DynamicIsland:
             self.texts[key] = Text(px, weight)
         return self.texts[key]
 
+    def _turn(self):
+        """(the Tasks card, her turn's own row in it) while one runs (island_plugins.Tasks), else (None, None)."""
+        act = self.lives.get("tasks")
+        turn = act.data.get("turn") if act is not None and isinstance(act.data, dict) else None
+        return (act, turn) if turn else (None, None)
+
     def _jev(self):
         k, th = self.k, self.theme()
         state, text = self.jev["state"], self.jev["text"]
@@ -474,7 +483,8 @@ class DynamicIsland:
         colour = colour or th["muted" if state == "note" else "text"]
         cap = self._caption(state, text, bars)
         badge = sum(int(a.data.get("badge") or 0) for a in self.lives.values() if isinstance(a.data, dict))
-        key = ("jev", state, self.face_style, badge)
+        turn = self._turn()[1]  # how far her turn's got (step 3/5, round 5/30), beside her dots
+        key = ("jev", state, self.face_style, badge, turn and (turn.get("status"), turn.get("progress")))
         if self.face_style == "wave":
             W, H = self.WAVE[0] * k, self.WAVE[1] * k
             kind_, source, tint, _ = LOOKS.get(state, LOOKS["listening"])
@@ -499,6 +509,7 @@ class DynamicIsland:
         size = self.EYES * k
         icon = self._front_icon(round(17 * k))
         n, step, r = 5, 8.6 * k, 2.4 * k
+        gr = 5.5 * k  # the turn's ring, after a gap
 
         src = "mic" if state in MIC_STATES else "voice" if state == "speaking" else None
 
@@ -509,7 +520,7 @@ class DynamicIsland:
                            th["eyes"], th["glow"], a)
             row_y = oy + Hn * 0.77
             iw = icon.shape[1] if icon is not None else 0
-            row_w = iw + (9 * k if iw else 0) + (n - 1) * step + 2 * r
+            row_w = iw + (9 * k if iw else 0) + (n - 1) * step + 2 * r + (8 * k + 2 * gr if turn else 0)
             x = ox + Wn / 2 - row_w / 2
             if icon is not None:
                 cv.image(icon, x, row_y - icon.shape[0] / 2, a)
@@ -522,7 +533,9 @@ class DynamicIsland:
                 dots_mode = "voice" if mode in ("voice", "her") else "busy" if mode == "busy" else "still"
                 face.dots_row(cv, x + r, row_y, n, step, r, colour, self.level if mode in ("voice", "her") else 0.0,
                               t, dots_mode if dots_mode != "still" else "voice", a * (0.75 if mode == "still" else 1))
-            if badge:  # how many tasks go on in the background meanwhile, in the corner
+            if turn:
+                self._glyph(cv, x + (n - 1) * step + 2 * r + 8 * k + gr, row_y, gr, turn, now, a)
+            if badge:  # how many go on meanwhile, her turn's row too, in the corner: point at her for the card
                 self._badge(cv, ox + Wn - 13 * k, oy + 13 * k, badge, a)
         return Layout(key, "jev", W, H, draw, cap=cap, eyes=expr, animated=state not in ("error", "note", "phone"),
                       wander=False)
