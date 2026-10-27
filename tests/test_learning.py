@@ -374,7 +374,8 @@ class Corrections(unittest.TestCase):
             def start(self):
                 pass
         with mock.patch.object(siri.threading, "Thread", Thread), \
-                mock.patch.dict(siri.settings._load(), {"learning": True}):
+                mock.patch.dict(siri.settings._load(), {"learning": True}), \
+                mock.patch.dict(siri._learning, since_memory=0):  # no memory review due (MEMORY_NUDGE)
             siri._learning["last"] = time.time()  # a review a moment ago: a correction still goes now
             siri.learn_later("no, I said Zostel", [], [], gate=False)
             siri.learn_later("open notepad", [{"do": "open"}], [], gate=False)
@@ -394,7 +395,7 @@ class Corrections(unittest.TestCase):
                 pass
         with mock.patch.object(siri.threading, "Thread", Thread), \
                 mock.patch.dict(siri.settings._load(), {"learning": True}), \
-                mock.patch.dict(siri._learning, turns=0, last=time.time()):  # a review a moment ago
+                mock.patch.dict(siri._learning, turns=0, last=time.time(), since_memory=0):  # a review a moment ago
             for words in ("No.", "Nope", "No thanks", "No, not now", "Nah, leave it", "No, don't send it", "No, wait",
                           "No, it's fine", "No, don't send the message", "No, don't send the email",
                           "No, don't delete the file", "No, do not send", "No, don't", "No, don't worry about it",

@@ -763,7 +763,7 @@ class FoundInWhatsApp(Turn):
     def test_the_number_she_read_isnt_kept(self):
         """Review: a number read off WhatsApp went into history, and from there to the model."""
         kept = []
-        with mock.patch.object(siri.history, "add", lambda *a: kept.append(a)):
+        with mock.patch.object(siri.history, "add", lambda *a, **k: kept.append((a, k))):  # with where and how
             siri.handle("message buntyy on whatsapp: hi")
         self.assertIn("5 5 5 5 5", self.said[-1])
         self.assertTrue(kept)

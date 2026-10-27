@@ -3774,43 +3774,63 @@ DECLINE = re.compile(r"(?:no|nope|nah|not|actually)(?: (?:no|nope|nah|not(?: now
                      r"anything)| (?:the|a|an|my|any|this|that|these|those|his|her|their) "
                      r"(?!again\b|like\b|way\b|anymore\b|ever\b)[\w'.-]+)?"
                      r"(?: to (?:(?:my|the|his|her) )?[\w'.-]+)?(?: yet)?)?))*")
-_learning = {"turns": 0, "last": 0.0, "lock": threading.Lock(), "overheard": collections.deque(maxlen=20)}
+# Hermes Agent's memory nudge (agent/turn_context.py _tick_memory_nudge, its memory.nudge_interval of 10): after 10
+# turns asked by name with nothing written to her memory, the next look back is a memory review as well, in Hermes'
+# words (background_review.py _MEMORY_REVIEW_PROMPT), over the turns since. Any review may keep a fact, but one went
+# only after a correction, a failure, a task of several steps or every 6th turn, looking back half an hour, so
+# something you told her in passing could be older than that before one looked
+MEMORY_NUDGE = 10
+MEMORY_BACK = 3 * 3600  # seconds a memory review looks back over, for the 10 turns it was nudged by
+MEMORY_REVIEW = ("\n\nNothing has gone into her memory for a while, so look for what's worth keeping too: Hermes "
+                 "Agent's memory review, where its memory tool is the memory list above, its stores the targets, and "
+                 "\"Nothing to save.\" is empty lists.\n" + hermes_bits._MEMORY_REVIEW_PROMPT.replace(
+                     "Memory has " + hermes_bits._MEMORY_ROUTING_BLOCK, ""))  # LEARN already has the routing
+_learning = {"turns": 0, "last": 0.0, "lock": threading.Lock(), "since_memory": 0}
 
 
 def learn_later(words, steps, failed, gate=False):
     """Hermes Agent's learning loop, lightly: after a turn worth learning from (a correction, a task of several steps,
-    something that failed, or every 6 turns), a look back over the last few turns in the background. Words overheard
-    without her name that she only answered don't count, and the look back leaves them out: on 6 and 7 October room
-    talk she'd answered was put in her memory as facts about you.
+    something that failed, every 6 turns, or 10 named turns since her memory was written, MEMORY_NUDGE), a look back
+    over the last few turns in the background. Words heard without her name don't count, and the look back leaves
+    them out, by her history's gate, so a restart doesn't let them back in: on 6 and 7 October room talk she'd
+    answered was put in her memory as facts about you.
     A task in an app learns for itself (agent.learn): a turn that ran one of her procedures, answered her question
     about one's step, or learned one, isn't looked back over, or the review would write a skill of its own for it;
     and a screen step alone no longer makes a turn worth it."""
-    if gate == "cold" and not steps:
-        _learning["overheard"].append(words)
+    if gate == "cold":
         return
+    if any(s.get("do") == "memory" for s in steps):
+        _learning["since_memory"] = 0  # the planner wrote to it, as Hermes counts a memory tool call
+    elif gate is False:
+        _learning["since_memory"] += 1
     if any(s.get("do") in ("procedure", "agent_resume") or s.get("learned") for s in steps):
         return
     _learning["turns"] += 1
-    corrected = bool(CORRECTION.match(plain(words))) and not DECLINE.fullmatch(plain(words)) and gate != "cold"
+    corrected = bool(CORRECTION.match(plain(words))) and not DECLINE.fullmatch(plain(words))
+    remember = _learning["since_memory"] >= MEMORY_NUDGE
     worth = corrected or failed or len(steps) >= 3 or \
-        any(s.get("do") == "skill" for s in steps) or _learning["turns"] >= 6
+        any(s.get("do") == "skill" for s in steps) or _learning["turns"] >= 6 or remember
     # a correction is looked at straight away, so she has it right the next time you ask, a minute later or not
     if not worth or not settings.get("learning") or (not corrected and time.time() - _learning["last"] < 90):
-        return
+        return  # a memory review due waits for the next one that goes
     _learning["turns"], _learning["last"] = 0, time.time()
-    threading.Thread(target=review, kwargs={"wait": 0 if corrected else 20, "focus": words if corrected else ""},
-                     daemon=True).start()
+    asked = {"wait": 0 if corrected else 20, "focus": words if corrected else ""}
+    if remember:
+        _learning["since_memory"] = 0  # as Hermes resets it once its review is under way
+        asked["remember"] = True
+    threading.Thread(target=review, kwargs=asked, daemon=True).start()
 
 
-def review(wait=20, focus=""):
+def review(wait=20, focus="", remember=False):
     """What to remember, a skill to save or fix, and words speech-to-text got wrong, from the last few turns. focus:
-    what they just said to correct her, looked at first, like Hermes Agent's /refine."""
+    what they just said to correct her, looked at first, like Hermes Agent's /refine. remember: a memory review too
+    (MEMORY_NUDGE), over the last few hours' turns."""
     if not _learning["lock"].acquire(blocking=False):
         return
     try:
         time.sleep(wait)  # after the next turn or two, so it sees how things went
         who = " ".join(str(settings.get("name") or "").split()) or "They"
-        lines, turns = [], [t for t in history.recent(10, 1800) if t[1] not in _learning["overheard"]]
+        lines, turns = [], history.recent(10, MEMORY_BACK if remember else 1800, cold=False)
         for _, said, plan_json in turns:
             try:
                 p = json.loads(plan_json or "{}")
@@ -3828,7 +3848,8 @@ def review(wait=20, focus=""):
                                          "\n\nWhat she knows now:\n" + known},
                                         {"role": "user", "content": "\n\n".join(lines) + (
                                             f"\n\nThey just corrected her: \"{focus}\". Fix the fact or the skill "
-                                            f"it's about first, so she gets it right next time." if focus else "")}],
+                                            f"it's about first, so she gets it right next time." if focus else "")
+                                         + (MEMORY_REVIEW if remember else "")}],
                                        deadline=45, hedge_after=30, cap=40, model=BACKUP_MODEL)  # see BACKGROUND
         for line in apply_learning(plan, [said or "" for _, said, _ in turns]):
             print(f"  learned: {line}")
@@ -3928,6 +3949,8 @@ def apply_learning(plan, said=()):
         r = hermes_memory.memory_tool(MEMORY, action, target, m.get("content"), m.get("old_text"))
         if not r.get("success") and action == "add" and "current_entries" in r:  # full: room made for it
             r = make_room(target, m.get("content"), r)
+        if r.get("success"):
+            _learning["since_memory"] = 0  # written: the memory nudge counts from here
         out.append(f"memory {action}: {m.get('content') or m.get('old_text')}" +
                    ("" if r.get("success") else f" (not kept: {str(r.get('error'))[:80]})"))
     for s in [s for s in (plan.get("skills") or []) if isinstance(s, dict)][:2]:
@@ -3941,6 +3964,39 @@ def apply_learning(plan, said=()):
         out.append(learn_words(words, said))
     journal_end(before, out)
     return out
+
+
+# What a fact she found while working may never hold, in her memory as in what she types (agent.check_typed): a
+# password, a code, a card number (agent.CARD) or a key. The words around a code are looked for, as "VS Code" is no
+# code: check_typed's SECRET_FIELD, made for the names of boxes, would turn it away
+SECRET_FACT = re.compile(r"pass(?:word|code|key|phrase)|\botp\b|one.time|\bpin\b|\bcvv\b|\bcvc\b|security code|"
+                         r"verification code|recovery code|backup code|2-step|authenticator|api.?key|\btoken\b|"
+                         r"\bsecret\b|\bcode (?:is|was)\b", re.I)
+KEY_LIKE = re.compile(r"\b(?=\w*\d)(?=\w*[a-z])\w{24,}\b", re.I)  # a key or token as a page shows one
+
+
+def remember_found(fact, words="", gate=False, target="memory"):
+    """A fact she found while doing a task (an account's name, where a setting lives), kept in her memory the way a
+    memory step is, for a task's loop or the planner to call. Hermes Agent's rule: what a task taught goes in a
+    skill, and memory only holds what will still be true next time. Not kept: on a turn heard without her name (gate
+    "cold") unless its words asked her to remember (REMEMBER, as think() rules for a memory step); anything holding
+    a password, a code, a card number or a key (SECRET_FACT); and what Hermes' strict threat scan turns away
+    (memory_tool). A full memory says so: making room is a model call, too slow in the middle of a task. Journaled
+    like a review's changes, so "forget what you just learned" takes it back. Returns (kept, why not)."""
+    fact = " ".join(str(fact or "").split())
+    if not fact:
+        return False, "There's nothing to keep"
+    if gate == "cold" and not REMEMBER.search(plain(str(words or ""))):
+        return False, "It was heard without my name, and I wasn't asked to remember it"
+    if SECRET_FACT.search(fact) or agent.CARD.search(fact) or KEY_LIKE.search(fact):
+        return False, "That looks like a password, a code, a card number or a key, so I don't keep it"
+    before = journal_start()
+    result = hermes_memory.memory_tool(MEMORY, "add", "memory" if target == "memory" else "user", fact)
+    if not result.get("success"):
+        return False, memory_trouble(str(result.get("error") or ""))
+    _learning["since_memory"] = 0
+    journal_end(before, [f"found: {fact}"])
+    return True, ""
 
 
 # Undo for what she learned in the background: you declined being asked before she keeps something, so each review's
@@ -4427,6 +4483,52 @@ def current_query(query, said=None):
 
 
 INSTALLED = {"installed", "installed apps", "apps installed", "programs", "installed programs", "start menu"}
+# What you asked about talk she heard without her name ("what did you overhear?", "what were they saying in the
+# room?"): only then does recall read those turns, or the TV and the room came back as things you'd said
+ASKS_OVERHEARD = re.compile(r"\b(?:overhear(?:d|ing)?|over heard|without (?:my|your|her) name|in the room|(?:did|have) "
+                            r"you hear|(?:they|he|she|someone|somebody|people) (?:said|were saying|was saying|"
+                            r"were talking|was talking))\b")
+
+
+def meaning():
+    """The decider's sentence encoder, for her history's recall by meaning (history.search, add_meaning), already
+    loaded to match skills (rank_skills). None without its model, or if it won't load: recall then goes by words
+    alone, and her 3-hourly look back (summarize_days) goes on. Decider.load lets some failures through: a heads.npz
+    cut off mid-save (train_decider.py) raises zipfile.BadZipFile on every call. Said once, not every recall."""
+    try:
+        return decider.get().encode if decider.available() else None
+    except Exception as exc:
+        if not MEANING_FAILED:
+            print(f"  couldn't load the decider to look by meaning: {exc!r}")
+            MEANING_FAILED.append(exc)
+        return None
+
+
+MEANING_FAILED = []  # meaning()'s first failure, so it says so once
+
+
+def remember_meaning(rowid):
+    """What a turn she's just kept means, worked out off the voice thread once she's answered, about 16 ms, for
+    recall by meaning later. Often free: when the model planned the turn, her decider worked out the same words a
+    moment before, to match her skills (decider.Decider.encode keeps the last)."""
+    if not isinstance(rowid, int) or isinstance(rowid, bool) or rowid <= 0:  # only a turn history.add kept
+        return
+    encode = meaning()
+    if encode is not None:
+        threading.Thread(target=history.add_meaning, args=(rowid, encode), daemon=True).start()
+
+
+def overheard(hit):
+    """One turn recall found when you asked about talk she heard without her name: each turn of that marked so by
+    history ("heard"), and checked as the messages and pages are (untrusted), as anyone in the room or on the TV may
+    have said it. The turns either side the same way."""
+    near = [overheard(n) for n in hit.get("near") or []]
+    words = {k: v for k, v in hit.items() if k != "near"}
+    if words.get("heard"):
+        words = untrusted(words)
+        if "left out" in words:
+            words = {"when": hit["when"], "heard": hit["heard"], **words}
+    return {**words, "near": near} if near else words
 
 
 def run_info(steps, links=False):
@@ -4468,12 +4570,13 @@ def run_info(steps, links=False):
                 query, day = str(s.get("query") or ""), _day(s.get("day"))
                 if not query.strip() and not day:
                     day = _day("today")
-                found = history.search(query, day, limit=25, after=s.get("after"))
+                cold = bool(ASKS_OVERHEARD.search(plain(str(agent.SAID.get() or ""))))
+                found = history.search(query, day, limit=25, after=s.get("after"), cold=cold, encode=meaning())
                 if not found and day:  # the words didn't match anything that day, so all of the day
-                    found = history.search("", day, limit=25)
+                    found = history.search("", day, limit=25, cold=cold)
+                found = [{**f, "you": f["you"][:200], "jev": (f["jev"] or "")[:200]} for f in found[:12]]
                 result = {"recall": {"query": query, "day": day},
-                          "found": [{**f, "you": f["you"][:200], "jev": (f["jev"] or "")[:200]} for f in found[:12]]
-                          or "nothing"}
+                          "found": [overheard(f) for f in found] if cold and found else found or "nothing"}
                 summary = history.summary(day) if day else ""
                 if summary:
                     result["summary"] = summary
@@ -7160,6 +7263,14 @@ PHONE_WAITS = 300.0  # seconds a question asked on the phone waits for a tap, as
 
 def origin():
     return "phone" if REPLY_TO.get() is not None else "voice"
+
+
+TEXT_RUN = contextvars.ContextVar("text_run", default=False)  # a turn typed with --text, said out loud like any other
+
+
+def heard_from():
+    """Where this turn came from, as her history keeps it: "phone", "text" (python siri.py --text) or "voice"."""
+    return "phone" if origin() == "phone" else "text" if TEXT_RUN.get() else "voice"
 # what a typed no says not to do, no command: "don't type it", "do not send", or a bare "stop" ("no stop", "stop it"),
 # where "stop the music" is one
 NOT_DONE = re.compile(r"\b(?:don't|dont|do not|not) \w+|\bstop(?:(?= (?:it|that|this|now)$)| ?$)")
@@ -7564,10 +7675,12 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
                     if not failed and not dispatched else "") or " ".join(spoken)}
     keep = plan.get("keep")  # her line as kept, when what she said had someone's number in it
     record = {**kept, "say": keep} if keep else kept
-    try:  # kept on this PC, so she can recall it, and in the day's file
-        history.add(words or text, describe(kept["steps"]) + (f" (failed: {'; '.join(failed)})" if failed else ""),
-                    keep if keep and spoken else " ".join(spoken),
-                    json.dumps({**record, "failed": failed} if failed else record, ensure_ascii=False))
+    try:  # kept on this PC, so she can recall it, and in the day's file, with where it came from and how
+        remember_meaning(history.add(
+            words or text, describe(kept["steps"]) + (f" (failed: {'; '.join(failed)})" if failed else ""),
+            keep if keep and spoken else " ".join(spoken),
+            json.dumps({**record, "failed": failed} if failed else record, ensure_ascii=False),
+            origin=heard_from(), gate="cold" if gate == "cold" else "follow" if gate else "named"))
     except Exception as exc:
         print(f"  couldn't keep this turn: {exc!r}")
     learn_later(words or text, [s for s in kept["steps"] if isinstance(s, dict)], failed, gate)
@@ -7669,38 +7782,56 @@ SUMMARY = ("Below is what the user said to Jev, their voice assistant, on {day},
 
 def summarize_days():
     """Every few hours, in the background: a summary at the end of each past day's file, and up to 3 lasting facts
-    from that day saved to her memory, the way Hermes Agent looks back over a session when it ends."""
+    from that day saved to her memory, the way Hermes Agent looks back over a session when it ends; then the meaning
+    of turns kept without one, for recall (history.fill_meanings)."""
     time.sleep(60)  # not while she's starting up
     while True:
         for day in history.unsummarized_days():
-            turns = history.search(day=day, limit=300)
-            said = "\n".join(f"- {t['when']}  You: {t['you'][:300]}  Jev: {(t['jev'] or '')[:200]}"
-                             + (f"  (did: {t['did'][:120]})" if t["did"] else "") for t in turns)
-            try:
-                MEMORY.load_from_disk()
-                ask = SUMMARY.format(day=day, profile=MEMORY.format_for_system_prompt("user") or "(nothing yet)")
-                raw, _, _ = opencode.chat(OC_KEY, [{"role": "system", "content": ask},
-                                                   {"role": "user", "content": said[-15000:] or "(nothing)"}],
-                                          max_tokens=1500, timeout=60, model=BACKUP_MODEL, reasoning_effort="low")
-                data = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
-            except Exception as exc:
-                print(f"  couldn't sum up {day}: {exc}")
+            if not sum_up_day(day):
                 break  # try again next time round
-            history.mark_summarized(day, str(data.get("summary") or ""))
-            print(f"  summed up {day}")
-            before, kept = journal_start(), []
-            for fact in (data.get("facts") or [])[:3]:
-                if isinstance(fact, str) and fact.strip():
-                    result = hermes_memory.memory_tool(MEMORY, "add", "user", fact.strip())
-                    if not result.get("success") and "current_entries" in result:  # full: room made for it
-                        result = make_room("user", fact.strip(), result)
-                    print(f"  remembered from {day}: {fact.strip()!r}"
-                          + ("" if result.get("success") else f" (not kept: {result.get('error')})"))
-                    kept.append(f"from {day}: {fact.strip()}")
-            journal_end(before, kept)
         tidy_skills()
         telegram_bot.prune_files()  # not only when the next file comes
+        encode = meaning()
+        if encode is not None:
+            try:
+                filled = history.fill_meanings(encode)
+                if filled:
+                    print(f"  worked out what {filled} older turns meant")
+            except Exception as exc:
+                print(f"  couldn't work out what older turns meant: {exc!r}")
         time.sleep(3 * 3600)
+
+
+def sum_up_day(day):
+    """One past day's summary at the end of its file, and up to 3 lasting facts from it saved to her memory. What she
+    heard without her name isn't read, by her history's gate: room talk and the TV aren't facts about you. False if
+    the model didn't answer."""
+    turns = history.search(day=day, limit=300, cold=False)
+    said = "\n".join(f"- {t['when']}  You: {t['you'][:300]}  Jev: {(t['jev'] or '')[:200]}"
+                     + (f"  (did: {t['did'][:120]})" if t["did"] else "") for t in turns)
+    try:
+        MEMORY.load_from_disk()
+        ask = SUMMARY.format(day=day, profile=MEMORY.format_for_system_prompt("user") or "(nothing yet)")
+        raw, _, _ = opencode.chat(OC_KEY, [{"role": "system", "content": ask},
+                                           {"role": "user", "content": said[-15000:] or "(nothing)"}],
+                                  max_tokens=1500, timeout=60, model=BACKUP_MODEL, reasoning_effort="low")
+        data = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+    except Exception as exc:
+        print(f"  couldn't sum up {day}: {exc}")
+        return False
+    history.mark_summarized(day, str(data.get("summary") or ""))
+    print(f"  summed up {day}")
+    before, kept = journal_start(), []
+    for fact in (data.get("facts") or [])[:3]:
+        if isinstance(fact, str) and fact.strip():
+            result = hermes_memory.memory_tool(MEMORY, "add", "user", fact.strip())
+            if not result.get("success") and "current_entries" in result:  # full: room made for it
+                result = make_room("user", fact.strip(), result)
+            print(f"  remembered from {day}: {fact.strip()!r}"
+                  + ("" if result.get("success") else f" (not kept: {result.get('error')})"))
+            kept.append(f"from {day}: {fact.strip()}")
+    journal_end(before, kept)
+    return True
 
 
 def tidy_skills():
@@ -9084,6 +9215,7 @@ def main():
         what = (args.text, "hello", False) if what == "wake" else what
         if what:
             win.warm_start_apps()
+            TEXT_RUN.set(True)
             handle(what[0], what[1])
         return
     try:

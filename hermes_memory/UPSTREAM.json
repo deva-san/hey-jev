@@ -87,7 +87,7 @@
   },
   {
    "to": "hermes_bits.py",
-   "doc": "Pieces of Hermes Agent Hey Jev uses on their own: finding skills, the 60-character skill descriptions, its\nsearch query cleaner and its OR-relaxed retry (history.py), and its learning review's rules (siri.LEARN).",
+   "doc": "Pieces of Hermes Agent Hey Jev uses on their own: finding skills, the 60-character skill descriptions, its\nsearch query cleaner and its OR-relaxed retry (history.py), its learning review's rules (siri.LEARN)\nand its memory review (siri.MEMORY_REVIEW).",
    "imports": "import os\nimport re\nfrom pathlib import Path, PurePath\nfrom typing import Any, Dict, List, Optional, Tuple\n\nfrom ._compat import get_all_skills_dirs, get_disabled_skill_names, is_external_skill_path  # noqa: F401, skill_usage.py imports them from here",
    "extract": [
     {
@@ -139,6 +139,7 @@
      "from": "agent/background_review.py",
      "names": [
       "_MEMORY_ROUTING_BLOCK",
+      "_MEMORY_REVIEW_PROMPT",
       "_LESSON_LAYER_BLOCK",
       "_DO_NOT_CAPTURE_BLOCK"
      ]

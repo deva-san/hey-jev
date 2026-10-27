@@ -3,7 +3,8 @@
 # Copied by sync_hermes.py; only the imports are changed, see UPSTREAM.json. Don't edit by hand.
 
 """Pieces of Hermes Agent Hey Jev uses on their own: finding skills, the 60-character skill descriptions, its
-search query cleaner and its OR-relaxed retry (history.py), and its learning review's rules (siri.LEARN)."""
+search query cleaner and its OR-relaxed retry (history.py), its learning review's rules (siri.LEARN)
+and its memory review (siri.MEMORY_REVIEW)."""
 
 import os
 import re
@@ -201,6 +202,14 @@ _MEMORY_ROUTING_BLOCK = (
     "their size limits and crowds out the facts that matter; misrouting it puts it where the next "
     "session won't look. If the tool schema lists only one "
     "target, that store is the only one enabled — use it and skip the other.\n\n"
+)
+
+
+_MEMORY_REVIEW_PROMPT = (
+    "Review the conversation above and consider saving to memory if appropriate.\n\n"
+    "Memory has " + _MEMORY_ROUTING_BLOCK +
+    "If something stands out, save it once, in the right store, using the memory tool with the "
+    "matching target. If nothing is worth saving, just say 'Nothing to save.' and stop."
 )
 
 

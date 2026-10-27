@@ -1,6 +1,10 @@
 """The model path: parse_plan, ask_plan, think, let_go, the learning loop, and web.py's search and read. The model, the
 web and the PC are all stubbed: nothing goes online or acts."""
 import json
+import os
+import shutil
+import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -8,7 +12,10 @@ from urllib.parse import urljoin
 
 from tests.support import siri
 
+import history  # noqa: E402
 import web  # noqa: E402
+
+RECENT = history.recent  # the real one: Turn stubs it out
 
 
 class FakeModel:
@@ -489,14 +496,23 @@ class Learning(Turn):
         self.assertEqual(started, [1])
 
     def test_a_review_leaves_out_overheard_chat(self):
-        siri.learn_later("Who was that on the phone", [], [], "cold")
-        turns = [(time.time() - 30, "Who was that on the phone", '{"steps": [], "say": "Sounds like Ravi."}'),
-                 (time.time() - 20, "no, I said Zostel", '{"steps": [], "say": "Got it, Zostel."}'),
-                 (time.time() - 10, "open Zostel", '{"steps": [{"do": "website", "url": "https://zostel.com"}]}')]
+        """After a restart too: her history keeps which turns she heard without her name (its gate). The list of
+        them in memory that this was before was gone once she restarted, and the room talk was looked back at."""
+        root = tempfile.mkdtemp(prefix="heyjev-planner-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         model = FakeModel('{"memory": [], "skills": [], "words": {}}')
-        with patch.object(siri.history, "recent", lambda *a, **k: turns), patch.object(siri, "ask_model", model), \
-                patch.object(siri, "skills_block", lambda: ""):
-            siri.review(wait=0)
+        with patch.object(history, "DB", os.path.join(root, "history.db")), \
+                patch.object(history, "DAYS_DIR", os.path.join(root, "days")):
+            history.add("Who was that on the phone", "", "Sounds like Ravi.",
+                        '{"steps": [], "say": "Sounds like Ravi."}', gate="cold")
+            history.add("no, I said Zostel", "", "Got it, Zostel.", '{"steps": [], "say": "Got it, Zostel."}',
+                        gate="follow")
+            history.add("open Zostel", "opened zostel.com", "", '{"steps": [{"do": "website", "url": '
+                                                                 '"https://zostel.com"}]}')
+            with patch.object(siri.history, "recent", RECENT), patch.object(siri, "ask_model", model), \
+                    patch.object(siri, "skills_block", lambda: ""), \
+                    patch.dict(siri._learning, lock=threading.Lock()):  # not one an earlier test's review holds
+                siri.review(wait=0)
         said = model.calls[0][0][-1]["content"]
         self.assertIn("Zostel", said)
         self.assertNotIn("on the phone", said)
