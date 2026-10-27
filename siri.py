@@ -794,9 +794,45 @@ def question_live(plan):
 
 
 def question_gone(line):
-    """A Said line asking a job's question that's been answered since it was queued: heads_ups drops it unsaid."""
+    """A job's question that's been answered since it was queued: heads_ups drops it unsaid. A Said line's by its
+    confirm plan; a held step's (JobAsk) by its row, no longer waiting on that very step: approved on the island or
+    by "approve task N", or the job stopped. Till 27 October those were still said, and armed a yes for nothing."""
+    if isinstance(line, JobAsk):
+        try:
+            row = TASK_STORE.get(line.task_id)
+        except Exception as exc:
+            print(f"  couldn't read task {line.task_id}: {exc!r}")
+            return False
+        return row is None or row.get("status") != "waiting_approval" or \
+            str((row.get("payload") or {}).get("hold") or "") != line.hold
     return isinstance(line, Said) and bool(line.confirm) and bool(job_steps(line.confirm)) and \
         not question_live(line.confirm)
+
+
+def held_back(line, said_for):
+    """True if a line she'd say herself (main's tell, holding busy) waits till a question of hers is answered or gone:
+    never a second question over the first. A reply's "What should I reply?" over a voice question; a job's question
+    over any of hers (question_waiting): said over one on 27 October, it got the yes meant for it, and that yes ran
+    her older plan instead."""
+    return (said_for == "reply" and voice_question_waiting()) or (job_question(line) and question_waiting())
+
+
+def job_heard(line):
+    """After she said line (main's tell): a job's question heard out arms its yes (job_asked), for that job's step
+    only. Talked over, it doesn't: you never heard who it goes to or what it says (27 October), so it's "approve task
+    N", the island or the phone. True if a yes now answers it."""
+    return not HER.stop.is_set() and job_asked(line)
+
+
+def job_question(line):
+    """True if line asks a background job's question, which a yes said after it answers."""
+    return isinstance(line, JobAsk) or (isinstance(line, Said) and bool(line.confirm))
+
+
+def question_waiting():
+    """True while a question of hers still waits for its yes, out loud or on the phone (PENDING is one slot): a job's
+    question is said only after it (tell), as job_asked and ask_after would not take the yes anyway."""
+    return voice_question_waiting() or (PENDING["plan"] is not None and time.time() < PENDING["until"])
 
 
 def ask_after(confirm):
@@ -2766,8 +2802,10 @@ TURN_SKILLS = set()  # the skills this turn really used (used_later): kept with 
 def used_later(name):
     """skills.used, off the turn: Hermes' bookkeeping locks, reads and writes its usage file, and "work mode" waited
     18-26 ms for it inside quick(), before anything happened. Only for real use, a routine run or a skill_view: the
-    turn's skills go with it into her history (for her review) and her outcomes (count_turn_skills)."""
-    TURN_SKILLS.add(str(name))
+    turn's skills go with it into her history (for her review) and her outcomes (count_turn_skills). A job's in the
+    background are none of the turn's (27 October: its skill_view was counted as failed with your turn's steps)."""
+    if agent.JOB.get() is None:
+        TURN_SKILLS.add(str(name))
     threading.Thread(target=skills.used, args=(name,), daemon=True).start()
 
 
@@ -4180,7 +4218,7 @@ def skills_block(text=""):
         # A note (no steps, no procedure) has no run to count, so it's viewed if the turn then acts (handle), or
         # Hermes' curator would archive every note of hers 30 days after she wrote it, read in her prompt or not
         detail = [name for name, fits in ranked if fits and name not in handmade][:WRITTEN_OUT]
-        if text:
+        if text and agent.JOB.get() is None:  # a job's prompt (agent.job_skills) is none of the turn's
             TURN_WRITTEN.update(e["dir"] for e in entries if e["dir"] in detail and e.get("notes")
                                 and not e.get("plan") and not e.get("procedure"))
         # with no request (learn_later's review) all are described: it judges a correction by their words
@@ -5035,7 +5073,9 @@ def learn_words(words, said=()):
 
 def context():
     """What's going on now, for the model: the time, the app in front, what's playing, timers, the browser profiles
-    and their own dictionary words."""
+    and their own dictionary words. Never the jobs finished since (job_news): research in the background, or room
+    talk said cold, used them up before the turn they were for (27 October), and a job's findings ended up in an
+    unrelated research prompt."""
     off = time.localtime().tm_gmtoff // 60  # the zone too: it got New York's time wrong 2 times in 3 without it
     zone = f"UTC{'-' if off < 0 else '+'}{abs(off) // 60:02d}:{abs(off) % 60:02d}"
     lines = [f"Now: {time.strftime('%A %d %B %Y')}, {clock()} ({zone}, work other places' times out from it). "
@@ -5082,9 +5122,6 @@ def context():
         lines.append(listed or "Their to-do list is empty.")
     except Exception:
         pass
-    news = take_job_news()  # jobs finished in the background since the last turn, once each
-    if news:
-        lines.append(news)
     return "\n\n" + "\n".join(lines)
 
 
@@ -5787,7 +5824,7 @@ def _think(text, gate, notify=None, sure=1.0):
     # after the cached part: routing's blocks (more), then a job's (GOAL_STEPS), then the look-ups (LOOK_STEPS)
     system = opencode.Cached(fixed + more + ("\n\n" + GOAL_STEPS if goals else "")
                              + ("\n\n" + LOOK_STEPS if looks else "") + ("\n\n" + known if known else "")
-                             + memory_block() + context()
+                             + memory_block() + context() + job_news(gate)
                              + (COLD_NOTE + room_before() if gate == "cold" else GATE_NOTE if gate else ""),
                              len(fixed))
     messages = [{"role": "system", "content": system}]
@@ -6218,6 +6255,14 @@ def job_tap(ask, yes):
     return TASK_STORE.approve(tid, m[2]) if yes else stop_task(tid)
 
 
+def job_news(gate=False):
+    """Jobs finished in the background since your last turn, for the model after context(), once each: only on a turn
+    with her name or straight after she answered, never on room talk said cold (gate "cold"), which the model may
+    then let go, the news with it. "" if none."""
+    news = take_job_news() if gate != "cold" else ""
+    return "\n" + news if news else ""
+
+
 def take_job_news():
     """Jobs finished since the last turn, for the model (context), once each: Hermes hands a finished background job
     back as a block of its own between turns. What a job found is someone else's words, said so."""
@@ -6240,7 +6285,12 @@ def backgrounded(plan, words):
         return plan
     goal = str(steps[at].get("goal") or steps[at].get("task"))
     print("  (asked for in the background: a job of its own)")
-    job = {"do": "background", "goal": goal, **({"read": True} if steps[at].get("read") else {})}  # as think marked it
+    # what those steps opened goes with it, or "search for lofi beats" reached the job with no YouTube in it (27
+    # October): the planner may leave the app out of a task that comes after the step opening it
+    opens = [str(s.get("url") or s.get("app") or "").strip() for s in steps[:at] if s.get("do") in ("open", "website")]
+    opens = [o for o in opens if o]
+    job = {"do": "background", "goal": goal, **({"read": True} if steps[at].get("read") else {}),  # as think marked it
+           **({"hints": f"Open {' and '.join(opens)} first: the task is done there."} if opens else {})}
     return {**plan, "steps": [s for s in steps[:at] if s.get("do") not in ("open", "website")] + [job] +
             steps[at + 1:]}
 
@@ -6411,6 +6461,15 @@ PROGRESS_STATES = {"running": "Working", "waiting_yes": "Waiting for your yes", 
                    "failed": "Didn't work", "stopped": "Stopped"}
 
 
+def progress_on_phone(task):
+    """A background task's progress sent to the phone it was asked from (phone_for), as one message edited as it goes
+    (progress_tick): run_slow's and run_agent's. True if it goes there."""
+    chat = phone_for(task)
+    if chat is not None:
+        PROGRESS_TO[f"task:{task['id']}"] = {"chat": chat, "title": task["description"], "shown": False}
+    return chat is not None
+
+
 def phone_for(task):
     """The chat a background task's progress and report go to, or None: the phone's, for a task asked from there,
     or yours for every one with Settings' phone_progress "all". Only while that chat is the one paired now."""
@@ -6567,7 +6626,8 @@ def prepare_task_steps(plan):
                 continue
             if do == "background":  # a job done while you go on talking to her (run_job)
                 task_id = queue_job(step.get("goal") or step.get("task"), step.get("description"),
-                                    read=bool(step.get("read")))
+                                    read=bool(step.get("read")), **({"hints": str(step["hints"])[:300]}
+                                                                     if step.get("hints") else {}))
                 kept.append({"do": "task_queued", "id": task_id})
                 notices.append(f"I'll do that in the background as task {task_id}, and tell you when it's done.")
                 continue
@@ -6744,9 +6804,7 @@ def task_worker():
 
     def run_slow(task):
         show_task(task, "running")  # on the island while it runs, round by round for research (activity.step)
-        chat = phone_for(task)
-        if chat is not None:  # and on the phone it was asked from, as one message edited as it goes (progress_tick)
-            PROGRESS_TO[f"task:{task['id']}"] = {"chat": chat, "title": task["description"], "shown": False}
+        progress_on_phone(task)  # and on the phone it was asked from, as one message edited as it goes
         token = activity.KEY.set(f"task:{task['id']}")
         try:
             run(task)
@@ -6759,8 +6817,10 @@ def task_worker():
     jobs = [0, threading.Lock()]  # jobs in the background going on the agent lane, up to JOB_WORKERS
 
     def run_agent(task):
-        """A job's go on the agent lane (run_job), its row on the island meanwhile, with Stop."""
+        """A job's go on the agent lane (run_job), its row on the island meanwhile, with Stop, and its progress on the
+        phone it was asked from, as run_slow's (27 October: a job from Telegram said nothing till it was done)."""
         show_task(task, "running")
+        progress_on_phone(task)
         token = activity.KEY.set(f"task:{task['id']}")
         try:
             run_job(task)
@@ -6905,7 +6965,8 @@ tool("share", "acts", None, None, read_safe=True)
 tool("message", "acts", None, None, read_safe=True)
 tool("contact", "own_data", None, ASK, speak="after")
 tool("todo", "own_data", None, GO, speak="after", gated_by="LIST_STEPS")
-tool("files", "info", None, None, parallel_ok=True, gated_by="LIST_STEPS")
+# its file names are anyone's words, a download's included, as selected_files' are (27 October)
+tool("files", "info", None, None, parallel_ok=True, taints=True, gated_by="LIST_STEPS")
 tool("open_file", "reversible", None, GO, speak="after", gated_by="LIST_STEPS")
 # her new look-ups (27 October): functions already written, each with its line in LOOK_STEPS, never the fixed prompt
 tool("selected_files", "info", None, None, handler=look_selected_files, taints=True, gated_by="LOOK_STEPS")
@@ -9189,6 +9250,8 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
         if plan and gate == "cold" and any((s.get("do") in {"type", "close", "minimise", "lock", "sleep", "screen",
                                                             "procedure"} and not own_close(s))
                                            or (s.get("do") == "keys" and combo(s.get("keys")) not in SAFE_KEYS)
+                                           # "approve task 3" from a video or the room released a job's held send
+                                           or (s.get("do") == "task_control" and s.get("action") == "approve")
                                            for s in plan["steps"]):
             plan = None
         if plan and gate and any(s["do"] in ("youtube", "google") for s in plan["steps"]) and not \
@@ -9382,8 +9445,10 @@ def island_answer(yes, ask, notify=None):
     """Approve or Deny on the island for her question at the PC, answered the way the phone's buttons answer one
     (phone_turn): only the question still waiting, asked out loud, before it ran out, and never while she's doing a
     task in an app, whose clicks are real ones. The caller holds busy, as for any turn. True if it was answered."""
+    # a no is safe whatever's acting: a job in the background takes ACT for every action, and Deny tapped then was
+    # dropped, the question left live for a yes said to someone in the room (27 October)
     live = PENDING["origin"] == "voice" and PENDING["plan"] is not None and str(PENDING["id"]) == str(ask) and \
-        time.time() < PENDING["until"] and not acting()
+        time.time() < PENDING["until"] and (not yes or not acting())
     if not live:
         print("  (island: that question isn't waiting any more, so nothing's done)")
         return False
@@ -10600,8 +10665,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
         if rec.dictating:
             return False
         with busy:
-            if said_for == "reply" and voice_question_waiting():
-                return False  # said once that one's answered or gone: never a second question over the first
+            if held_back(line, said_for):
+                return False
             print(f"\n> {said_for}: {line}")
             HER.begin()
             rec.paused = True
@@ -10609,7 +10674,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
             try:
                 say(line, notify)
                 said_out_loud(line)
-                job_asked(line)  # a job's question: the next yes is for that job's step only
+                job_heard(line)
                 history.add(f"({said_for})", "", kept or line, json.dumps({"steps": [], "say": kept or line},
                                                                           ensure_ascii=False))
             except Exception as exc:

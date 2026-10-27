@@ -83,7 +83,7 @@ class Golden(unittest.TestCase):
 
     def test_what_taints_a_turn_is_what_did_and_the_new_look_ups_that_read_others_words(self):
         self.assertEqual(set(siri.TAINTS) | {"messages", "picture"},
-                         OLD_READ_WITH | {"selected_files", "open_windows", "clipboard"})
+                         OLD_READ_WITH | {"selected_files", "open_windows", "clipboard", "files"})
         self.assertFalse(siri.TAINTS & {"installed_apps", "top_apps", "where"})  # this PC's own facts
 
     def test_strict_yes_still_holds_every_staged_and_power_step(self):

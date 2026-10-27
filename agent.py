@@ -18,6 +18,7 @@ import contextlib
 import contextvars
 import hashlib
 import json
+import math
 import os
 import re
 import threading
@@ -107,6 +108,11 @@ CHAT_APPS = re.compile(r"whatsapp|telegram|signal|slack|discord|teams|skype|mess
 # chrome.exe titled "WhatsApp"; full screen; a page too slow to answer), the site's unknown: a chat's name in the title
 # is a chat, and Enter after typing asks, rather than either going ahead because there was no site to check
 WEB_EXES = win.BROWSER_EXES | {"firefox.exe", "opera.exe", "vivaldi.exe", "arc.exe", "chromium.exe"}
+# Where a job of several parts reads someone else's words (observe, r.read): any browser, site known or not, and the
+# desktop apps for mail and documents. Till 27 October only a site read from Chrome, Edge or Brave's address bar
+# counted, so a page read in Firefox, or a mail in Outlook, could get a click or a fact kept with no yes
+READ_EXES = WEB_EXES | {"outlook.exe", "olk.exe", "hxoutlook.exe", "thunderbird.exe", "acrord32.exe", "acrobat.exe",
+                        "sumatrapdf.exe", "foxitpdfreader.exe", "foxitreader.exe"}
 # Where typing and Enter start any program, which no model's steps may reach: command windows (siri.SHELLS), the Run
 # box, Start and its search, and File Explorer's address bar for anything but a folder. siri.press_keys never presses
 # the Windows key, but a live run can open apps by name, so these aren't opened either (no_open_names), nor by a
@@ -214,10 +220,14 @@ JOBS = {}  # task id: its Job, while it runs or waits on a yes
 JOB_HELD = {}  # task id: the step it holds for your yes, as HELD has a turn's
 SCREEN = threading.Lock()  # held by the one job using the screen
 PLAN_ACTING = [0, threading.Lock()]  # her plans' steps running in a turn now (siri.run_plan): a job keeps off then
-# Seconds: of no key or mouse input before a job takes the screen; waited at most before it goes anyway, if you're
-# not typing that moment (TYPING); a job's question waits this long for its yes (as Hermes' approvals and her
-# questions on the phone do); and one go of a job, which no turn cuts off at siri.SCREEN_WAIT
-LULL, LULL_MOST, TYPING, JOB_HOLD_FOR, JOB_SECONDS = 2.0, 30.0, 0.6, 300.0, 600.0
+# Seconds: of no key or mouse input before a job takes the screen, always (27 October: after 30 s of waiting it took
+# it after 0.6 s, a pause between two of your sentences, and your next words and Enter went into its window); and one
+# go of a job, which no turn cuts off at siri.SCREEN_WAIT. A job's question has no clock of its own: it waits in
+# tasks.db, on the island and the phone till you answer it or stop the job, and still_there checks its window, its
+# control and its read-back after the yes. Its 300 s ran out with the row still offering a yes, which then failed
+# the whole job. OWN_INPUT: seconds of your input, more than its own keys and clicks could account for, that make a
+# job with the screen let go of it (act)
+LULL, JOB_SECONDS, OWN_INPUT = 2.0, 600.0, 0.15
 # Seconds a plan of yours starting waits, at most, for a job's action under way with the screen to finish (plan_acting):
 # never the 10 s close() waits, as that's the voice fast path. And how long after opening an app or a site a job looks
 # for its window to come up in front (opened): Outlook, Word or a cold Chrome take seconds, and pinning what was in
@@ -235,7 +245,12 @@ LEFT_ENDS = {"refused", "chat", "sensitive", "gone"}  # left to you: nothing ano
 
 
 class Yielded(Exception):
-    """A turn of yours started acting while a job had the screen: it lets go and looks again (_rounds)."""
+    """A turn of yours started acting while a job had the screen, or you used the PC: it lets go and looks again
+    (_rounds)."""
+
+
+class NoScreen(Yielded):
+    """A job's time ran out while it waited for the screen (_in_time)."""
 
 
 class Job:
@@ -249,6 +264,10 @@ class Job:
         self.origin = dict(origin or {})
         self.budget, self.runs, self.continued = IterationBudget(TASK_ROUNDS), [], 0
         self.tid, self.leased, self.asked = None, False, None
+        # tid set and cleared (background) and read by stop under it: a stop landing as the job ended set the interrupt
+        # on its pooled thread after the next job had claimed it, and that job ended as stopped (27 October)
+        self.lock = threading.Lock()
+        self.acted_at = 0.0  # when it last acted with the screen (_clock): your input since then makes it let go
         self.yours = None  # the window you had in front when it took the screen: never one it pins (opened)
         # from a run handed over to it (siri.hand_over): the window it worked on, what it got done, whether it read
         # someone else's words; and where to tell how far it's got (the Tasks tab's progress)
@@ -266,8 +285,9 @@ class Job:
     def stop(self):
         """This job stops, and no other: its own flag, and Hermes' interrupt bit for the thread it's on."""
         self._stop.set()
-        if self.tid is not None:
-            interrupt.set_interrupt(True, self.tid, reason="stopped")
+        with self.lock:
+            if self.tid is not None:
+                interrupt.set_interrupt(True, self.tid, reason="stopped")
 
     def cancelled(self):
         return self._stop.is_set() or interrupt.is_thread_interrupted(self.tid)
@@ -367,46 +387,79 @@ def site_in(r, exe):
     return win.browser_site() if exe in win.BROWSER_EXES else None
 
 
+def _in_time(r):
+    """NoScreen once job run r's time is up: waiting for the screen never outlasts it. With the PC locked all night a
+    job sat in _lull holding SCREEN and a worker of the agent lane, its 600 s never kept to (27 October)."""
+    if time.time() >= r.deadline:
+        raise NoScreen()
+
+
 def _lull(r):
     """Waits till a job may take the screen: no turn of yours acting, the PC not locked, and no key or mouse input for
-    LULL seconds, or, after LULL_MOST seconds of waiting, none for TYPING (you're not typing that moment)."""
-    began = _clock()
+    LULL seconds, however long it has waited (the owner's ~2 s, 27 October)."""
     while True:
         if stopped(r):
             raise Halted()
-        if not turn_acting() and win.session_locked() is not True:
-            idle = win.idle_seconds()
-            if idle >= LULL or (_clock() - began >= LULL_MOST and idle >= TYPING):
-                return
+        _in_time(r)
+        if not turn_acting() and win.session_locked() is not True and win.idle_seconds() >= LULL:
+            return
         _sleep(0.2)
+
+
+def your_input(job):
+    """True if you've pressed a key or moved the mouse since job last acted with the screen (Job.acted_at): input it
+    sends itself is over by then, so more recent input is yours. Then it lets go (act) rather than take your next
+    keystrokes into its window, or press Enter between yours."""
+    try:
+        return win.idle_seconds() + OWN_INPUT < _clock() - job.acted_at
+    except Exception as exc:
+        print(f"  couldn't tell if you're using the PC: {exc!r}")
+        return True
+
+
+def _give_back(r, yours):
+    """The window you had in front (yours) brought back after job run r's burst with the screen, holding ACT so a plan
+    of yours starting waits for it (plan_acting). Not while a turn of yours acts: Yielded is raised for exactly that,
+    and bringing yours back put Word over the Notepad the turn had just opened (27 October). Nor once something other
+    than the job's window is in front: you, or a turn, put it there."""
+    with ACT:
+        if turn_acting():
+            return
+        now = win.front_window()
+        if yours and yours != r.pin and now != yours and (r.pin is None or now == r.pin) and win.window_exists(yours):
+            win.bring_to_front(yours)
 
 
 @contextlib.contextmanager
 def screen(r):
     """The screen for job run r, for a burst of steps that need it: one job at a time (SCREEN), after a lull (_lull),
     its own window brought in front, shown on its row on the island as "Using the screen" (where Stop stops it), and
-    the window you had in front given back after."""
+    the window you had in front given back after (_give_back). Its window not in front after all (Windows refused
+    it, or you clicked back into yours) is no screen: Yielded, before any step of it."""
     while not SCREEN.acquire(timeout=0.2):
         if stopped(r):
             raise Halted()
+        _in_time(r)
     try:
         _lull(r)
         yours = r.job.yours = win.front_window()
-        r.job.leased = True
+        r.job.leased, r.job.acted_at = True, _clock()
         activity.update(activity.KEY.get(), note="Using the screen")
         r.job.progress("Using the screen")
         try:
             if r.pin and win.window_exists(r.pin):
                 win.bring_to_front(r.pin)
+                if win.front_window() != r.pin:
+                    raise Yielded()
             yield
         finally:
-            r.job.leased, r.job.yours = False, None
+            r.job.yours = None
             activity.update(activity.KEY.get(), note="Working on it")
             try:
-                if yours and yours != r.pin and win.window_exists(yours):
-                    win.bring_to_front(yours)
+                _give_back(r, yours)
             except Exception as exc:  # the focus not given back is no reason to lose what the job did
                 print(f"  couldn't give the screen back: {exc!r}")
+            r.job.leased = False
     finally:
         SCREEN.release()
 
@@ -532,14 +585,21 @@ def close(turn):
 
 def act(fn, *args, **kw):
     """fn(*args, **kw) as an action of this thread's run: holding ACT, and only while the run may act. A job with the
-    screen lets go of it (Yielded) once a turn of yours acts, rather than press keys between its steps."""
+    screen lets go of it (Yielded) once a turn of yours acts, rather than press keys between its steps, or once you
+    press a key or move the mouse (your_input): till 27 October only a turn made it, and your typing went on into its
+    window."""
     with ACT:
         r = RUN.get()
         if stopped(r):
             raise Halted()
-        if r is not None and r.job is not None and r.job.leased and turn_acting():
+        leased = r is not None and r.job is not None and r.job.leased
+        if leased and (turn_acting() or your_input(r.job)):
             raise Yielded()
-        return fn(*args, **kw)
+        try:
+            return fn(*args, **kw)
+        finally:
+            if leased:
+                r.job.acted_at = _clock()
 
 
 def pause(secs):
@@ -574,8 +634,8 @@ def hold(r, i, question, verb, target=None, step=None, no="", focus=False, sendi
         held = dict(id=os.urandom(6).hex(), run=r, i=i, hwnd=hwnd, exe=exe, title=title, step=step, no=no, verb=verb,
                     focus=bool(focus), sending=sending if sending and sending.get("send") else None,
                     target={k: (target or {}).get(k) for k in ("name", "role", "aid")} if target else None,
-                    until=time.time() + (JOB_HOLD_FOR if r.job is not None else
-                                         host.PHONE_WAITS if host.origin() == "phone" else HOLD_FOR))
+                    until=math.inf if r.job is not None else  # waits in tasks.db till answered (see LULL)
+                    time.time() + (host.PHONE_WAITS if host.origin() == "phone" else HOLD_FOR))
         if r.job is not None:
             JOB_HELD[r.job.id] = held
             r.job.asked = {"hold": held["id"], "question": question, "verb": verb}
@@ -632,6 +692,8 @@ def still_there(held, r):
         return "I waited too long for that yes, so I've not done it."
     if (held.get("step") or {}).get("do") in OWN_STEPS:  # a fact for her memory: in no window, so none to check
         return ""
+    if r.job is not None and held.get("focus") and win.front_window() != r.pin:
+        return GONE  # a job's keys or typing go to the window in front, which must be its own (on_pin)
     _, exe, title = front(r)
     if exe != held["exe"] or not _same_title(title, held["title"]):
         return GONE
@@ -706,6 +768,8 @@ def _resume(held, notify=None):
         return _go(r, notify), _did(r)
     except Halted:
         return finish(r, "stopped"), []
+    except NoScreen:  # the screen never came free in its time
+        return finish(r, "gone", NO_SCREEN), []
     except Yielded:  # you started a turn as it went to do it: not done, and it'll ask again if it comes to it
         return finish(r, "gone", "You were using the PC, so I've not done that."), []
     finally:
@@ -724,6 +788,15 @@ def _yes_step(r, held, live):
 def _did(r):
     """The steps r did, for the console log: what and on which control, never what was typed."""
     return [{"do": s["do"], "name": s.get("name")} for s in r.steps if s.get("ok")]
+
+
+def on_pin(r, fn, *args, **kw):
+    """fn(*args, **kw), for keys or typing your yes was for, checked first, holding ACT, that a job's own window is
+    the one in front: Yielded if not. Keys and typing go wherever the focus is, and till 27 October an approved
+    Enter of a job's went to your own Chrome when you'd clicked back into it while it found its box again."""
+    if r.job is not None and win.front_window() != r.pin:
+        raise Yielded()
+    return fn(*args, **kw)
 
 
 def do_held(r, held):
@@ -753,7 +826,7 @@ def do_held(r, held):
             if s.get("text") is not None:  # a box filled in: Enter after it asks, and a send reads it back
                 note_typed(s["text"])
         elif do == "keys":
-            act(host.press_keys, s.get("keys"))
+            act(on_pin, r, host.press_keys, s.get("keys"))
         elif do in ("open", "website"):  # a site you hadn't named, opened now you've said yes to it
             act(host.do_step, {k: v for k, v in s.items() if k in ("do", "app", "url")})
             if do == "website":
@@ -761,10 +834,12 @@ def do_held(r, held):
                 if url_text(s.get("url")):  # a mail it filled in, as she'd have typed it
                     note_typed(url_text(s.get("url")))
         else:  # typing, at the cursor of the box that had the focus then and has it still (still_there)
+            if r.job is not None and win.front_window() != r.pin:
+                return finish(r, "gone", GONE)
             focus = win.ui_focused() or {}
             if focus.get("el") is None:
                 return finish(r, "gone", GONE)
-            act(win.ui_act, focus["el"], str(s.get("text") or ""), caret=True)
+            act(on_pin, r, win.ui_act, focus["el"], str(s.get("text") or ""), caret=True)
             note_typed(s.get("text"))
     except (Halted, Yielded):
         raise
@@ -2017,8 +2092,9 @@ def background(job, hold=None, notify=None):
     approved it: resume_job) or from the start, then judged (_judged). Never holds busy, never sets RUNNING: it's
     counted in BACKGROUND. Returns (what she says, how it ended: done, held, stopped, blocked or failed)."""
     token = JOB.set(job)
-    job.tid = threading.get_ident()
-    interrupt.set_interrupt(False)  # a bit left on this pooled thread by a job stopped before is no stop of this one
+    with job.lock:
+        job.tid = threading.get_ident()
+        interrupt.set_interrupt(False)  # a bit a job stopped before left on this pooled thread is no stop of this one
     _count(BACKGROUND, 1)
     try:
         if job.cancelled():
@@ -2032,8 +2108,9 @@ def background(job, hold=None, notify=None):
         return "", "stopped"
     finally:
         _count(BACKGROUND, -1)
-        interrupt.set_interrupt(False)
-        job.tid = None
+        with job.lock:  # a stop of this job now finds no thread, rather than the next job's on this one
+            interrupt.set_interrupt(False)
+            job.tid = None
         JOB.reset(token)
 
 
@@ -2267,7 +2344,24 @@ def _rounds(r, notify=None):
             continue
         if line is not None:
             return line
+    handed = handed_over(r)
+    if handed:
+        return finish(r, "handed", handed)
     return finish(r, "budget", "That's as far as I got" + (f": I {r.notes[-1]}." if r.notes else "."))
+
+
+def handed_over(r):
+    """A turn's run out of time while still getting somewhere, handed to a job in the background (siri.hand_over)
+    that carries on from its window: what she says about it, or None. run_plan's own hand-over at SCREEN_WAIT almost
+    never came, as a run's AGENT_SECONDS end it first (27 October), so a long form in Chrome was dropped with "That's
+    as far as I got". Not a job's run, one out of rounds rather than time, one that did nothing yet, or one stopped."""
+    if r.job is not None or r.rounds >= AGENT_ROUNDS or r.deadline - time.time() > 5 or not r.did_any or stopped(r):
+        return None
+    try:
+        return host.hand_over({"goal": r.goal}, r)
+    except Exception as exc:  # never in the way of what she says about the run
+        print(f"  couldn't hand it over: {exc!r}")
+        return None
 
 
 def act_round(r, steps, obs, shot, reply):
@@ -2432,7 +2526,9 @@ def look_up(r, looks):
     if stopped(r):
         raise Halted()
     try:
-        entries = json.loads(host.run_info(looks))
+        # a job's on research's pool, never LOOKUPS: two jobs' page reads there queued your voice turn's weather
+        entries = json.loads(host.run_info(looks, pool=host.RESEARCH_LOOKUPS) if r.job is not None else
+                             host.run_info(looks))
     except Exception as exc:  # run_info never raises for one look-up: this is the JSON itself
         print(f"  look-ups failed: {exc!r}")
         entries = [{s["do"]: None, "error": "That couldn't be looked up"} for s in looks]
@@ -2586,11 +2682,12 @@ def observe(r):
             said = " ".join(f"{it['name']} {it.get('value') or ''}" for it in snap["items"])
             if first_threat_message("".join(c for c in said if c not in INVISIBLE_CHARS), scope="all"):
                 r.tainted = True
-            # a job that read a web page on the screen read someone else's words, as a web look-up does (look_up):
-            # each change after it asks first (gate, own_step), and it's never learned from. Else a page could get
-            # a "fact" kept with no yes, that every later prompt carries (memory_block)
-            if r.task and obs["site"] is not None:
-                r.read = r.looked = True
+        # a job that read a web page, a mail or a document on the screen (READ_EXES), by its controls or a picture of
+        # it, read someone else's words, as a web look-up does (look_up): each change after it asks first (gate,
+        # own_step), and it's never learned from. Else a page could get a "fact" kept with no yes, that every later
+        # prompt carries (memory_block)
+        if r.task and (obs["site"] is not None or exe in READ_EXES):
+            r.read = r.looked = True
     return obs
 
 
@@ -2873,8 +2970,15 @@ def do_one(r, s, obs, shot, finishing=None, at=-1):
         return False
     r.finishing, r.acted, r.did_any, r.full = None, True, True, True  # from here on, the window she's working in
     r.hwnd = None if do in OPENS else obs["hwnd"]  # what opened is a window she's yet to read
-    if r.job is not None and do in OPENS:  # what it opened or switched to is its own window from here
-        r.pin = result["hwnd"] if do == "switch" and isinstance(result, dict) else opened(r, s, before)
+    if r.job is not None and do == "switch" and isinstance(result, dict):  # what it switched to is its own from here,
+        # unless it's yours (Job.yours, or what was in front): pinned, it was never given back, and its clicks set the
+        # Value of your box behind your back between leases (27 October), as opened() keeps from an open
+        if result.get("hwnd") in {r.job.yours} | ({before} if before != r.pin else set()):
+            r.notes.append(f"didn't take {s.get('to') or s.get('app') or 'that window'} as its own: you're using it")
+        else:
+            r.pin = result.get("hwnd")
+    elif r.job is not None and do in OPENS:  # what it opened is its own window from here
+        r.pin = opened(r, s, before)
     text = s.get("text") if do in ("type", "click") else None
     if text is not None:
         note_typed(text)

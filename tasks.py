@@ -143,6 +143,16 @@ class Store:
                                 (json.dumps(payload, ensure_ascii=False),
                                  f"Jev stopped while this {row['kind']} was asking about a step; approve it to retry",
                                  now, row["id"]))
+                elif row["kind"] == "agent" and payload.get("hold") and row["id"] not in again:
+                    # a job's held step, in memory and gone with it (27 October): its old question's yes, an old
+                    # phone button's too, restarted the whole job. A fresh key and the honest question instead
+                    payload.pop("approved", None)
+                    payload["hold"] = os.urandom(6).hex()
+                    again.append(row["id"])
+                    con.execute("UPDATE tasks SET payload=?, error=?, started=NULL, updated=? WHERE id=?",
+                                (json.dumps(payload, ensure_ascii=False),
+                                 "Jev stopped while this job was waiting on your yes; approve it to start it again",
+                                 now, row["id"]))
         ASKS.clear()
         WAKE.set()
         return again
