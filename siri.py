@@ -2798,8 +2798,12 @@ def routines():
             s["procedure"] = plan.get("procedure") if isinstance(plan.get("procedure"), dict) else None
             steps = [x for x in plan.get("steps") or [] if routine_safe(x)]
             s["plan"] = {**s["plan"], "steps": steps} if steps else None
+            # steps with a slot run only from a slotted trigger (slot_routine), which fills it: its plain trigger, or
+            # a match by meaning, typed "{query}" as it stood (27 October)
+            s["slotted"] = any(isinstance(v, str) and agent.SLOT.search(v) for x in steps for v in x.values())
         _skill_cache[:] = [time.time(), found]
-    return [(plain(t), s) for s in _skill_cache[1] if s["plan"] for t in s["triggers"] if "{" not in t]
+    return [(plain(t), s) for s in _skill_cache[1] if s["plan"] and not s.get("slotted") for t in s["triggers"]
+            if "{" not in t]
 
 
 # A routine's trigger may end in one slot for the owner's own words, "search amazon for {query}" (27 October): what
@@ -2949,7 +2953,8 @@ def slotless_routines():
     """routines() whose trigger has no slot, judged on the trigger as written: plain() turns "play {song}" into "play
     song", which would then run with its slot unfilled if matched by meaning (review, 27 October)."""
     routines()  # read again if it's time
-    return [(plain(t), s) for s in _skill_cache[1] if s["plan"] for t in s["triggers"] if "{" not in t and plain(t)]
+    return [(plain(t), s) for s in _skill_cache[1] if s["plan"] and not s.get("slotted") for t in s["triggers"]
+            if "{" not in t and plain(t)]
 
 
 def warm_triggers():
@@ -4693,7 +4698,8 @@ def lessons_for(app):
         return ""
     routines()
     name = lesson_skill(app)
-    entry = next((e for e in _skill_cache[1] if e["dir"] == name), None)
+    # only her own: one dropped in by hand under that name went unwrapped into every round as her lessons (27 October)
+    entry = next((e for e in _skill_cache[1] if e["dir"] == name and not e.get("imported")), None)
     found = _lessons_in(entry.get("notes")) if entry else []
     if found and time.time() - _lessons_seen.get(name, 0.0) > LESSONS_SEEN_EVERY:
         _lessons_seen[name] = time.time()
@@ -4914,9 +4920,14 @@ def journal_start():
 def journal_skill(before, name):
     """A skill as it is now, before the review changes it: None if it's new."""
     name = re.sub(r"[^a-z0-9._-]+", "-", str(name or "").lower()).strip("-.")[:64]
-    path = skills.find_skill(name) if name else None
     if name and name not in before["skills"]:
-        before["skills"][name] = path.read_text(encoding="utf-8") if path else None
+        before["skills"][name] = _skill_text(name)
+
+
+def _skill_text(name):
+    """Her skill name's SKILL.md as it is now, or None if she has none by that name."""
+    path = skills.find_skill(name)
+    return path.read_text(encoding="utf-8") if path else None
 
 
 def journal_end(before, said):
@@ -4925,7 +4936,10 @@ def journal_end(before, said):
     changes = {t: {"added": [e for e in now[t] if e not in before["entries"][t]],
                    "removed": [e for e in before["entries"][t] if e not in now[t]]} for t in now}
     changes = {t: c for t, c in changes.items() if c["added"] or c["removed"]}
-    if not changes and not before["skills"]:
+    # only skills that really changed: one learn_skill refused (a patch matching nothing, one you taught her) was kept
+    # as a no-op, which "forget what you just learned" then undid in place of the last real change (27 October)
+    changed = {name: text for name, text in before["skills"].items() if _skill_text(name) != text}
+    if not changes and not changed:
         return
     os.makedirs(os.path.dirname(UNDO_PATH), exist_ok=True)
     try:
@@ -4933,7 +4947,7 @@ def journal_end(before, said):
             kept = f.readlines()[-(UNDO_KEEP - 1):]
     except OSError:
         kept = []
-    kept.append(json.dumps({"when": round(time.time()), "memory": changes, "skills": before["skills"],
+    kept.append(json.dumps({"when": round(time.time()), "memory": changes, "skills": changed,
                             "learned": [str(x) for x in said][:6]}, ensure_ascii=False) + "\n")
     with open(UNDO_PATH, "w", encoding="utf-8") as f:
         f.writelines(kept)

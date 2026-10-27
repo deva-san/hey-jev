@@ -5,6 +5,8 @@ import contextlib
 import io
 import json
 import os
+import subprocess
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -110,6 +112,55 @@ class Format(Fresh):
         quiet(skills.list_skills, hidden=True)  # quickly, as words
         self.assertIsNone(skills.YAML_ALIAS.search("name: x\ndescription: 5 * 3 & more for R&D\n"))
         self.assertTrue(skills.YAML_ALIAS.search("base: &b {os: [win32]}\n<<: *b"))
+
+    def test_a_star_in_a_description_is_no_alias(self):
+        """27 October: "Find *.py files" sent the frontmatter to the line reader, and a macOS-only skill's nested
+        metadata.openclaw was lost, so it showed on Windows."""
+        for description in ("Find *.py files", "Edit **markdown** files", "Globs like [*.md]"):
+            with self.subTest(description):
+                fm, _ = skills.parse_frontmatter(f"---\nname: x\ndescription: {description}\nmetadata:\n  openclaw:\n"
+                                                 f"    os: [darwin]\n    requires:\n      bins: [fd]\n---\nB\n")
+                self.assertEqual(fm["description"], description)
+                self.assertIn("darwin", skills.why_hidden(skills.skill_meta(fm)))
+
+    def test_an_apostrophe_in_a_json5_comment_keeps_the_metadata(self):
+        text = ('---\nname: x\nmetadata:\n  {\n    // it\'s mac only\n    "openclaw": { "os": ["darwin"], '
+                '"requires": { "bins": ["memo"] } },\n  }\n---\nB\n')
+        fm, _ = skills.parse_frontmatter(text)
+        self.assertEqual(fm["metadata"], {"openclaw": {"os": ["darwin"], "requires": {"bins": ["memo"]}}})
+
+    def test_brackets_nested_past_any_parser_lose_that_skill_only(self):
+        """27 October: '[' 20,000 deep raised RecursionError out of list_skills, and every routine went with it."""
+        skills.create_skill("tea", skills.build_content("tea", "Tea", "x", ["tea time"], [VOLUME]))
+        write(skills.SKILLS_DIR / skills.IMPORTED / "deep", "---\nname: deep\nmeta: " + "[" * 20000 + "]" * 20000
+              + "\n---\nB\n")
+        names = [e["dir"] for e in quiet(skills.list_skills, hidden=True)]
+        self.assertIn("tea", names)
+        with mock.patch.object(skills, "_line_frontmatter", side_effect=RecursionError("too deep")):
+            path = write(skills.SKILLS_DIR / skills.IMPORTED / "deeper", "---\nname: deeper\n---\nB\n")
+            self.assertIsNone(quiet(skills._read, path / "SKILL.md"))
+            names = [e["dir"] for e in quiet(skills.list_skills)]
+        self.assertIn("tea", names)
+        self.assertNotIn("deeper", names)
+
+    def test_a_junction_in_a_skill_is_never_walked(self):
+        """27 October: rglob walked into a junction inside a skill, every 5 s on the voice path."""
+        folder = write(skills.SKILLS_DIR / skills.IMPORTED / "linked", CLEAN.replace("{name}", "linked"))
+        outside = Path(tempfile.mkdtemp(prefix="heyjev-outside-"))
+        for i in range(5):
+            (outside / f"{i}.txt").write_text("x", encoding="utf-8")
+        (folder / "references").mkdir()
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(folder / "references" / "docs"), str(outside)],
+                              capture_output=True)
+        if made.returncode:
+            self.skipTest("couldn't make a junction here")
+        names = [n for n, _, _ in skills._fingerprint(folder)]
+        self.assertIn(os.path.join("references", "docs"), names)
+        self.assertFalse(any(n.endswith(".txt") for n in names))
+        for i in range(skills.FINGERPRINT_MOST + 1):
+            (folder / f"{i}.md").write_text("x", encoding="utf-8")
+        self.assertIsNone(skills._fingerprint(folder))
+        self.assertIn("more than", skills._blocked(folder))
 
     def test_a_skill_is_read_again_only_once_it_changes(self):
         """siri reads her skills every 5 seconds in quick(), on the voice path: YAML only when a SKILL.md changed."""
@@ -458,6 +509,13 @@ class Slots(Fresh):
     def test_a_slotted_trigger_isnt_matched_word_for_word(self):
         self.teach(["search amazon for {query}"], [{"do": "google", "query": "{query} amazon"}])
         self.assertEqual(siri.routines(), [])  # "search amazon for query" doesn't start it
+
+    def test_steps_with_a_slot_never_run_from_a_plain_trigger(self):
+        """27 October: "amazon search" beside "search amazon for {query}" typed "{query}" as it stood."""
+        self.teach(["search amazon for {query}", "amazon search"], [{"do": "type", "text": "{query}"}])
+        self.assertEqual(siri.routines(), [])
+        self.assertEqual(siri.slotless_routines(), [])
+        self.assertIsNotNone(quiet(siri.slot_routine, "search amazon for shoes", False))
 
 
 class AskedByName(Fresh):

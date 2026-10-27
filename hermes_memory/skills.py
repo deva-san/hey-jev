@@ -91,8 +91,8 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     yaml_content = content[3: end_match.start() + 3]
     body = content[end_match.end() + 3:]
     try:
-        parsed = None if YAML_ALIAS.search(yaml_content) else _yaml(yaml_content)
-    except Exception:
+        parsed = None if YAML_ALIAS.search(yaml_content) and _has_alias(yaml_content) else _yaml(yaml_content)
+    except Exception:  # RecursionError too: brackets nested 20,000 deep
         parsed = None
     if not isinstance(parsed, dict):
         return _fallback_frontmatter(yaml_content), body
@@ -102,7 +102,7 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     if isinstance(frontmatter.get("metadata"), str):  # metadata: '{"openclaw": ...}', JSON5 inside a YAML string
         try:
             frontmatter["metadata"] = _json5(frontmatter["metadata"])
-        except ValueError:
+        except (ValueError, RecursionError):
             pass
     return frontmatter, body
 
@@ -111,8 +111,18 @@ _yaml_load = []
 # A YAML anchor (&a) or alias (*a) as a value starts: frontmatter that has one is read by lines instead (27 October).
 # A hand-dropped SKILL.md is parsed before skills_guard scans it, every 5 s on the voice path, and aliases let a
 # few lines grow without end: a 7-level "billion laughs" description came to 72 MB and 1.4 s in str(), two more
-# levels would hang her. No skill needs one; "*bold*" in a description only means it's read the old way
+# levels would hang her. No skill needs one. YAML_ALIAS is only the quick look: what it finds, "Find *.py files" or
+# "**markdown**" in a description too, is told apart from a real alias by YAML's own events (_has_alias). Read by
+# lines, those lost a nested metadata.openclaw, so a macOS-only skill showed on Windows (27 October)
 YAML_ALIAS = re.compile(r"(?:^|[\s\[{,:?-])[&*][^\s\[\]{},]", re.M)
+
+
+def _has_alias(text: str) -> bool:
+    """True if YAML text has an alias (*a) in it, from PyYAML's parser events: aliases aren't expanded there, so a
+    bomb costs no more than its own length. Raises as YAML does if it won't parse."""
+    import yaml
+    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    return any(isinstance(event, yaml.AliasEvent) for event in yaml.parse(text, Loader=loader))
 
 
 def _yaml(text: str) -> Any:
@@ -134,7 +144,7 @@ def _fallback_frontmatter(yaml_content: str) -> Dict[str, Any]:
         if end is not None:
             try:
                 meta = _json5(yaml_content[start:end + 1])
-            except ValueError:
+            except (ValueError, RecursionError):
                 meta = None
             yaml_content = yaml_content[:m.start()] + yaml_content[end + 1:]
     frontmatter = _line_frontmatter(yaml_content)
@@ -144,13 +154,21 @@ def _fallback_frontmatter(yaml_content: str) -> Dict[str, Any]:
 
 
 def _closing_brace(text: str, start: int) -> Optional[int]:
-    """Where the { at start closes, what's inside strings skipped, or None."""
+    """Where the { at start closes, what's inside strings and // or /* */ comments skipped (as _json5 skips them), or
+    None. An apostrophe in "// it's mac only" opened a string that never closed, and the metadata was lost (27
+    October)."""
     depth, i, quote = 0, start, None
     while i < len(text):
         c = text[i]
         if quote:
             i += 2 if c == "\\" else 1
             quote = None if c == quote else quote
+            continue
+        if text.startswith("//", i):
+            i = len(text) if text.find("\n", i) < 0 else text.find("\n", i)
+            continue
+        if text.startswith("/*", i):
+            i = len(text) if text.find("*/", i) < 0 else text.find("*/", i) + 2
             continue
         if c in "\"'":
             quote = c
@@ -201,7 +219,7 @@ def _line_frontmatter(yaml_content: str) -> Dict[str, Any]:
                 try:
                     frontmatter[key.strip()] = json.loads(value)
                     continue
-                except ValueError:
+                except (ValueError, RecursionError):  # brackets nested deeper than json can go: words
                     pass
             frontmatter[key.strip()] = value.strip("'\"")  # Hey Jev: quotes off
     return frontmatter
@@ -463,11 +481,23 @@ def _read(skill_md: Path) -> Optional[Tuple[Dict[str, Any], str]]:
         kept = _reads.get(str(skill_md))
         if kept and kept[0] == stamp:
             return kept[1], kept[2]
-        fm, body = parse_frontmatter(skill_md.read_text(encoding="utf-8-sig"))
+        if _unread.get(str(skill_md)) == stamp:
+            return None
+        text = skill_md.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError):
+        return None
+    try:
+        fm, body = parse_frontmatter(text)
+    except Exception as exc:  # one bad file is left out, never every skill: a RecursionError from brackets nested
+        # 20,000 deep left list_skills, and routines() then had none at all, till the file went (27 October)
+        _unread[str(skill_md)] = stamp
+        print(f"  couldn't read {skill_md.parent.name}'s SKILL.md, so it's left out: {type(exc).__name__}")
         return None
     _reads[str(skill_md)] = (stamp, fm, body)
     return fm, body
+
+
+_unread: Dict[str, Tuple[int, int]] = {}  # SKILL.md: its time and size when it couldn't be parsed
 
 
 def _entry(fm: Dict[str, Any], body: str, folder: Path, imported: bool) -> Dict[str, Any]:
@@ -600,10 +630,11 @@ def _blocked(folder: Path, wait: bool = True) -> str:
     try:
         if folder.is_symlink() or folder.is_junction():
             return "it's a link to another folder"
-        files = tuple(sorted((str(p.relative_to(folder)), st.st_size, st.st_mtime_ns)
-                             for p in folder.rglob("*") for st in [p.lstat()]))
+        files = _fingerprint(folder)
     except OSError:
         return "its folder couldn't be read"
+    if files is None:
+        return f"it has more than {FINGERPRINT_MOST} files in it"
     kept = _scans.get(str(folder))
     if kept and kept[0] == files:
         return kept[1]
@@ -614,6 +645,26 @@ def _blocked(folder: Path, wait: bool = True) -> str:
             _scanning[str(folder)] = threading.Thread(target=_scan, args=(folder, files), daemon=True)
             _scanning[str(folder)].start()
     return SCANNING
+
+
+FINGERPRINT_MOST = 500  # files a skill dropped in by hand may have: more is no skill, and blocked
+
+
+def _fingerprint(folder: Path) -> Optional[tuple]:
+    """The names, sizes and times of the files in a skill's folder, or None for more than FINGERPRINT_MOST. Never
+    into a link or junction inside it, as support_files keeps out of them: rglob walked into one, and a junction to
+    Documents or a node_modules of thousands of files was walked and stat'd every 5 s on the voice path (27 October)."""
+    found = []
+    for root, dirs, names in os.walk(folder):
+        here = Path(root)
+        listed = dirs + names  # a link counted by its own name, never walked into
+        dirs[:] = [d for d in dirs if not ((here / d).is_symlink() or (here / d).is_junction())]
+        for name in listed:
+            st = (here / name).lstat()
+            found.append((str((here / name).relative_to(folder)), st.st_size, st.st_mtime_ns))
+            if len(found) > FINGERPRINT_MOST:
+                return None
+    return tuple(sorted(found))
 
 
 _scan_lock = threading.Lock()
