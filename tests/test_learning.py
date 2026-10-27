@@ -648,6 +648,8 @@ class RealUse(Home):
         self.addCleanup(patch.stop)
         siri.TURN_SKILLS.clear()
         self.addCleanup(siri.TURN_SKILLS.clear)
+        siri.TURN_WRITTEN.clear()
+        self.addCleanup(siri.TURN_WRITTEN.clear)
 
     def test_a_skill_only_written_out_isnt_used_and_one_read_is(self):
         skills.create_skill("tea-timer", skills.build_content("tea-timer", "Timer for tea", "Steep green tea 3 min."))
@@ -683,6 +685,48 @@ class RealUse(Home):
         siri.count_turn_skills(["it failed"])
         self.assertTrue(until(lambda: outcomes.load()["skills"].get("tea", {}).get("failed") == 1))
         self.assertNotIn("yours", outcomes.load()["skills"])
+
+
+    def test_a_note_she_wrote_that_shaped_a_turn_and_a_lesson_shown_to_a_run_arent_archived(self):
+        """Counting only runs left a note of hers, read in her prompt every day, and an app's lessons with nothing to
+        move Hermes' curator clock: archived 30 days after they were written. Now each is viewed when it's acted on."""
+        for name in ("tea-note", "unread"):
+            skills.create_skill(name, skills.build_content(name, "Timer for green tea" if name == "tea-note" else
+                                                           "Bike tyre pressures", "Steep green tea 3 min."
+                                                           if name == "tea-note" else "Front 40 psi."),
+                                agent_created=True)
+        siri.learn_lesson("chrome.exe", "Dark mode is under Appearance.")
+        data = skill_usage.load_usage()
+        old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=31)).isoformat()
+        for rec in data.values():
+            rec.update(created_at=old, last_patched_at=old if rec.get("last_patched_at") else None)
+        skill_usage.save_usage(data)
+        siri._skill_cache[0] = 0.0
+
+        def think(text, *a, **k):
+            siri.skills_block(text)
+            return {"steps": [{"do": "volume", "to": 30}], "say": "Done."}
+        with mock.patch.object(siri, "think", think), mock.patch.object(siri, "STREAM_SAY", False), \
+                mock.patch.object(siri, "say", lambda line, notify: None), \
+                mock.patch.object(siri, "learn_later", lambda *a: None), \
+                mock.patch.object(siri, "do_step", lambda step: None), \
+                mock.patch.object(siri.decider, "available", lambda: False), \
+                mock.patch.object(siri, "media_playing", lambda: False), \
+                mock.patch.dict(siri._lessons_seen, clear=True), contextlib.redirect_stdout(io.StringIO()):
+            siri.PENDING.update(plan=None, until=0.0)
+            siri.handle("set a timer for my green tea")
+            self.assertEqual(siri.TURN_WRITTEN, {"tea-note"})
+            self.assertTrue(siri.lessons_for("chrome.exe"))
+            siri.lessons_for("chrome.exe")  # each round of the run: counted once
+        self.assertTrue(until(lambda: all(skill_usage.get_record(n).get("view_count") for n in ("tea-note",
+                                                                                               "app-chrome"))))
+        self.assertEqual(skill_usage.get_record("app-chrome")["view_count"], 1)
+        self.assertEqual(self.used, [])  # viewed, never a run
+        with contextlib.redirect_stdout(io.StringIO()):
+            curator.apply_automatic_transitions()
+        self.assertIsNotNone(skills.find_skill("tea-note"))
+        self.assertIsNotNone(skills.find_skill("app-chrome"))
+        self.assertIsNone(skills.find_skill("unread"))  # the one nothing used went, as before
 
 
 class FailedRuns(Home):
@@ -779,6 +823,22 @@ class FailedRuns(Home):
         self.assertTrue(siri.undo_learning())
         self.assertIsNone(skills.find_skill("app-chrome"))
 
+    def test_a_new_lesson_changes_only_the_lessons_and_keeps_the_rest_of_the_skill(self):
+        siri.learn_lesson("chrome.exe", "First.")
+        siri.learn_skill({"action": "patch", "name": "app-chrome", "old": "- First.",
+                          "new": "- First.\n\n## Also\nKeep the window maximised."}, agent=True)  # her curator's
+        siri.learn_lesson("chrome.exe", "Second.")
+        text = skills.find_skill("app-chrome").read_text(encoding="utf-8")
+        self.assertIn("## Lessons\n- First.\n- Second.", text)
+        self.assertIn("## Also\nKeep the window maximised.", text)
+        self.assertIn("Pitfalls she found", text)
+        skills.create_skill("app-notepad", skills.build_content("app-notepad", "Hers", "Save with Ctrl+S."),
+                            agent_created=True)  # one of hers with no lessons yet
+        siri.learn_lesson("notepad.exe", "The menu hides on a small window.")
+        siri._skill_cache[0] = 0.0
+        self.assertIn("Save with Ctrl+S.", skills.find_skill("app-notepad").read_text(encoding="utf-8"))
+        self.assertEqual(siri.lessons_for("notepad.exe"), "The menu hides on a small window.")
+
     def test_lessons_stay_few_and_one_you_wrote_by_that_name_isnt_touched(self):
         for i in range(siri.LESSONS_KEPT + 2):
             siri.learn_lesson("mail.google.com", f"Lesson {i}.")
@@ -853,6 +913,21 @@ class CuratorPass(Home):
                 self.assertNotIn(self.curate(change), ("patch yours", "patch done-before", "delete yours"))
         self.assertEqual({n: skills.find_skill(n).read_text(encoding="utf-8") for n in before}, before)
         self.assertIsNone(siri.undo_learning())  # nothing was changed, so nothing journaled
+
+    def test_never_inside_the_steps_of_a_routine_of_hers(self):
+        skills.create_skill("work-mode", skills.build_content("work-mode", "Work setup", "Opens my music.",
+                                                              ["work mode"], [{"do": "open", "app": "Spotify"}]),
+                            agent_created=True)
+        self.assertIn("work-mode", siri.curate_candidates())
+        before = skills.find_skill("work-mode").read_text(encoding="utf-8")
+        for old in ("Spotify", "open\",  \"app", "\"open\", \"app\": \"Spotify\""):
+            with self.subTest(old=old):
+                self.assertIn("steps are never", self.curate({"action": "patch", "name": "work-mode", "old": old,
+                                                              "new": "Steam"}))
+        self.assertEqual(skills.find_skill("work-mode").read_text(encoding="utf-8"), before)
+        self.assertEqual(self.curate({"action": "patch", "name": "work-mode", "old": "Opens my music.",
+                                      "new": "Opens my music for work."}), "patch work-mode")  # its notes may change
+        self.assertIn("Spotify", skills.find_skill("work-mode").read_text(encoding="utf-8"))
 
     def test_the_weekly_tidy_runs_it_once_quiet_and_only_with_learning_on(self):
         with mock.patch.object(curator, "should_run_now", lambda: True), \

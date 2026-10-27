@@ -2505,6 +2505,16 @@ def used_later(name):
     threading.Thread(target=skills.used, args=(name,), daemon=True).start()
 
 
+TURN_WRITTEN = set()  # notes she wrote, written out in full for this turn (skills_block): viewed if it then acted
+
+
+def viewed_later(names):
+    """skills.viewed, off the turn, as used_later: a note that shaped what she did. Never counted as a run."""
+    names = sorted({str(n) for n in names if n})
+    if names:
+        threading.Thread(target=lambda: [skills.viewed(n) for n in names], daemon=True).start()
+
+
 def routines():
     """(phrase, skill) for every skill with steps and the phrases that start it, read again every few seconds."""
     if time.time() - _skill_cache[0] > 5:
@@ -3567,8 +3577,13 @@ def skills_block(text=""):
         runnable = agent.procedures()  # a procedure that wouldn't run (changed since she wrote it) isn't offered
         entries = [e for e in _skill_cache[1] if not e.get("procedure") or e["dir"] in runnable]
         ranked = rank_skills(text, entries)
-        # written out isn't used (skills.used): only a routine, a procedure or a skill_view counts, since 27 October
+        # written out isn't used (skills.used): only a routine, a procedure or a skill_view counts, since 27 October.
+        # A note (no steps, no procedure) has no run to count, so it's viewed if the turn then acts (handle), or
+        # Hermes' curator would archive every note of hers 30 days after she wrote it, read in her prompt or not
         detail = [name for name, fits in ranked[:WRITTEN_OUT] if fits]
+        if text:
+            TURN_WRITTEN.update(e["dir"] for e in entries if e["dir"] in detail and e.get("notes")
+                                and not e.get("plan") and not e.get("procedure"))
         # with no request (learn_later's review) all are described: it judges a correction by their words
         return skills.system_prompt_block(entries, detail, [name for name, _ in ranked] if text else None)
     except Exception as exc:
@@ -3959,16 +3974,28 @@ def lesson_skill(app):
     return ("app-" + re.sub(r"[^a-z0-9]+", "-", stem).strip("-"))[:64].rstrip("-.")
 
 
+def _lessons_span(text):
+    """(start, end) of the Lessons section in a skill's text, its heading to the next heading or the end, or None."""
+    at = str(text or "").find(LESSONS_HEAD)
+    if at < 0:
+        return None
+    nxt = re.search(r"^#{1,6} ", text[at + len(LESSONS_HEAD):], re.M)
+    return at, (at + len(LESSONS_HEAD) + nxt.start() if nxt else len(text))
+
+
 def _lessons_in(notes):
-    return [line[2:].strip() for line in str(notes or "").split(LESSONS_HEAD, 1)[-1].splitlines()
-            if line.startswith("- ")] if LESSONS_HEAD in str(notes or "") else []
+    span = _lessons_span(str(notes or ""))
+    return [line[2:].strip() for line in str(notes)[span[0]:span[1]].splitlines()
+            if line.startswith("- ")] if span else []
 
 
 def learn_lesson(app, lesson):
     """One lesson from tasks that fell short in app, into its umbrella skill (lesson_skill) as a note, through
     learn_skill as the review's (agent=True): Hermes' lesson layer, which writes a pitfall into the skill that governs
     the task. Never steps, triggers or a procedure, so nothing runs from it; one you taught her by that name isn't
-    touched (learn_skill), and the newest LESSONS_KEPT stay. Returns learn_skill's few words."""
+    touched, and the newest LESSONS_KEPT stay. Once the skill is there only its Lessons section is patched: a
+    rewrite from the lessons alone threw away whatever else was in it, a line her curator pass added among them
+    (found in review, 27 October). Returns learn_skill's few words."""
     lesson = " ".join(str(lesson or "").split())[:LESSON_CHARS]
     if not lesson:
         raise RuntimeError("There's no lesson in it")
@@ -3976,23 +4003,42 @@ def learn_lesson(app, lesson):
     if not name or name == "app":
         raise RuntimeError("I don't know which app that was")
     path = skills.find_skill(name)
-    old = _lessons_in(skills.parse_frontmatter(path.read_text(encoding="utf-8-sig"))[1]) if path else []
+    if path and not skills.skill_usage.is_curator_managed(name):  # a patch from the review would go in, so asked here
+        raise RuntimeError("You taught me that one, so I don't change it on my own")
+    body = skills.parse_frontmatter(path.read_text(encoding="utf-8-sig"))[1] if path else ""
+    old = _lessons_in(body)
     kept = [x for x in old if x.lower() != lesson.lower()][-(LESSONS_KEPT - 1):] + [lesson]
-    label = outcomes.app_key(app)
+    section = f"{LESSONS_HEAD}\n" + "\n".join(f"- {x}" for x in kept)
+    span, label = _lessons_span(body), outcomes.app_key(app)
+    if span:  # only the section, so the rest of the skill stays as it is
+        was = body[span[0]:span[1]].rstrip()
+        return learn_skill({"action": "patch", "name": name, "old": was, "new": section}, agent=True)
+    if body.strip():  # hers, but with no Lessons section yet: added after what's there
+        return learn_skill({"action": "patch", "name": name, "old": body.strip(),
+                            "new": body.strip() + "\n\n" + section}, agent=True)
     return learn_skill({"action": "create", "name": name, "description": f"Lessons for working in {label}",
-                        "notes": f"Pitfalls she found working in {label} on this PC, newest last.\n\n{LESSONS_HEAD}\n"
-                                 + "\n".join(f"- {x}" for x in kept)}, agent=True)
+                        "notes": f"Pitfalls she found working in {label} on this PC, newest last.\n\n{section}"},
+                       agent=True)
+
+
+LESSONS_SEEN_EVERY = 600  # s: an app's lessons shown to a task there count as viewed once in this, about once a run
+_lessons_seen = {}  # lessons skill: when it was last counted as viewed
 
 
 def lessons_for(app):
     """An app's lessons (learn_lesson), for each round of a task in it (agent.messages), or "". From her skills as
-    last read (routines, every few seconds), so a round reads no file."""
+    last read (routines, every few seconds), so a round reads no file. Shown is viewed (skills.viewed, off the
+    round, once a run): a lesson that worked, so no new failure rewrote it, was archived by Hermes' curator after 30
+    days with nothing to keep its clock going, and the next task there went without it (found in review, 27 October)."""
     if not app:
         return ""
     routines()
     name = lesson_skill(app)
     entry = next((e for e in _skill_cache[1] if e["dir"] == name), None)
     found = _lessons_in(entry.get("notes")) if entry else []
+    if found and time.time() - _lessons_seen.get(name, 0.0) > LESSONS_SEEN_EVERY:
+        _lessons_seen[name] = time.time()
+        viewed_later([name])
     return " ".join(found)[-LESSONS_SHOWN:]
 
 
@@ -7630,6 +7676,7 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     text, words = fix_vocab(text), fix_vocab(words)  # their dictionary, as for dictation
     MEMORY.reset_consolidation_failures()
     TURN_SKILLS.clear()  # a new turn: the skills it uses from here
+    TURN_WRITTEN.clear()
     named = not gate
     agent.SAID.set(str(words or text))  # the words a task in an app may take an address or a site from, never "yes"
     # and whether they were plainly asked of her, which learning a task from them needs: by name, or a task asked for in
@@ -7870,7 +7917,9 @@ def handle(text, words=None, stt_ms=None, notify=None, gate=False):
     except Exception as exc:
         print(f"  couldn't keep this turn: {exc!r}")
     count_turn_skills(failed)
-    fell = agent.LAST_FAILURE["app"] if agent.LAST_FAILURE["at"] >= began else ""  # a task in an app fell short
+    if kept["steps"]:  # a note written out for this turn shaped steps that ran: Hermes' view, not a use
+        viewed_later(TURN_WRITTEN - TURN_SKILLS)
+    fell =agent.LAST_FAILURE["app"] if agent.LAST_FAILURE["at"] >= began else ""  # a task in an app fell short
     learn_later(words or text, [s for s in kept["steps"] if isinstance(s, dict)], failed, gate, fell)
     note = note or voice_error
     emit(notify, "Something went wrong" if note else "Ready", note or (PHONE_SHOWN[1] if origin() == "phone" else
@@ -8111,6 +8160,21 @@ def curate_skills():
     return curate_change(change, allowed, str(data.get("why") or "") if isinstance(data, dict) else "")
 
 
+FENCED = re.compile(r"```.*?(?:```|\Z)", re.S)  # a fenced block in a SKILL.md, a routine's ```json steps among them
+
+
+def in_steps(name, old):
+    """Whether a patch's old text is in, or runs into, a fenced block of the skill as it is now: a routine of hers
+    runs its ```json steps on its words with no model, and a curator patch of '"app": "Spotify"' inside them passed
+    the check for backticks in old and new (found in review, 27 October). Found as patch_skill finds it, exactly or
+    with loose spacing; one it can't place is left to patch_skill to refuse."""
+    path = skills.find_skill(name)
+    text = path.read_text(encoding="utf-8-sig") if path else ""
+    at = text.find(old) if old else -1
+    span = (at, at + len(old)) if at >= 0 and text.count(old) == 1 else skills._spaced_span(text, old) if old else None
+    return span is not None and any(m.start() < span[1] and span[0] < m.end() for m in FENCED.finditer(text))
+
+
 def curate_change(change, allowed, why=""):
     """The curator's one change, only to a skill in allowed (curate_candidates). Returns what it did."""
     action, name = str(change.get("action") or "none").lower(), str(change.get("name") or "")
@@ -8120,7 +8184,7 @@ def curate_change(change, allowed, why=""):
         return f"not changed: {name or 'no skill'} isn't one of hers it may change"
     if action == "patch":
         old, new = str(change.get("old") or ""), str(change.get("new") or "")
-        if "```" in old + new:
+        if "```" in old + new or in_steps(name, old):
             return f"not changed: {name}'s steps are never the curator's to change"
         step = {"action": "patch", "name": name, "old": old, "new": new}
     elif action in ("archive", "delete"):

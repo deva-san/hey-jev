@@ -231,6 +231,14 @@ def used(name: str) -> None:
     _usage(skill_usage.bump_use, name)
 
 
+def viewed(name: str) -> None:
+    """Hey Jev: a skill shaped what she did without being run: a note she wrote, written out in her prompt for a turn
+    that then acted, or an app's lessons shown to a task there. Hermes' view count, not use: it keeps the curator's
+    clock (latest_activity_at) going, so a note in use every day isn't archived 30 days after it was written, and
+    her outcome counts stay for runs only."""
+    _usage(skill_usage.bump_view, name)
+
+
 VERSIONS_KEPT = 10  # Hey Jev: earlier SKILL.md files kept for each skill, as OpenClaw's Workshop keeps 10
 
 
