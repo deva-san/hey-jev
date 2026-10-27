@@ -556,7 +556,7 @@ class ParaphrasedRoutines(Routing):
 
     def skills(self, *found):
         """skills.list_skills' stand-in, read through the real routines() and its cache."""
-        return mock.patch.object(siri.skills, "list_skills", lambda: [json.loads(json.dumps(s)) for s in found])
+        return mock.patch.object(siri.skills, "list_skills", lambda **_: [json.loads(json.dumps(s)) for s in found])
 
     def setUp(self):
         super().setUp()

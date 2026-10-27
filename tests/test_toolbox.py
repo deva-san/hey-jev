@@ -323,7 +323,8 @@ class Gated(unittest.TestCase):
                      "what windows are open", "what apps are installed"):
             system = self.system(text)
             self.assertIn(siri.LOOK_STEPS, system, text)
-            self.assertEqual(system.cache_at + 2, system.index(siri.LOOK_STEPS), text)  # just after the cache
+            # after the cache, past the task and list steps when the words bring those too (gated_blocks)
+            self.assertLess(system.cache_at, system.index(siri.LOOK_STEPS), text)
         self.assertNotIn(siri.LOOK_STEPS, self.system("open notepad"))
         # everyday turns that only share a word with them don't (review, 27 October)
         for text in ("hang on, open Chrome", "open Windows settings", "play something slow", "close these windows",
