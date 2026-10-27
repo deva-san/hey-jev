@@ -20,5 +20,16 @@
   "calculator": {"app": "Calculator", "exe": "CalculatorApp.exe"},
   "settings": {"app": "Settings", "exe": "SystemSettings.exe"},
   "claude_code": {"app": "Claude", "say": "Claude Code", "exe": "claude.exe",
-                  "heard_as": ["cloud code", "clawed code", "clod code", "claud code", "clawd code", "cloud coat", "claude coat", "clawed coat", "cloud cold"]}
+                  "heard_as": ["cloud code", "clawed code", "clod code", "claud code", "clawd code", "cloud coat", "claude coat", "clawed coat", "cloud cold"]},
+  "_sites": {
+    "youtube": ["YouTube", "https://www.youtube.com"], "gmail": ["Gmail", "https://mail.google.com"],
+    "google": ["Google", "https://www.google.com"], "google maps": ["Google Maps", "https://maps.google.com"],
+    "maps": ["Google Maps", "https://maps.google.com"], "github": ["GitHub", "https://github.com"],
+    "chatgpt": ["ChatGPT", "https://chatgpt.com"], "chat gpt": ["ChatGPT", "https://chatgpt.com"],
+    "facebook": ["Facebook", "https://www.facebook.com"], "instagram": ["Instagram", "https://www.instagram.com"],
+    "linkedin": ["LinkedIn", "https://www.linkedin.com"], "netflix": ["Netflix", "https://www.netflix.com"],
+    "twitter": ["X", "https://x.com"]
+  },
+  "_bare": ["chrome", "google chrome", "notepad", "spotify", "whatsapp", "calculator", "file explorer", "vs code",
+            "visual studio code", "kiro", "outlook", "discord", "slack"]
 }

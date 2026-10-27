@@ -105,6 +105,9 @@ def focused_on(app):
 # Add an app with a line in apps.json: "name": "Start menu name", or {"app", "say", "heard_as", "exe"} for extras
 with open(os.path.join(HERE, "apps.json"), encoding="utf-8") as f:
     _apps = json.load(f)
+# Keys starting "_" aren't apps: "_sites" (SITES) and "_bare" (BARE_APPS), moved there from the code on 27 October
+# so a site or an app said on its own is added the way an app is, without a new build. Taken out before the rest
+_listed = {k: _apps.pop(k) for k in [k for k in _apps if k.startswith("_")]}
 APPS = {k: v if isinstance(v, str) else v["app"] for k, v in _apps.items()}
 APP_SAY = {k: v if isinstance(v, str) else v.get("say", v["app"]) for k, v in _apps.items()}
 # "exe" in apps.json: the program its windows run as, for when the name alone doesn't find them (VS Code is Code.exe)
@@ -1237,7 +1240,7 @@ def clock():
 
 # --------------------------------------------------------------------------- Simple commands, worked out on this PC
 # A plan is {"steps": [...], "say": "..."}, the same as the model makes, so both are done the same way below.
-SITES = {  # "open youtube": what she calls it, and where it is
+DEFAULT_SITES = {  # "open youtube": what she calls it, and where it is, for an apps.json without "_sites"
     "youtube": ("YouTube", "https://www.youtube.com"), "gmail": ("Gmail", "https://mail.google.com"),
     "google": ("Google", "https://www.google.com"), "google maps": ("Google Maps", "https://maps.google.com"),
     "maps": ("Google Maps", "https://maps.google.com"), "github": ("GitHub", "https://github.com"),
@@ -1246,9 +1249,37 @@ SITES = {  # "open youtube": what she calls it, and where it is
     "linkedin": ("LinkedIn", "https://www.linkedin.com"), "netflix": ("Netflix", "https://www.netflix.com"),
     "twitter": ("X", "https://x.com"),
 }
+# An app said on its own that opens it ("Notepad" after a new tab), for an apps.json without "_bare". Not "brave" or
+# "edge", said for other things
+DEFAULT_BARE = {"chrome", "google chrome", "notepad", "spotify", "whatsapp", "calculator", "file explorer", "vs code",
+                "visual studio code", "kiro", "outlook", "discord", "slack"}
+
+
+def listed_sites(raw):
+    """SITES from apps.json's "_sites", {"name you say": ["Name", "https://..."]}, each kept only if it's that
+    shape and a web address: a hand edit with a typo loses that site, not the rest, nor her start. The defaults if
+    there's none."""
+    if not isinstance(raw, dict):
+        return dict(DEFAULT_SITES)
+    found = {}
+    for said, value in raw.items():
+        if isinstance(value, (list, tuple)) and len(value) == 2 and all(isinstance(v, str) for v in value) and \
+                re.match(r"https?://", value[1]) and key_of(said):
+            found[key_of(said)] = (value[0], value[1])
+    return found or dict(DEFAULT_SITES)
+
+
+def listed_bare(raw):
+    """BARE_APPS from apps.json's "_bare", a list of names said alone, or the defaults if there's none."""
+    if not isinstance(raw, list):
+        return set(DEFAULT_BARE)
+    return {key_of(x) for x in raw if isinstance(x, str) and key_of(x)} or set(DEFAULT_BARE)
+
+
+SITES = listed_sites(_listed.get("_sites"))
 DOMAIN = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|in|io|ai|dev|co|me|tv|app|gov|edu|uk)(?:/\S*)?")
 # "let's" stays before "play": "let's play cricket tomorrow" is talk in the room, so without her name it isn't taken
-# as a direct "play ..." (see handle), and with it fast_intent still plays "let's play some music"
+# as a direct "play ..." (see handle), and with it _quick's second look still plays "let's play some music"
 FILLER = re.compile(r"^(?:please|pls|kindly|can you|could you|would you|will you|can u|just|now|ok|okay|so|alright|"
                     r"yes|yeah|yep|"
                     r"um+|uh+|hmm+|er+|and|then|also|hey|yo|go ahead and|i want you to|i'd like you to|"
@@ -1349,8 +1380,7 @@ def _minimise(m):
     return app and make_plan([{"do": "minimise", "app": app[0]}], say_line("app_minimise", app=app[1]))
 
 
-BARE_APPS = {"chrome", "google chrome", "notepad", "spotify", "whatsapp", "calculator", "file explorer", "vs code",
-             "visual studio code", "kiro", "outlook", "discord", "slack"}  # not "brave" or "edge", said for other things
+BARE_APPS = listed_bare(_listed.get("_bare"))
 
 
 def _bare(thing):
@@ -1362,9 +1392,97 @@ def _bare(thing):
     return app and make_plan([{"do": "open", "app": app[0]}], say_line("app_open"))
 
 
+def _bare_said(m):
+    return _bare(m["x"])
+
+
+# Windows' own folders and tools by what they're called, opened by their shell: names, since they can be moved off
+# the user folder: on this PC Downloads is on D:, so ~\Downloads didn't exist and ~\Pictures was an old one
+SHELL_FOLDERS = ((r"(?:my )?downloads(?: folder)?", "shell:Downloads", True),
+                 (r"(?:my )?documents(?: folder)?", "shell:Personal", True),
+                 (r"(?:my )?pictures(?: folder)?", "shell:My Pictures", True),
+                 (r"(?:the )?recycle bin", "shell:RecycleBinFolder", True),
+                 (r"(?:file )?explorer|my files", "shell:MyComputerFolder", False))
+
+
+def guess_app(name, closing=False):
+    """(Start menu name, spoken name) for an app named a little off: as known_app, then a Start menu name in any
+    case, then, only to open one, the closest Start menu or apps.json name at 0.75 or more ("open spotfy"). Never a
+    guess to close or minimise one: that's done to the app she's sure of or not at all."""
+    raw = str(name).lower().strip()
+    if not raw or raw in ("door", "box", "drawer", "eyes", "mouth", "case", "window", "tab"):
+        return None
+    found = known_app(raw)
+    if found:
+        return found
+    start = [n for n, _ in win.loaded_start_apps()]
+    hit = next((n for n in start if n.lower() == raw), None)
+    if hit or closing:
+        return hit and (hit, hit)
+    hit = fast_intent.fuzzy_match(raw, start)
+    if hit:
+        return hit, hit
+    key = fast_intent.fuzzy_match(raw, list(APP_LOOKUP))
+    return key and (APPS[APP_LOOKUP[key]], APP_SAY[APP_LOOKUP[key]])
+
+
+def _open_named(m):
+    """"activate Spotify", "open the app Notepad", "open downloads", "open spotfy": what "open" above left, a
+    shell folder or Task Manager by name, then an app guessed from a name said a little off."""
+    x = m["app"].strip()
+    if x in SITES:
+        return make_plan([{"do": "website", "url": SITES[x][1]}], say_line("site_open", site=SITES[x][0]))
+    for said, path, line in SHELL_FOLDERS:
+        if re.fullmatch(said, x):
+            return make_plan([{"do": "open_folder", "path": path}], say_line("app_open") if line else "")
+    if x == "task manager":
+        return make_plan([{"do": "keys", "keys": "ctrl+shift+esc"}])
+    app = guess_app(x)
+    return app and make_plan([{"do": "open", "app": app[0]}], say_line("app_open"))
+
+
+def _folder(path, line=True):
+    return lambda m: make_plan([{"do": "open_folder", "path": path}], say_line("app_open") if line else "")
+
+
+def _close_named(m):
+    """"terminate Spotify", "close the app Notepad": an app she's sure of, never a guess."""
+    x = m["app"].strip()
+    if x in ("tab", "this tab", "current tab"):
+        return make_plan([{"do": "keys", "keys": "ctrl+w"}])
+    app = guess_app(x, closing=True)
+    return app and make_plan([{"do": "close", "app": app[0]}], say_line("app_quit", app=app[1]))
+
+
+def _minimise_named(m):
+    app = guess_app(m["app"].strip(), closing=True)
+    return app and make_plan([{"do": "minimise", "app": app[0]}], say_line("app_minimise", app=app[1]))
+
+
+def _scroll_times(m):
+    """"scroll down three times", "scroll down twice", "go to bottom", "scroll all the way up"."""
+    said = _digits(m["times"]) if m["times"] else ""
+    if said and not said.isdigit():
+        return None
+    where = "top" if "top" in m[1] else "bottom" if "bottom" in m[1] else m[1]
+    times = int(said) if said else 2 if m["twice"] else 3 if "lot" in m[0] else 1
+    return make_plan([{"do": "scroll", "direction": where, "times": times}])
+
+
+def _full_screen(m):
+    return make_plan([{"do": "keys", "keys": "f" if focused_on("youtube") else "f11"}])  # YouTube's own is f
+
+
+def _duration_timer(m):
+    """"5 minutes", "a 2 hour timer": a number and a unit is a timer."""
+    n, unit = int(m["num"]), m["unit"]
+    secs = n * 3600 if "hour" in unit or "hr" in unit else n * 60 if "min" in unit else n
+    return make_plan([{"do": "timer", "seconds": secs}], say_line("timer_set"))
+
+
 def _play(m):
-    """A YouTube play for "play X", or None for the model. fast_intent asks this too, so it doesn't play what's
-    refused here."""
+    """A YouTube play for "play X", or None for the model. _quick's second look, with the politeness taken off,
+    comes here too, so it doesn't play what's refused here."""
     q = m["q"]
     if re.match(r"(?:(?:the|a|this|that) )?(?:first|next|previous|last|top|second|third|fourth|fifth|same|video|song|"
                 r"play|it(?!'))\b", q) or " and " in f" {q} " or \
@@ -2445,7 +2563,83 @@ QUICK = [(re.compile(p), make) for p, make in (
     (r"(?:(?:cancel|stop|delete|clear|remove)(?: all the| all my| the| all| my| that)?(?: (?P<what>.+?))? reminders?|"
      r"stop reminding me)(?: (?:to|about|for) (?P<about>.+?))?(?: any ?more)?", _cancel_reminders),
     # just a site or an app, "YouTube" after a new tab: open it. Last, so it never takes a phrase meant for the above
-    (r"(?P<x>[a-z][a-z .]{1,24})", lambda m: _bare(m["x"])),
+    (r"(?P<x>[a-z][a-z .]{1,24})", _bare_said),
+    # What fast_intent.py's own table had and this one didn't, moved here on 27 October: two tables of the same
+    # commands had drifted apart, and the second ran on every miss. After all the above, as that one ran after them,
+    # so none of these takes a phrase a row above has always had. Gated the same way, in handle
+    (r"(?:hey|hi|hello|ok|okay|yo) (?:jev|jarvis|jeff|joe|jim|jill)", _reply("greeting")),
+    (r"current time", lambda m: make_plan(say=f"It's {clock()}.")),
+    (r"(?:reopen|restore|undo)(?: the| last| closed)? tab|open (?:last|closed) tab",
+     _step(do="keys", keys="ctrl+shift+t")),
+    (r"(?:next|switch to next) tab", _step(do="keys", keys="ctrl+tab")),
+    (r"(?:previous|switch to previous) tab", _step(do="keys", keys="ctrl+shift+tab")),
+    (r"zoom in(?: a bit| more)?", _step(do="keys", keys="ctrl+plus")),
+    (r"zoom out(?: a bit| more)?", _step(do="keys", keys="ctrl+minus")),
+    (r"reset zoom|normal zoom", _step(do="keys", keys="ctrl+0")),
+    (r"(?:make it |toggle |exit |enter |go )?full ?screen(?: mode)?", _full_screen),
+    (r"(?:scroll|go|jump)(?: all the way)? (up|down|to the top|to the bottom|to top|to bottom)"
+     r"(?: (?P<times>\w+(?: \w+)?)\s+times?| (?P<twice>twice))?(?: (?:a bit|a little|a lot|more|fast))?",
+     _scroll_times),
+    (r"(?:turn |bring )?(?:the )?volume (?P<way>up|down) by (?P<n>\d{1,3})(?: percent|%)?",
+     lambda m: make_plan([{"do": "volume", "to": f"{m['way']} {int(m['n'])}"}])),
+    (r"silence", lambda m: make_plan([{"do": "volume", "to": "mute"}], say_line("volume_mute"))),
+    (r"(?:set|turn) (?P<app>.+?) volume (?:to |at )?(?P<to>\d{1,3}|up|down|mute|unmute)",
+     lambda m: make_plan([{"do": "volume", "app": m["app"], "to": m["to"]}])),
+    (r"pause(?: it| this| playback| the music| the video| song)?|stop playing", _step(do="media", action="pause")),
+    (r"(?:play|resume|continue|unpause)(?: it| this| playback| the music| the video| song)?",
+     _step(do="media", action="play")),
+    (r"(?:next|skip)(?: to)?(?: the)? (?:next )?(?:track|song|video|one)?|play (?:the )?next (?:track|song|video)",
+     _step(do="media", action="next")),
+    # the PC: shutdown and restart always get a yes or no first (handle), "shut down" alone too, but not a bare "turn
+    # off" or "restart it", which could be anything
+    (r"(?:put (?:(?:the|my) )?(?:pc|laptop|computer) to )?sleep(?: mode)?",
+     lambda m: make_plan([{"do": "sleep"}], say_line("system_sleep"))),
+    (r"(?:shut ?down|turn off|switch off|power (?:off|down))(?: (?:the|my|this))? (?:computer|pc|laptop|system)|"
+     r"shut ?down|power off|shut (?:the |my |this )?(?:computer|pc|laptop|system) down",
+     lambda m: make_plan([{"do": "shutdown"}], say_line("system_shutdown"))),
+    (r"reboot|(?:reboot|restart)(?: (?:the|my|this))? (?:computer|pc|laptop|system)",
+     lambda m: make_plan([{"do": "restart"}], say_line("system_restart"))),
+    (r"(?:cancel|abort|stop|don'?t)(?: (?:the|my))? (?:shut ?down|restart)(?: (?:the|my))?(?: computer| pc| laptop)?",
+     lambda m: make_plan([{"do": "abort_shutdown"}], say_line("system_abort_shutdown"))),
+    (r"(?:turn on|enable|switch to|go)?(?: the)? dark(?: mode| theme)?|dark mode(?: on)?",
+     lambda m: make_plan([{"do": "dark_mode", "on": True}], say_line("dark_on"))),
+    (r"(?:turn off|disable)(?: the)? dark(?: mode| theme)?|dark mode off|(?:switch to |go )?light(?: mode| theme)",
+     lambda m: make_plan([{"do": "dark_mode", "on": False}], say_line("dark_off"))),
+    # editing, in the app in front
+    (r"select all(?: text)?", _step(do="keys", keys="ctrl+a")),
+    (r"copy(?: this| text)?|copy(?: (?:this|the|selected)?(?: text| that)?)?", _step(do="keys", keys="ctrl+c")),
+    (r"paste(?: this| text)?", _step(do="keys", keys="ctrl+v")),
+    (r"cut(?: this| text| that)?", _step(do="keys", keys="ctrl+x")),
+    (r"undo(?: that)?", _step(do="keys", keys="ctrl+z")),
+    (r"redo(?: that)?", _step(do="keys", keys="ctrl+y")),
+    (r"save(?: (?:this|the)?(?: file| document)?)?", _step(do="keys", keys="ctrl+s")),
+    (r"find(?: on page)?|search (?:this |on )?page", _step(do="keys", keys="ctrl+f")),
+    (r"print(?: this| page)?", _step(do="keys", keys="ctrl+p")),
+    (r"new window", _step(do="keys", keys="ctrl+n")),
+    # apps by a name said a little off, Windows' folders, and its windows
+    (r"(?:open|launch|start|run|switch to|bring up|activate)(?: up)?(?: the| my)?(?: app)? (?P<app>.+?)(?: app)?",
+     _open_named),
+    (r"(?:close|quit|exit|kill|terminate|shut down)(?: the| my)?(?: app)? (?P<app>.+?)(?: app| window)?", _close_named),
+    (r"(?:minimi[sz]e|hide)(?: the| my)?(?: app)? (?P<app>.+?)(?: app| window)?", _minimise_named),
+    (r"maximi[sz]e(?: this| the)?(?: window)?", _step(do="window", action="maximize")),
+    (r"restore(?: this| the)?(?: window)?|unmaximi[sz]e(?: this| the)?(?: window)?",
+     _step(do="window", action="restore")),
+    (r"(?:show|go to)?(?: the)? desktop|minimi[sz]e all(?: windows)?", _step(do="window", action="desktop")),
+    (r"switch (?:window|app)|next window", _step(do="keys", keys="alt+tab")),
+    (r"close (?:this |the )?window", _step(do="keys", keys="alt+f4")),
+    (r"(?:take |grab )?(?:a )?screenshot|screen capture|snip(?:ping tool)?", _step(do="screenshot")),
+    (r"(?:open )?task manager", _step(do="keys", keys="ctrl+shift+esc")),
+    (r"(?:open )?(?:file )?explorer|open my files", _folder("shell:MyComputerFolder", line=False)),
+    (r"(?:open|go to|show)(?: my)? downloads(?: folder)?", _folder("shell:Downloads")),
+    (r"(?:open|go to|show)(?: my)? documents(?: folder)?", _folder("shell:Personal")),
+    (r"(?:open|go to|show)(?: my)? pictures(?: folder)?", _folder("shell:My Pictures")),
+    (r"(?:open|go to|show)(?: the)? recycle bin", _folder("shell:RecycleBinFolder")),
+    # timers and dictation
+    (r"how (?:long|much time)(?: is| do i have| have i got)?(?: left| remaining)?(?: on (?:the|my) timer)?|"
+     r"time left(?: on timer)?(?P<what>)", _time_left),
+    (r"(?:(?:set|start|make) )?(?:a |an |the )?(?:timer )?(?:for )?(?P<num>\d+)\s*(?P<unit>seconds?|secs?|minutes?|"
+     r"mins?|hours?|hrs?)(?: timer)?", _duration_timer),
+    (r"(?:start )?dictat(?:e|ion)|start transcribing|take (?:a )?dictation", _step(do="dictate")),
 )]
 
 
@@ -2515,11 +2709,87 @@ def routines():
         for s in found:
             plan = s["plan"] or {}
             s["procedure"] = plan.get("procedure") if isinstance(plan.get("procedure"), dict) else None
-            steps = [x for x in plan.get("steps") or [] if x["do"] in ROUTINE_STEPS
-                     and not (x["do"] == "keys" and combo(x.get("keys")) in agent.RISKY_KEYS)]
+            steps = [x for x in plan.get("steps") or [] if routine_safe(x)]
             s["plan"] = {**s["plan"], "steps": steps} if steps else None
         _skill_cache[:] = [time.time(), found]
     return [(plain(t), s) for s in _skill_cache[1] if s["plan"] for t in s["triggers"]]
+
+
+def routine_safe(step):
+    """Whether a routine may take this step with no model and no question: one of ROUTINE_STEPS, and no keys that
+    send or delete (agent.RISKY_KEYS)."""
+    return isinstance(step, dict) and step.get("do") in ROUTINE_STEPS and \
+        not (step["do"] == "keys" and combo(step.get("keys")) in agent.RISKY_KEYS)
+
+
+# Paraphrase triggers, 27 October: a routine started only on its exact words, so "start work mode" or "get me set
+# up for work" went to the model when "work mode" was taught. Said by name, missing everything above, her words are
+# held against each routine's own (the decider's encoder, as rank_skills). Settings "paraphrase_routines": "shadow"
+# (the default) only logs what it would have run, to %LOCALAPPDATA%\Hey Jev\decider\paraphrase.jsonl, "on" runs
+# it, "off" doesn't look. Never without her name, never a procedure (exact words only), and a routine's steps are
+# ROUTINE_STEPS, which run without a yes anyway. 0.9 to start, until her own log says where it should be: measured
+# that day against "work mode", "focus mode", "movie time", "good night" and "gaming setup", the real encoder put
+# "start work mode" and "enter focus mode" at 0.87, "set up for gaming" at 0.89 and "get me set up for work" at only
+# 0.44, but "what is work mode" at 0.90, "stop focus mode" at 0.84 and "turn off work mode" at 0.81. Meaning alone
+# doesn't tell starting a routine from asking about it or ending it, so words that ask, stop, undo or say no
+# (NOT_A_RUN, looked for once "can you" and "please" are off) never count, however close
+PARAPHRASE_AT = 0.9
+NOT_A_RUN = re.compile(r"\b(?:what|what's|whats|how|why|when|where|which|who|is|are|was|does|do|did|can|could|should|"
+                       r"would|will|explain|tell|off|stop|stops|end|exit|quit|leave|cancel|delete|remove|forget|undo|"
+                       r"disable|turn off|switch off|don't|dont|not|never|no|without|instead|change|edit|rename)\b")
+_trigger_vectors = {}  # a routine's words: their numbers, worked out once
+
+
+def paraphrased(words, gate):
+    """The plan of the routine whose words these are close to in meaning, said by name, when the setting is on;
+    logged and None in shadow mode. None for anything else."""
+    if gate is not False:
+        return None
+    mode = settings.get("paraphrase_routines")
+    # the cheap checks first: decider.available() looks for its files, about 0.1 ms, on every miss
+    if mode not in ("shadow", "on") or NOT_A_RUN.search(fast_intent.clean_text(str(words)) or plain(words)) or \
+            not any(phrase for phrase, _ in routines()) or not decider.available():
+        return None
+    try:
+        best = closest_routine(str(words))
+    except Exception as exc:  # never in the way of a turn: the model takes it instead
+        print(f"  couldn't match routines by meaning: {exc!r}")
+        return None
+    if not best or best[0] < PARAPHRASE_AT:
+        return None
+    score, phrase, skill = best
+    print(f"  routine by meaning ({mode}): {skill['dir']} for {phrase!r}, {score:.2f}")
+    try:
+        os.makedirs(decider.folder(), exist_ok=True)
+        with open(os.path.join(decider.folder(), "paraphrase.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"when": round(time.time()), "said": str(words), "trigger": phrase,
+                                "skill": skill["dir"], "score": round(score, 3), "mode": mode}, ensure_ascii=False)
+                    + "\n")
+    except OSError as exc:
+        print(f"  couldn't log it: {exc!r}")
+    if mode != "on":
+        return None
+    used_later(skill["dir"])
+    return make_plan(skill["plan"]["steps"], skill["plan"]["say"])
+
+
+def closest_routine(said):
+    """(how alike, trigger, skill) for the routine trigger closest in meaning to said, or None with no routines.
+    The words are worked out with the same string think() ranks skills by, so a turn that goes on to the model
+    gets them free (decider.Decider.encode keeps the last); each trigger once."""
+    found = [(phrase, skill) for phrase, skill in routines() if phrase and "{" not in phrase]  # slotless only
+    if not found:
+        return None
+    encode = decider.get().encode
+    for phrase, _ in found:  # first, so the words asked are the last worked out
+        if phrase not in _trigger_vectors:
+            _trigger_vectors[phrase] = encode(phrase)
+    q, best = encode(said), None
+    for phrase, skill in found:
+        score = float(q @ _trigger_vectors[phrase])
+        if best is None or score > best[0]:
+            best = (score, phrase, skill)
+    return best
 
 
 # After type/write/enter, words that ask for something to be written rather than being the text: the README's own
@@ -2893,7 +3163,27 @@ def _quick(words, gate=False):
         # "play lo-fi music and open Notepad" searched YouTube for all of it), so the model plans both
         print("  two requests, for the model")
         return None
+    plan = from_table(t)
+    if plan:
+        return plan
+    # Once more with what speech-to-text is known to get wrong put right and the politeness taken off as
+    # fast_intent.clean_text does it ("open note pad", "hey jev can you open notepad", "let's play some music"): the
+    # second table, gone on 27 October, matched those that way. "Hey Jev" alone is all politeness: as said, then.
+    # Not a name said alone, put right: "Noted." would open Notepad
+    cleaned = fast_intent.clean_text(str(words)) or key_of(words)
+    plan = from_table(cleaned, bare=False) if cleaned and cleaned != t else None
+    if plan:
+        print("  local, as put right")
+        return plan
+    return shortcut_plan(words, gate) or paraphrased(words, gate)
+
+
+def from_table(t, bare=True):
+    """The first plan QUICK has for t, else the answer to a plain question about this PC (sys_intent), else None.
+    bare: an app or a site said on its own counts (_bare_said)."""
     for rx, make in QUICK:
+        if make is _bare_said and not bare:
+            continue
         m = rx.fullmatch(t)
         if m:
             plan = make(m)
@@ -2905,15 +3195,7 @@ def _quick(words, gate=False):
             return make_plan(say=sysinfo.describe(found[0], sysinfo.lookup(found[0]), found[1]))
         except Exception as exc:
             print(f"  lookup failed: {exc!r}")
-    try:  # the extra phrasings in fast_intent; a bug there must never stop a turn, the model takes it instead
-        fast = get_fast_matcher().match(words)
-    except Exception as exc:
-        print(f"  fast intent failed: {exc!r}")
-        fast = None
-    if fast:
-        print("  fast local intent")
-        return fast
-    return shortcut_plan(words, gate)
+    return None
 
 
 def shortcut_plan(words, gate=False):
@@ -2930,16 +3212,6 @@ def shortcut_plan(words, gate=False):
         return None
     print(f"  shortcut: {found.keys} ({found.scope})")
     return make_plan([{"do": "shortcut", "id": found.id}])
-
-
-_fast_matcher = None
-
-
-def get_fast_matcher():
-    global _fast_matcher
-    if _fast_matcher is None:
-        _fast_matcher = fast_intent.FastIntentMatcher(sys.modules[__name__])
-    return _fast_matcher
 
 
 # --------------------------------------------------------------------------- Everything else: the model plans it
@@ -2991,7 +3263,8 @@ Memory: your lasting memory is below and you know all of it. Save what will matt
 # (TASK_WORDS, see think): a thousand characters of the step list few requests need. The rest get the line with their
 # fields (TASK_STUB), so one the words miss can still be planned, and the code checks it as ever
 TASK_STUB = next(line for line in PROMPT.splitlines() if line.startswith('{"do":"command","command":"..."'))
-# The to-do list and finding files, after the note line, only when the words may be about them (LIST_WORDS) or a turn
+# The to-do list and finding files, about the note line (LIST_ANCHOR) and once spliced in after it, written out after
+# the cache point since 27 October (MORE_STEPS), only when the words may be about them (LIST_WORDS) or a turn
 # in the last half hour planned one: 600 characters few requests need, and plain asks never reach the model anyway
 # (direct_list). The to-do list itself is always in context(), so "what's left?" still makes sense without them.
 LIST_ANCHOR = next(line for line in PROMPT.splitlines() if line.startswith('{"do":"note","title"'))
@@ -3002,10 +3275,83 @@ LIST_WORDS = re.compile(r"\b(?:to-?do|to do|lists?|tick(?:ed)?|cross(?:ed)?|done
                         r"spreadsheets?|excel|zip|find|where|locate|saved|downloaded|resume|cv|invoice|letter|first|"
                         r"second|third|last one)\b", re.I)
 LIST_STEP = re.compile(r'"do":\s*"(?:todo|todo_clear|files|open_file)"')  # one planned lately
-TASK_STEPS = """{"do":"command","command":"npm test","cwd":"C:\\\\path\\\\to\\\\project","description":"Run the tests"}  only for terminal, test, build, lint, Git or diagnostic work they explicitly ask for, never for files or folders, run hidden. Code checks it: changes wait for their approval, destructive, admin and download commands are blocked. An existing full cwd, never secrets
-{"do":"schedule","when":"2026-10-07T18:00:00","repeat":"","description":"Check C drive","task":{"kind":"lookup","what":"disk"}}  work at a time. when: local ISO time, "tomorrow at 6 PM" or "in 2 hours"; repeat "", "every 30 minutes", "daily at 6 PM" or "every Monday at 9 AM"; task {"kind":"reminder","text":"call Mum"}, {"kind":"lookup","what":"disk|battery|cpu|memory|apps|network|uptime|system"}, {"kind":"research","topic":"..."} or {"kind":"command","command":"git status","cwd":"C:\\\\path"}. Never anything that sends, deletes, pays, types, clicks or uses the screen
-{"do":"code","task":"add a dark mode toggle to the settings page","cwd":"C:\\\\path\\\\to\\\\project"}  coding in one of their git projects (the full folder), done in the background after she asks first
-{"do":"task_control","action":"cancel","id":3}  cancel a queued or running task; approve runs one waiting for approval"""
+# What TASK_STUB's steps are for, after the cache point (MORE_STEPS) with the stub's fields still in PROMPT above,
+# so their fields aren't written twice: 763 characters where the whole steps were 1,251, 27 October, which kept a
+# request for a command within PLAN's 4,000 tokens with the stub staying in (tests/test_learning.py PromptSize)
+TASK_STEPS = """command (+"description"): only for terminal, test, build, lint, Git or diagnostic work they explicitly ask for, never for files or folders, run hidden. Code checks it: changes wait for their approval, destructive, admin and download commands are blocked. An existing full cwd, never secrets
+schedule: when is local ISO time, "tomorrow at 6 PM" or "in 2 hours"; repeat "", "every 30 minutes", "daily at 6 PM" or "every Monday at 9 AM"; lookup "what": disk, battery, cpu, memory, apps, network, uptime or system. Never anything that sends, deletes, pays, types, clicks or uses the screen
+code: in one of their git projects (the full folder), in the background after she asks first
+task_control: cancel a queued or running task; approve runs one waiting for approval"""
+# Where those two go, 27 October: after the cache point (opencode.Cached), not spliced into PROMPT. In it, the start
+# of the system prompt Haiku keeps for 5 minutes changed with the words, so a turn that wrote them out and the next
+# that didn't each paid for the whole prompt again. PROMPT keeps TASK_STUB and the note line either way
+MORE_STEPS = "\n\n"
+# A few things said for each block, for when its words miss but the meaning is close (gated_blocks). The decider's
+# encoder on 27 October, 26 requests for neither against 20 for one: the requests for neither came out at most 0.37
+# to the task ones ("set a timer for ten minutes") and 0.44 to the list ones ("what's on my screen"); "compile my
+# app" 0.49 and "what's on my plate today" 0.47 were found by meaning alone. A needless hit costs 250 to 600
+# characters, a miss leaves the stub, so the bar sits just over the highest of the others
+BLOCK_EXAMPLES = {
+    "task": ("run the tests in my project", "check the git status of my repo", "remind me every morning to stretch",
+             "do this every Monday at 9", "cancel that background job", "fix the bug in my code",
+             "start the build in my project folder"),
+    "list": ("add milk to my to-do list", "what's left on my list", "mark buy milk as done",
+             "find my resume on this PC", "where's the pdf I downloaded yesterday", "open the second file"),
+}
+BLOCK_ALIKE = 0.45
+_block_vectors = {}  # block: its examples' numbers, worked out once off the voice thread (warm_blocks)
+_warming = []  # one warm_blocks under way, so turns before it's done don't start more
+
+
+def warm_blocks():
+    """BLOCK_EXAMPLES' numbers, 13 sentences in 255 ms on this PC on 27 October: when the decider loads, else on
+    the first turn that would use them, in the background; that turn goes by the words alone."""
+    if _block_vectors or not decider.available():
+        return
+    try:
+        encode = decider.get().encode
+        _block_vectors.update({name: [encode(s) for s in said] for name, said in BLOCK_EXAMPLES.items()})
+    except Exception as exc:
+        print(f"  couldn't work out the prompt blocks' examples: {exc!r}")
+
+
+def gated_blocks(text, recent):
+    """The steps written out after the cache point for this request: TASK_STEPS for words that may ask for a
+    command, a schedule, coding or a change to one, or right after one; LIST_STEPS for the to-do list and finding
+    files, or while what she just found is there to open: "you opened the taskbar, not it" after "find my resume"
+    was planned as a task on the screen, open_file not being in the prompt (the files lookup isn't kept in history).
+    Words that miss can still be close in meaning to BLOCK_EXAMPLES. Returns (tasks, lists, text to add)."""
+    tasks = bool(TASK_WORDS.search(text) or any(TASK_STEP.search(plan or "") for _, _, plan in recent))
+    lists = bool(LIST_WORDS.search(text) or filesearch.recent()
+                 or any(LIST_STEP.search(plan or "") for _, _, plan in recent))
+    if not (tasks and lists):
+        alike = blocks_by_meaning(text)
+        tasks, lists = tasks or alike.get("task", 0.0) >= BLOCK_ALIKE, lists or alike.get("list", 0.0) >= BLOCK_ALIKE
+    steps = "\n".join(s for s, on in ((TASK_STEPS, tasks), (LIST_STEPS, lists)) if on)
+    return tasks, lists, MORE_STEPS + steps if steps else ""
+
+
+def blocks_by_meaning(text):
+    """{block: how alike text is to its closest example}, {} without the decider or before its examples are worked
+    out. The words are the ones think() just ranked her skills by (decider.Decider.encode keeps the last), and the
+    turn's own meaning is worked out from them again once she's answered (remember_meaning), so this costs a few
+    dot products: 0.1 ms on this PC on 27 October over 46 requests, and 19 ms (median) for words not worked out
+    yet, as when she has no skills to rank. Only on the way to the model, never in quick()."""
+    if not text or not decider.available():
+        return {}
+    if not _block_vectors:
+        if not _warming:
+            _warming.append(True)
+            threading.Thread(target=warm_blocks, daemon=True).start()
+        return {}
+    try:
+        q = decider.get().encode(str(text))
+        return {name: max(float(q @ v) for v in vectors) for name, vectors in _block_vectors.items()}
+    except Exception as exc:
+        print(f"  couldn't match the prompt blocks by meaning: {exc!r}")
+        return {}
+
+
 GATE_NOTE = ("\nThey didn't call you by name first, so this may not be for you: they could be talking to someone in the "
              "room or on the phone, often in another language that speech-to-text turns into odd English, or it's a "
              "video or the TV. Only answer if it's clearly a request or question for you that carries on from what "
@@ -3821,6 +4167,55 @@ def learn_later(words, steps, failed, gate=False):
     threading.Thread(target=review, kwargs=asked, daemon=True).start()
 
 
+REPEATS_BACK = 14 * 86400  # how far back her history is read for the same request done the same way (repeats_note)
+REPEATS_READ = 400  # turns, at most, about 15 ms from history.db in the background
+
+
+def repeated_routines(said):
+    """[(words, steps)] for each of said that, by name, got the same plan two times or more in the last two weeks:
+    two steps or more, every one a routine may take (routine_safe), nothing failed or typed (what's typed is the
+    words of the moment, a message or a search, not a routine's), and not a routine's own words already.
+    Model-planned work worth a trigger, 27 October: a single step is one quick() already does on the PC, or the
+    model does in one go."""
+    wanted = {plain(s) for s in said if s}
+    if not wanted:
+        return []
+    taught = {phrase for phrase, _ in routines()}
+    seen, steps_of = collections.Counter(), {}
+    for _, words, plan_json in history.recent(REPEATS_READ, REPEATS_BACK, cold=False):
+        key = plain(words or "")
+        if key not in wanted or key in taught:
+            continue
+        try:
+            plan = json.loads(plan_json or "{}")
+        except ValueError:
+            continue
+        steps = plan.get("steps") if isinstance(plan, dict) and not plan.get("failed") else None
+        if not isinstance(steps, list) or len(steps) < 2 or \
+                not all(routine_safe(s) and s.get("do") != "type" for s in steps):
+            continue
+        same = (key, json.dumps(steps, sort_keys=True))
+        seen[same] += 1
+        steps_of[same] = steps
+    return [(key, steps_of[(key, done)]) for (key, done), n in seen.items() if n >= 2]
+
+
+def repeats_note(said):
+    """For the review: requests history shows were asked in the same words and done the same way twice or more,
+    which it may offer as a routine with those words as its trigger (repeated_routines). "" when there are none."""
+    try:
+        found = repeated_routines(said)
+    except Exception as exc:  # never in the way of the rest of the review
+        print(f"  couldn't look for repeats: {exc!r}")
+        return ""
+    if not found:
+        return ""
+    lines = "\n".join(f"- \"{words}\": {json.dumps(steps, ensure_ascii=False)}" for words, steps in found[:3])
+    return ("\n\nAsked in the same words and done the same way at least twice lately, each step one a routine may "
+            "take:\n" + lines + "\nIf it's something they'll want again, you may save it as a routine: a skill with "
+            "those words as its trigger and those steps, so next time it runs at once.")
+
+
 def review(wait=20, focus="", remember=False):
     """What to remember, a skill to save or fix, and words speech-to-text got wrong, from the last few turns. focus:
     what they just said to correct her, looked at first, like Hermes Agent's /refine. remember: a memory review too
@@ -3849,6 +4244,7 @@ def review(wait=20, focus="", remember=False):
                                         {"role": "user", "content": "\n\n".join(lines) + (
                                             f"\n\nThey just corrected her: \"{focus}\". Fix the fact or the skill "
                                             f"it's about first, so she gets it right next time." if focus else "")
+                                         + repeats_note([said or "" for _, said, _ in turns])
                                          + (MEMORY_REVIEW if remember else "")}],
                                        deadline=45, hedge_after=30, cap=40, model=BACKUP_MODEL)  # see BACKGROUND
         for line in apply_learning(plan, [said or "" for _, said, _ in turns]):
@@ -4719,14 +5115,9 @@ def think(text, gate, notify=None, sure=1.0):
     decided this wasn't for her."""
     known = skills_block(text)
     recent = history.recent(3, 1800)  # the last half hour, for follow-ups like "close it"
-    tasks = TASK_WORDS.search(text) or any(TASK_STEP.search(plan or "") for _, _, plan in recent)
-    prompt = PROMPT.replace(TASK_STUB, TASK_STEPS) if tasks else PROMPT
-    # or while what she just found is there to open: "you opened the taskbar, not it" after "find my resume" was
-    # planned as a task on the screen, open_file not being in the prompt (the files lookup isn't kept in history)
-    if LIST_WORDS.search(text) or filesearch.recent() or any(LIST_STEP.search(plan or "") for _, _, plan in recent):
-        prompt = prompt.replace(LIST_ANCHOR, LIST_ANCHOR + "\n" + LIST_STEPS, 1)
-    fixed = soul() + "\n\n" + prompt  # the same turn after turn: Haiku reads it back from its cache (opencode.Cached)
-    system = opencode.Cached(fixed + ("\n\n" + known if known else "") + memory_block() + context()
+    _, _, more = gated_blocks(text, recent)  # after skills_block, which works out what the words mean first
+    fixed = soul() + "\n\n" + PROMPT  # the same turn after turn: Haiku reads it back from its cache (opencode.Cached)
+    system = opencode.Cached(fixed + more + ("\n\n" + known if known else "") + memory_block() + context()
                              + (COLD_NOTE + room_before() if gate == "cold" else GATE_NOTE if gate else ""),
                              len(fixed))
     messages = [{"role": "system", "content": system}]
@@ -8065,6 +8456,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", mic=""):
 
     def warm_decider():
         relevant_skills("hello", (routines(), _skill_cache[1])[1])
+        warm_blocks()  # and the prompt blocks' examples (gated_blocks), so no turn waits for them
         print(f"[decider loaded, {in_use()}]")
 
     if voiceid.mode() != "off":

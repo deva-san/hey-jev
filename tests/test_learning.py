@@ -425,6 +425,62 @@ class Corrections(unittest.TestCase):
         self.assertIn("Environment-dependent failures", siri.LEARN)
 
 
+class Repeats(Home):
+    """27 October: her review may offer a routine when history shows the same words done the same way twice, with
+    every step one a routine may take (siri.repeated_routines), rather than waiting to be taught it."""
+
+    STEPS = [{"do": "open", "app": "Notepad"}, {"do": "volume", "to": "mute"}]
+
+    def turn(self, said, steps, gate="named", failed=None):
+        plan = {"steps": steps, "say": "Done."}
+        history.add(said, "", "Done.", json.dumps({**plan, "failed": failed} if failed else plan), gate=gate)
+
+    def test_twice_the_same_is_offered(self):
+        self.turn("get ready for work", self.STEPS)
+        self.turn("Get ready for work.", self.STEPS)
+        self.assertEqual(siri.repeated_routines(["get ready for work"]), [("get ready for work", self.STEPS)])
+        note = siri.repeats_note(["get ready for work"])
+        self.assertIn('"get ready for work"', note)
+        self.assertIn("you may save it as a routine", note)
+
+    def test_once_or_done_two_ways_isnt(self):
+        self.turn("get ready for work", self.STEPS)
+        self.assertEqual(siri.repeated_routines(["get ready for work"]), [])
+        self.turn("get ready for work", self.STEPS[::-1])
+        self.assertEqual(siri.repeated_routines(["get ready for work"]), [])
+        self.assertEqual(siri.repeats_note(["get ready for work"]), "")
+
+    def test_only_what_a_routine_may_do_by_itself(self):
+        for said, steps, kw in (
+                ("message mum i'm late", [{"do": "message", "to": "Mum", "text": "late"}, self.STEPS[1]], {}),
+                ("write my status", [self.STEPS[0], {"do": "type", "text": "Out today"}], {}),
+                ("open it all", [self.STEPS[0], {"do": "keys", "keys": "ctrl+enter"}], {}),  # sends
+                ("one step", self.STEPS[:1], {}),  # quick() does one on the PC already
+                ("set up badly", self.STEPS, {"failed": ["Notepad didn't open"]}),
+                ("set up in the room", self.STEPS, {"gate": "cold"})):
+            with self.subTest(said=said):
+                self.turn(said, steps, **kw)
+                self.turn(said, steps, **kw)
+                self.assertEqual(siri.repeated_routines([said]), [])
+
+    def test_not_when_its_a_routine_already_or_wasnt_said_lately(self):
+        self.turn("work mode", self.STEPS)
+        self.turn("work mode", self.STEPS)
+        with mock.patch.object(siri, "routines", lambda: [("work mode", {"dir": "work-mode"})]):
+            self.assertEqual(siri.repeated_routines(["work mode"]), [])
+        self.assertEqual(siri.repeated_routines(["something else"]), [])
+
+    def test_the_review_is_told(self):
+        self.turn("get ready for work", self.STEPS)
+        self.turn("get ready for work", self.STEPS)
+        asked = []
+        with mock.patch.object(siri, "ask_plan", lambda messages, **kw: asked.append(messages) or ("", {}, None, "m")), \
+                mock.patch.object(siri, "apply_learning", lambda plan, said: []), \
+                mock.patch.object(siri, "skills_block", lambda *a: ""), contextlib.redirect_stdout(io.StringIO()):
+            siri.review(wait=0)
+        self.assertIn("you may save it as a routine", asked[0][1]["content"])
+
+
 class PromptSize(Home):
     def test_with_full_memory_and_40_skills_her_prompt_stays_within_its_budget(self):
         """PLAN's budget: 3,000 tokens or less for the fixed part, 4,000 in total with full memory, and a test fails if
@@ -443,7 +499,8 @@ class PromptSize(Home):
         self.assertIn("### skill-", known)  # the one that fits, written out
         fixed = len(siri.DEFAULT_SOUL + "\n\n" + siri.PROMPT) + 700  # + the PC's context, about 630 characters
         total = fixed + len("\n\n" + known) + len(memory)
-        tasks = total + len(siri.TASK_STEPS) - len(siri.TASK_STUB)
+        # since 27 October written out after the cache point, the stub staying in the fixed part (siri.gated_blocks)
+        tasks = total + len(siri.MORE_STEPS + siri.TASK_STEPS)
         # without her name (149 of 150 voice turns) COLD_NOTE comes on top: outside PLAN's 4,000, and held here too
         cold = tasks + len(siri.COLD_NOTE)
         print(f"\n  prompt with full memory and 40 skills, about 4 characters a token: fixed {fixed / 4:.0f}, "

@@ -155,6 +155,67 @@ class TaskSteps(Turn):
                    '{"steps": [{"do": "schedule", "when": "", "repeat": "daily at 9 AM"}], "say": ""}')]
         self.assertIn(siri.TASK_STEPS, self.system("make it 10 instead", recent))
 
+    def test_the_cached_start_is_the_same_whatever_was_asked(self):
+        """27 October: TASK_STEPS took TASK_STUB's place inside PROMPT, and LIST_STEPS went in after the note line,
+        so the start Haiku keeps (opencode.Cached) changed with the words. Both are written out after it now."""
+        plain, task, listed = (self.system(w) for w in ("open notepad", "run the tests in hey-jev",
+                                                         "add milk to my to-do list"))
+        self.assertEqual(plain[:plain.cache_at], task[:task.cache_at])
+        self.assertEqual(plain[:plain.cache_at], listed[:listed.cache_at])
+        self.assertIn(siri.TASK_STUB, plain[:plain.cache_at])
+        self.assertIn(siri.LIST_ANCHOR, plain[:plain.cache_at])
+        self.assertIn(siri.TASK_STEPS, task[task.cache_at:])
+        self.assertIn(siri.LIST_STEPS, listed[listed.cache_at:])
+        self.assertNotIn(siri.LIST_STEPS, task)
+        self.assertNotIn(siri.TASK_STEPS, plain + listed)
+
+
+class BlocksByMeaning(unittest.TestCase):
+    """27 October: a block's steps are also written out when the words miss its regex but are close in meaning to
+    one of its BLOCK_EXAMPLES, with the decider's encoder (made-up numbers here)."""
+
+    def setUp(self):
+        import numpy as np
+        unit = lambda *v: np.asarray(v, np.float32) / np.linalg.norm(v)  # noqa: E731
+        self.vectors = {"compile my app": unit(0.9, 0.1, 0.4), "what's on my plate today": unit(0.1, 0.9, 0.4),
+                        "tell me a joke": unit(0, 0, 1)}
+        self.asked = []
+        encoder = type("Encoder", (), {"encode": lambda _, text: self.asked.append(text) or self.vectors[text]})()
+        for p in (patch.object(siri.decider, "available", lambda: True),
+                  patch.object(siri.decider, "get", lambda: encoder),
+                  patch.object(siri.filesearch, "recent", lambda: None),
+                  patch.dict(siri._block_vectors, {"task": [unit(1, 0, 0)], "list": [unit(0, 1, 0)]}, clear=True)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_close_in_meaning_is_written_out(self):
+        self.assertFalse(siri.TASK_WORDS.search("compile my app") or siri.LIST_WORDS.search("what's on my plate today"))
+        tasks, lists, more = siri.gated_blocks("compile my app", [])
+        self.assertEqual((tasks, lists), (True, False))
+        self.assertEqual(more, siri.MORE_STEPS + siri.TASK_STEPS)
+        self.assertEqual(siri.gated_blocks("what's on my plate today", [])[2], siri.MORE_STEPS + siri.LIST_STEPS)
+
+    def test_far_in_meaning_is_left_out(self):
+        self.assertEqual(siri.gated_blocks("tell me a joke", []), (False, False, ""))
+
+    def test_words_that_hit_both_regexes_arent_worked_out(self):
+        self.assertEqual(siri.gated_blocks("run the build and add it to my to-do list", [])[:2], (True, True))
+        self.assertEqual(self.asked, [])
+
+    def test_before_its_examples_are_worked_out_it_goes_by_the_words_and_warms_them_once(self):
+        started = []
+        with patch.dict(siri._block_vectors, clear=True), patch.object(siri, "_warming", []), \
+                patch.object(siri.threading, "Thread", lambda target, daemon: type(
+                    "T", (), {"start": lambda _: started.append(target)})()):
+            self.assertEqual(siri.gated_blocks("compile my app", []), (False, False, ""))
+            siri.gated_blocks("compile my app", [])
+        self.assertEqual(started, [siri.warm_blocks])
+
+    def test_without_the_decider_its_the_words_alone(self):
+        with patch.object(siri.decider, "available", lambda: False):
+            self.assertEqual(siri.gated_blocks("compile my app", []), (False, False, ""))
+        self.assertEqual(self.asked, [])
+
 
 class Lookups(Turn):
     """P2: 21 of 30 spoken answers took a look-up, a whole model round trip more, and "what's the capital of Japan"

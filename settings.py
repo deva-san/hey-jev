@@ -27,6 +27,9 @@ DEFAULTS = {
     # quick decisions: off, shadow (logged only) or on (lets plain room talk go), see decider.py. On since its "sure it
     # isn't for her" was right 16 times in 18 on 8 October, while she spoke or acted on 22 of 88 room-talk turns
     "decider": "on",
+    # a routine started by words close in meaning to its own, said by name: off, shadow (only logged, the default
+    # from 27 October until her log shows where the bar should be) or on, see siri.paraphrased
+    "paraphrase_routines": "shadow",
     "voice": "",  # her Fish Audio voice, an ID from VOICES or a pasted fish.audio link. Empty: the first in VOICES
     "vision": True,  # she may look at the screen when you ask about it, see siri.see()
     "heads_ups": True,  # she mentions what needs you: messages, a low battery, a nearly full drive, see watch.py

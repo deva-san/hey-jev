@@ -191,6 +191,14 @@ def split_list(text):
     return [a.strip() for a in text.split(",") if a.strip()]
 
 
+def apps_extra_json(value):
+    """apps.json's "_sites" written back the way it's laid out by hand, a site a line; "_bare" on one line."""
+    if isinstance(value, dict) and value:
+        return "{\n" + ",\n".join(f"    {json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}"
+                                  for k, v in value.items()) + "\n  }"
+    return json.dumps(value, ensure_ascii=False)
+
+
 def when_text(t):
     """A time as the To-do tab shows it: "Today 3:40 pm", "Yesterday 9:05 am", "Mon 12 Oct"."""
     try:
@@ -913,9 +921,12 @@ class AssistantWindow:
         self.apps_message = self._bottom_bar(page, "Remove", self.remove_app)
         with open(APPS_FILE, encoding="utf-8") as f:
             raw = json.load(f)
-        # each row is [name you say (the key), app, heard as, spoken name in replies or None, exe names]
-        self.apps = []
+        # each row is [name you say (the key), app, heard as, spoken name in replies or None, exe names]. Keys
+        # starting "_" are her sites and the apps said on their own (siri.SITES, BARE_APPS), kept as they are on save
+        self.apps, self.apps_extra = [], {k: v for k, v in raw.items() if k.startswith("_")}
         for k, v in raw.items():
+            if k.startswith("_"):
+                continue
             if isinstance(v, str):
                 self.apps.append([k, v, [], None, []])
             else:
@@ -940,6 +951,7 @@ class AssistantWindow:
             else:
                 value = app
             lines.append(f"  {json.dumps(key)}: {json.dumps(value, ensure_ascii=False)}")
+        lines += [f"  {json.dumps(k)}: {apps_extra_json(v)}" for k, v in getattr(self, "apps_extra", {}).items()]
         try:
             with open(APPS_FILE, "w", encoding="utf-8") as f:
                 f.write("{\n" + ",\n".join(lines) + "\n}\n")  # one app per line, like the file you'd write by hand
