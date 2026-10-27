@@ -103,6 +103,20 @@ class Play(Routing):
         self.assertEqual(self.steps("play It's My Life"), [{"do": "youtube", "query": "it's my life", "play": True}])
 
 
+class Slips(Routing):
+    """27 October, found while mapping: fast_intent looked its slips up a word at a time, so the eleven of more than
+    one word, "note pad" and "you tube" among them, could never match."""
+
+    def test_slips_of_more_than_one_word_are_put_right(self):
+        for heard, meant in (("open note pad", "open notepad"), ("open you tube please", "open youtube"),
+                             ("clothes the tab", "close the tab"), ("open whats app", "open whatsapp"),
+                             ("open v s code", "open vs code"), ("open a new terminal", "open a new terminal")):
+            with self.subTest(heard=heard):  # whole words only: "new term" isn't the start of "new terminal"
+                self.assertEqual(fast_intent.clean_text(heard), meant)
+        self.assertEqual(fast_intent.FastIntentMatcher(siri).match("open note pad")["steps"],
+                         [{"do": "open", "app": "Notepad"}])
+
+
 class MisheardQueries(Routing):
     """R2: "play avengers doomshare tyler" played the misheard words, and "search career eye dee on you tube" googled
     "career eye dee on you tube", on the PC before the model, which is told to put misheard words right, saw them."""

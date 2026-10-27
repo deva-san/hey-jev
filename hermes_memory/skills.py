@@ -100,6 +100,16 @@ def _validate_frontmatter(content: str) -> Optional[str]:
     return None
 
 
+def _validate_same_name(name: str, content: str) -> Optional[str]:
+    """Hey Jev: the frontmatter name is the folder's, as agentskills.io, OpenClaw and Hermes all require. Hermes'
+    archive_skill finds a skill by its frontmatter name and this file by its folder, so one whose names differed
+    couldn't be archived, and delete_skill deleted it for good instead (found 27 October)."""
+    said = str(parse_frontmatter(content)[0].get("name") or "").strip()  # a BOM is taken off there
+    if said != name:
+        return f"The frontmatter name '{said}' must be the skill's folder name, '{name}'."
+    return None
+
+
 def _validate_content_size(content: str, label: str = "SKILL.md") -> Optional[str]:
     if len(content) > MAX_SKILL_CONTENT_CHARS:
         return (f"{label} content is {len(content):,} characters (limit: {MAX_SKILL_CONTENT_CHARS:,}). "
@@ -121,8 +131,8 @@ def find_skill(name: str) -> Optional[Path]:
 
 def create_skill(name: str, content: str, agent_created: bool = False) -> Dict[str, Any]:
     """agent_created: her learning review wrote it, so the curator looks after it; one you taught her, it doesn't."""
-    if err := (_validate_name(name) or _validate_frontmatter(content) or _validate_content_size(content)
-               or _security_scan(content)):
+    if err := (_validate_name(name) or _validate_frontmatter(content) or _validate_same_name(name, content)
+               or _validate_content_size(content) or _security_scan(content)):
         return _err(err)
     if find_skill(name):
         return _err(f"A skill named '{name}' already exists. Use edit or patch to change it.")
@@ -143,7 +153,8 @@ def _usage(record, name, **kw):
 
 def edit_skill(name: str, content: str) -> Dict[str, Any]:
     """Replace the SKILL.md of an existing skill (full rewrite)."""
-    if err := (_validate_frontmatter(content) or _validate_content_size(content) or _security_scan(content)):
+    if err := (_validate_frontmatter(content) or _validate_same_name(name, content) or _validate_content_size(content)
+               or _security_scan(content)):
         return _err(err)
     path = find_skill(name)
     if not path:
@@ -165,7 +176,9 @@ def patch_skill(name: str, old_string: str, new_string: str) -> Dict[str, Any]:
     if count != 1:
         return _err(f"old_string matched {count} times in skill '{name}'. It must match exactly once.")
     new_content = content.replace(old_string, new_string or "")
-    if err := (_validate_content_size(new_content) or _validate_frontmatter(new_content)):
+    # Hey Jev: nor give it a name other than its folder's, though a line of one that had one already may be fixed
+    if err := (_validate_content_size(new_content) or _validate_frontmatter(new_content) or
+               (_validate_same_name(name, new_content) if _validate_same_name(name, content) is None else None)):
         return _err(f"Patch would break SKILL.md structure: {err}")
     if err := _security_scan(new_content):
         return _err(err)
@@ -176,17 +189,20 @@ def patch_skill(name: str, old_string: str, new_string: str) -> Dict[str, Any]:
 
 def delete_skill(name: str, really: bool = False) -> Dict[str, Any]:
     """Hey Jev: archived (skills\\.archive, Hermes' way, restorable), unless really: forgotten for good, as from the
-    Memory tab's Forget this."""
+    Memory tab's Forget this. One that can't be archived is kept, never deleted in its place: one whose frontmatter
+    name wasn't its folder's was deleted for good that way (see _validate_same_name), and Hermes only archives."""
     path = find_skill(name)
     if not path:
         return _err(f"Skill '{name}' not found.")
     if not really:
         try:
-            ok, _ = skill_usage.archive_skill(name)
-            if ok:
-                return {"success": True, "message": f"Skill '{name}' archived."}
-        except Exception:
-            pass
+            ok, why = skill_usage.archive_skill(name)
+        except Exception as exc:
+            ok, why = False, repr(exc)
+        if ok:
+            return {"success": True, "message": f"Skill '{name}' archived."}
+        print(f"  skill {name} couldn't be archived, so it's kept: {why}")
+        return _err(f"Skill '{name}' couldn't be put away, so it's kept as it was.")
     shutil.rmtree(path.parent)
     _usage(skill_usage.forget, name)
     return {"success": True, "message": f"Skill '{name}' deleted."}

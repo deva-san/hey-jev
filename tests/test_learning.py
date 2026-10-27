@@ -1,7 +1,9 @@
 """Hermes' memory and learning in Hey Jev: past-chat search (history.search), skills in Hermes' format with its usage
 tracking and curator, corrections looked at straight away, undo for what she learned on her own, and the prompt
 staying small. All on a temp folder, no model."""
+import contextlib
 import datetime
+import io
 import json
 import os
 import tempfile
@@ -104,6 +106,26 @@ class Skills(Home):
         self.assertTrue(any((skills.SKILLS_DIR / ".archive").iterdir()))  # restorable
         self.assertTrue(skills.delete_skill("two", really=True)["success"])
         self.assertFalse((skills.SKILLS_DIR / "two").exists())
+
+    def test_a_skill_is_named_as_its_folder_and_one_that_cant_be_archived_is_kept(self):
+        """27 October, found while mapping: Hermes' archive_skill finds a skill by its frontmatter name and skills.py by
+        its folder, so one whose names differed couldn't be archived, and delete_skill deleted it for good instead."""
+        made = skills.create_skill("work-mode", skills.build_content("focus-mode", "Work setup", "x"))
+        self.assertFalse(made["success"])
+        self.assertIn("folder name", made["error"])
+        self.assertIsNone(skills.find_skill("work-mode"))
+        skills.create_skill("tea", skills.build_content("tea", "Tea", "Steep it."))  # nor renamed later
+        self.assertFalse(skills.edit_skill("tea", skills.build_content("coffee", "Tea", "x"))["success"])
+        self.assertFalse(skills.patch_skill("tea", 'name: "tea"', 'name: "coffee"')["success"])
+        # one written by hand before that rule: Hermes can't find it to archive it, so it stays, never deleted
+        path = skills.SKILLS_DIR / "old-one" / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("---\nname: something-else\ndescription: an old one\n---\nDo it.\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            gone = skills.delete_skill("old-one")
+        self.assertFalse(gone["success"])
+        self.assertTrue(path.exists())
+        self.assertTrue(skills.patch_skill("old-one", "Do it.", "Do it now.")["success"])  # a line of it still mends
 
     def test_the_skills_that_fit_are_written_out_and_the_rest_listed(self):
         skills.create_skill("tea-timer", skills.build_content("tea-timer", "Timer for tea", "Steep green tea 3 min."))

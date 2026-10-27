@@ -527,6 +527,35 @@ class WebSearch(unittest.TestCase):
         self.assertEqual(len(wiki), 2)
 
 
+class WebCache(unittest.TestCase):
+    """27 October, found while mapping: web._cache never let anything go, every page she read kept while she ran."""
+
+    def setUp(self):
+        web._cache.clear()
+        self.addCleanup(web._cache.clear)
+
+    def test_only_the_latest_looks_are_kept(self):
+        self.assertEqual(web.CACHE_MOST, 256)
+        with patch.object(web, "CACHE_MOST", 3):
+            for n in range(4):
+                web._cached("read", n, 600, lambda n=n: f"page {n}")
+            self.assertEqual(web._cached("read", 1, 600, lambda: self.fail("read again")), "page 1")  # still kept
+            web._cached("read", 4, 600, lambda: "page 4")
+        self.assertEqual(list(web._cache), [("read", 3), ("read", 1), ("read", 4)])  # 1 was used again, 2 wasn't
+
+
+class DefaultModel(unittest.TestCase):
+    """27 October, found while mapping: the model a fresh install starts on was space-bunny-free, gone (410) from
+    OpenCode since 11 October, so every request failed until Settings refreshed the list."""
+
+    def test_a_fresh_install_starts_on_a_free_model_that_answers(self):
+        with patch.dict(siri.os.environ, {"OPENCODE_MODEL": ""}), patch.object(siri.settings, "_data", {}):
+            model = siri.settings.get("llm_model")
+        self.assertEqual(model, siri.FAST_MODEL)
+        self.assertTrue(siri.opencode.allowed(model))
+        self.assertIn(model, siri.opencode.FALLBACK_FREE)
+
+
 class CurrentYears(unittest.TestCase):
     """22 October 2026: "GTA six launched any new trailer" was searched as "GTA 6 new trailer 2024 2025", the model's
     own "now", and found 2024's stories a week after the launch trailer came out."""

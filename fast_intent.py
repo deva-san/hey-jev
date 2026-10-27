@@ -51,6 +51,9 @@ COMMON_SLIPS = {
     "clone the tab": "close the tab",
     "clothes the tab": "close the tab",
 }
+# The slips of more than one word, as whole words of the line, the longest first
+MULTI_SLIPS = re.compile(r"\b(?:" + "|".join(re.escape(k) for k in sorted((k for k in COMMON_SLIPS if " " in k),
+                                                                          key=len, reverse=True)) + r")\b")
 
 
 def clean_text(text: str) -> str:
@@ -60,6 +63,9 @@ def clean_text(text: str) -> str:
     # Strip start and end fillers
     t = FILLERS_START.sub("", t).strip()
     t = FILLERS_END.sub("", t).strip()
+    # Repair the slips of more than one word on the whole line first: looked up a word at a time, "note pad", "you
+    # tube" and the other nine of them could never match (found 27 October)
+    t = MULTI_SLIPS.sub(lambda m: COMMON_SLIPS[m[0]], t)
     # Repair common phonetic single-word slips
     words = t.split()
     repaired = [COMMON_SLIPS.get(w, w) for w in words]

@@ -10,7 +10,9 @@ DEFAULTS = {
     "mode": "ptt",
     "mic": "",
     "keep_on_top": False,
-    "llm_model": "space-bunny-free",  # OpenCode Zen, free, zero retention, and allowed outside OpenCode's own app
+    # free, the same model as siri.FAST_MODEL. It was space-bunny-free on OpenCode Zen, gone (410) since 11 October,
+    # so a fresh install failed every request until Settings refreshed the model list
+    "llm_model": "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
     # speech to text on this PC: parakeet, nemotron (writes as you talk, but lost "Hey Jev" in Hari's voice), or whisper
     "stt_engine": "parakeet",
     # how long she waits for you to finish before answering: patient, even or quick (speech.Listener.WAITS)
