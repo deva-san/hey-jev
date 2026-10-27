@@ -24,6 +24,7 @@ so no routine runs from them), are never patched by her review or curator (Herme
 and lose to one of hers with the same name. Nothing is ever downloaded: the owner turned a skills hub down on 27
 October. What a skill or its files say reaches the model wrapped as data (as_data), never as instructions.
 """
+import datetime
 import json
 import os
 import re
@@ -317,8 +318,21 @@ def edit_skill(name: str, content: str) -> Dict[str, Any]:
     return {"success": True, "message": f"Skill '{name}' updated (full rewrite)."}
 
 
+def _spaced_span(content: str, old_string: str) -> Optional[Tuple[int, int]]:
+    """Hey Jev: where old_string is in content with its runs of spaces and line breaks read as any run of them, or
+    None unless that's exactly one place. A model quoting a skill puts a line break back as a space, or two spaces as
+    one, and its patch matched nothing (found mapping her learning review, 27 October). Never Hermes' fuzzy match,
+    which can pick a line that only looks like the one meant."""
+    words = old_string.split()
+    if not words:
+        return None
+    found = [m.span() for m in re.finditer(r"\s+".join(map(re.escape, words)), content)]
+    return found[0] if len(found) == 1 else None
+
+
 def patch_skill(name: str, old_string: str, new_string: str) -> Dict[str, Any]:
-    """Targeted find-and-replace in SKILL.md, unique match. Hey Jev: an exact match, not Hermes' fuzzy one."""
+    """Targeted find-and-replace in SKILL.md, unique match. Hey Jev: an exact match, not Hermes' fuzzy one; when
+    there's none, once more with the spacing read loosely (_spaced_span), still only where it's one place."""
     if not old_string:
         return _err("old_string is required.")
     path = find_skill(name)
@@ -326,9 +340,11 @@ def patch_skill(name: str, old_string: str, new_string: str) -> Dict[str, Any]:
         return _err(f"Skill '{name}' not found.")
     content = path.read_text(encoding="utf-8-sig")
     count = content.count(old_string)
-    if count != 1:
+    span = _spaced_span(content, old_string) if count == 0 else None
+    if count != 1 and span is None:
         return _err(f"old_string matched {count} times in skill '{name}'. It must match exactly once.")
-    new_content = content.replace(old_string, new_string or "")
+    new_content = content.replace(old_string, new_string or "") if count == 1 else \
+        content[:span[0]] + (new_string or "") + content[span[1]:]
     # Hey Jev: nor give it a name other than its folder's, though a line of one that had one already may be fixed
     if err := (_validate_content_size(new_content) or _validate_frontmatter(new_content) or
                (_validate_same_name(name, new_content) if _validate_same_name(name, content) is None else None)):
@@ -366,8 +382,44 @@ def delete_skill(name: str, really: bool = False, imported: bool = False) -> Dic
 
 
 def used(name: str) -> None:
-    """A skill was used (a routine ran, or its notes went to the model): it isn't stale."""
+    """A skill was really used: a routine ran, a procedure ran, or the model loaded it with skill_view. Hey Jev: not
+    when it was only the best fit and written out in her prompt, which counted as use until 27 October, so Hermes'
+    curator judged a skill by how often it looked relevant, never by whether it was run."""
     _usage(skill_usage.bump_use, name)
+
+
+def viewed(name: str) -> None:
+    """Hey Jev: a skill shaped what she did without being run: a note she wrote, written out in her prompt for a turn
+    that then acted, or an app's lessons shown to a task there. Hermes' view count, not use: it keeps the curator's
+    clock (latest_activity_at) going, so a note in use every day isn't archived 30 days after it was written, and
+    her outcome counts stay for runs only."""
+    _usage(skill_usage.bump_view, name)
+
+
+VERSIONS_KEPT = 10  # Hey Jev: earlier SKILL.md files kept for each skill, as OpenClaw's Workshop keeps 10
+
+
+def keep_version(name: str) -> Optional[Path]:
+    """Hey Jev: a copy of a skill's SKILL.md as it is now, in skills\\.versions\\<name>, before something changes it
+    on its own (her curator pass), the last VERSIONS_KEPT kept. Named by the time, never SKILL.md, so no scanner
+    takes one for a skill. The copy, or None if there's no such skill."""
+    path = find_skill(name)
+    if not path:
+        return None
+    folder = SKILLS_DIR / ".versions" / name
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    copy = folder / f"{stamp}.md"
+    atomic_write_text(copy, path.read_text(encoding="utf-8-sig"), tmp_prefix=".version_")
+    for old in sorted(folder.glob("*.md"))[:-VERSIONS_KEPT]:
+        old.unlink(missing_ok=True)
+    return copy
+
+
+def versions(name: str) -> List[Path]:
+    """Hey Jev: the kept copies of a skill (keep_version), oldest first."""
+    folder = SKILLS_DIR / ".versions" / name
+    return sorted(folder.glob("*.md")) if _validate_name(name) is None and folder.is_dir() else []
 
 
 # --- Catalog and viewing (tools/skills_tool.py) -------------------------------
