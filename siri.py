@@ -3153,9 +3153,9 @@ LOOK_STEP = re.compile(r'"do":\s*"(?:selected_files|installed_apps|top_apps|wher
 # of its own after the cached prompt, only for words that may ask for one (GOAL_WORDS: something to find, then
 # something to do with it) or a turn in the last half hour that planned one: a plain request keeps its single plan
 GOAL_STEPS = """{"do":"task","goal":"find today's dollar to rupee rate and type it into the open Notepad"}  a job of several parts where a later part needs what an earlier one finds: look things up, then do something with it in an app, a note or your memory. The goal in full, every detail. Not for one look-up, one step or one task on the screen"""
-GOAL_WORDS = re.compile(r"\b(?:find|look up|search|check|google|research|work out|figure out|get|read)\b.*\b(?:and|then)"
-                        r"\b.*\b(?:type|write|put|paste|add|save|fill|note|enter|copy|open|make|create|update|remember|"
-                        r"email|send)\b|\b(?:step by step|several things|a few things)\b", re.I)
+GOAL_WORDS = re.compile(r"\b(?:find|look up|search|check|google|research|work out|figure out|get|read)\b.*"
+                        r"\b(?:and|then)\b.*\b(?:type|write|put|paste|add|save|fill|note|enter|copy|open|make|create|"
+                        r"update|remember|email|send)\b|\b(?:step by step|several things|a few things)\b", re.I)
 GOAL_STEP = re.compile(r'"do":\s*"task"')  # one planned lately
 # What was copied is read only when the words name it: on the clipboard may be a password or a code just pasted
 CLIPBOARD_WORDS = re.compile(r"\b(?:clipboard|clip board|(?:i|i've|i have|just) copied|what i copied)\b", re.I)
