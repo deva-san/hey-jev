@@ -8,7 +8,7 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows without
 import subprocess
 import numpy as np, psutil, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
-import activity, agent, coder, decider, fast_intent, filesearch, hermes_memory, history, installer, messaging, opencode, outcomes, pocket, settings, shortcuts, telegram_bot, todo, speech, sysinfo, tasks as tasking, vision, voiceid, watch, watchers, web, winplatform as win
+import activity, agent, coder, decider, fast_intent, filesearch, hermes_memory, history, installer, messaging, opencode, outcomes, pocket, providers, settings, shortcuts, telegram_bot, todo, speech, sysinfo, tasks as tasking, vision, voiceid, watch, watchers, web, winplatform as win
 import toolbox
 import screen_watch
 from hermes_memory import curator, daemon_pool, hermes_bits, skills, voice_bits
@@ -4176,7 +4176,7 @@ def ask_model(messages, deadline=DEADLINE, hedge_after=HEDGE_AFTER, cap=10.0, mo
     # Haiku that's slow to start gets a second Haiku, not a free model: its rounds take 2.7 s at the median and 4 s
     # at the 90th percentile, so the free model's try, started at HEDGE_AFTER, often won, and on 22 October it
     # searched "GTA 6 new trailer 2024 2025" for Haiku. A free model only steps in when Haiku's tries fail
-    paid = opencode.is_anthropic(main)
+    paid = not opencode.is_free(main)  # any model you pay for, on any provider
 
     stop, first_words, keys = threading.Event(), {}, {}  # first_words: try -> when its first words came
 
@@ -6023,7 +6023,7 @@ def _think(text, gate, notify=None, sure=1.0):
     # "llm" lines count as questions answered in the window's stats, "plan" lines as commands
     cached = (usage or {}).get("cache_read")  # of what she was sent, the tokens Haiku read back from its cache
     print(f"  {'plan' if plan['steps'] else 'llm'} {model} {int((time.time() - t) * 1000)}ms  "
-          f"{usage.get('completion_tokens', '?')} tokens  {'paid' if opencode.is_anthropic(model) else '$0 (free)'}"
+          f"{usage.get('completion_tokens', '?')} tokens  {'$0 (free)' if opencode.is_free(model) else 'paid'}"
           + (f"  {cached} cached" if cached else ""))
     if plan.get("ignore"):
         return None if gate else make_plan(say=say_line("not_caught" if origin() == "voice" else "not_worked_out"))
@@ -8478,9 +8478,10 @@ def warm():
             session.head(url, timeout=5)
         except requests.RequestException:
             pass
-    # Kilo too: Ling is her model, and its host was the one left cold
-    for args in ((opencode.SESSION, opencode.BASE + "/models"), (opencode.SESSION, opencode.KILO_BASE + "/models"),
-                 (FISH, "https://api.fish.audio/")):
+    # Kilo too: Ling is her model, and its host was the one left cold. And the provider of the model picked
+    picked = providers.split(settings.get("llm_model"))[0]
+    hosts = {opencode.BASE, opencode.KILO_BASE, picked.base}
+    for args in [(opencode.SESSION, base + "/models") for base in hosts] + [(FISH, "https://api.fish.audio/")]:
         threading.Thread(target=head, args=args, daemon=True).start()
 
 

@@ -12,10 +12,16 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))  #
 
 SERVICE = "Hey Jev"  # shows up in Credential Manager > Windows Credentials
 KEY_NAMES = ("OPENCODE_ZEN_API_KEY", "FISH_AUDIO_API_KEY", "KILO_API_KEY", "TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY")
-# Kilo Gateway's free models, besides OpenCode's (see opencode.py); your own Telegram bot, for your phone; Anthropic,
-# the one paid model she may use, only when picked in Settings
-OPTIONAL = ("KILO_API_KEY", "TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY")
-ALIASES = {"OPENCODE_ZEN_API_KEY": ("OPENCODE_API_KEY",)}  # the name OpenCode's own docs use
+# OpenCode Zen's and Kilo Gateway's models, like any provider's, only needed when one of theirs is picked in Settings
+# (see providers.py); your own Telegram bot, for your phone; Anthropic, for Claude. Only Fish, her voice, is needed
+OPTIONAL = ("OPENCODE_ZEN_API_KEY", "KILO_API_KEY", "TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY")
+# the other model providers' keys (providers.py), saved from Settings > Answer model when one's picked
+MODEL_KEYS = ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY", "GROQ_API_KEY",
+              "DEEPSEEK_API_KEY", "MISTRAL_API_KEY", "CEREBRAS_API_KEY", "TOGETHER_API_KEY", "NOUS_API_KEY", "HF_TOKEN",
+              "MOONSHOT_API_KEY")
+# the names their own docs use
+ALIASES = {"OPENCODE_ZEN_API_KEY": ("OPENCODE_API_KEY",), "GEMINI_API_KEY": ("GOOGLE_API_KEY",),
+           "HF_TOKEN": ("HUGGINGFACE_API_KEY",)}
 
 
 def vault_value(name):
@@ -33,7 +39,7 @@ def get_secret(name):
 
 
 def save_secret(name, value):
-    if name not in KEY_NAMES:
+    if name not in KEY_NAMES + MODEL_KEYS:
         raise ValueError(f"unknown secret: {name}")
     value = value.strip()
     if not value:

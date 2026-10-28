@@ -7,7 +7,9 @@ import re
 import sys
 import threading
 import time
+import random
 import tkinter as tk
+import tkinter.font as tkfont
 import webbrowser
 from tkinter import messagebox, ttk
 
@@ -16,6 +18,7 @@ import hermes_memory
 import history
 import messaging
 import opencode
+import providers
 import settings
 import tasks as tasking
 import todo
@@ -28,13 +31,14 @@ from secrets_store import KEY_NAMES, OPTIONAL, get_secret, missing_secrets, save
 TITLE = "Hey Jev"
 HERE = os.path.dirname(os.path.abspath(__file__))
 ICON = os.path.join(HERE, "assets", "icon.ico")
-W, H, SIDEBAR = 940, 640, 210
+W, H, SIDEBAR = 1060, 700, 220
 HINTS = {"ptt": "Hold right Alt to talk", "wake": "Say \u201cHey Jev\u201d, \u201cHello Jev\u201d or just \u201cJev\u201d, "
                                                  "then what you want. Right after she answers, just keep talking. "
                                                  "Holding right Alt works too."}
 ENGINES = {"parakeet": "Parakeet (hears her name best)", "nemotron": "Nemotron (writes as you talk)",
            "whisper": "Whisper small.en (slower)"}
 WAITS = {"patient": "Patient (lets you pause)", "even": "Even", "quick": "Quick (can cut you off)"}  # speech.Listener
+SEP = "  \u00b7  "  # between a model's ID and what's known of it in the model list: "gpt-5.2  ·  400k"
 MODES = ("ptt", "wake")
 MODE_LABELS = {"ptt": "Hold Right Alt", "wake": "Hey Jev"}
 TABS = (("home", "Home"), ("todo", "To-do"), ("tasks", "Tasks"), ("contacts", "Contacts"), ("dict", "Dictionary"),
@@ -162,9 +166,9 @@ PRIVACY = (
      "first time, so most are never sent again."),
 )
 KEY_ROWS = (
-    ("Anthropic", "ANTHROPIC_API_KEY", "Claude Haiku 5.5, her main model, paid per request",
+    ("Anthropic", "ANTHROPIC_API_KEY", "Claude models, like Haiku 5.5, paid per request",
      "https://platform.claude.com/settings/keys"),
-    ("OpenCode Zen", "OPENCODE_ZEN_API_KEY", "Free answer models, for when Haiku isn't picked in Settings",
+    ("OpenCode Zen", "OPENCODE_ZEN_API_KEY", "Answer models, free ones included",
      "https://opencode.ai/zen"),
     ("Fish Audio", "FISH_AUDIO_API_KEY", "Her voice, on Fish's free model", "https://fish.audio/?fpr=henryk"),
     ("Kilo", "KILO_API_KEY", "More free models, like Nemotron 3 Ultra, Haiku's second try when it's slow",
@@ -172,8 +176,27 @@ KEY_ROWS = (
     ("Telegram bot", "TELEGRAM_BOT_TOKEN", "Jev on your phone: make a bot with @BotFather, then Settings > Phone > "
      "Pair", "https://core.telegram.org/bots/tutorial#obtain-your-bot-token"),
 )
+# the other answer model providers (providers.py), all optional: their models are picked in Settings > Answer model
+MODEL_USES = {"openrouter": "Hundreds of models from every lab, a few free", "openai": "GPT models, paid per request",
+              "google": "Gemini models", "xai": "Grok models, paid per request",
+              "groq": "Open models, very fast", "deepseek": "DeepSeek models, paid per request",
+              "mistral": "Mistral models", "cerebras": "Open models, very fast",
+              "together": "Open models, paid per request", "nous": "Hermes models, Hermes Agent's own provider",
+              "huggingface": "Open models from many hosts, a token", "moonshot": "Kimi models, paid per request"}
+MODEL_KEY_ROWS = tuple((p.name, p.key, MODEL_USES.get(p.id, f"{p.name}'s models"), p.key_url)
+                       for p in providers.PROVIDERS if p.key and p.key not in {row[1] for row in KEY_ROWS})
 
-BG, SIDE, HOVER, SELECT, CARD, LINE = "#ffffff", "#f3f3f3", "#e9e9e9", "#e0e0e0", "#f4f4f5", "#e3e3e3"
+BG, SIDE, LINE = "#ffffff", "#f3f3f3", "#e3e3e3"
+# the sidebar, dark like her island, beside the light pages; GLOW is her eyes' colour
+NAV, NAV_HOVER, NAV_ON, NAV_TEXT, NAV_MUTED, GLOW = "#0f1116", "#1a1d24", "#252a34", "#c7cbd3", "#7c828d", "#5ee7f2"
+ACCENT_SOFT = "#e6f0fa"  # a selected row, a card under the mouse
+ICONS = {"home": "\ue80f", "todo": "\ue9d5", "tasks": "\ue823", "contacts": "\ue716", "dict": "\ue82d",
+         "apps": "\ue71d", "hist": "\ue81c", "mem": "\ue8f1", "priv": "\ue72e", "island": "\ue7f4",
+         "settings": "\ue713", "keys": "\ue8d7"}  # Segoe Fluent Icons, Segoe MDL2 Assets on Windows 10
+STAT_ICONS = ("\ue916", "\ue720", "\ue70f", "\ue945", "\ue71d", "\ue897")  # the Home cards, in their order
+# while she's at one of these her dot pulses
+BUSY = {"Listening", "Still listening", "Transcribing", "Thinking", "Looking", "Doing it", "Speaking", "Dictating",
+        "Finishing"}
 TEXT, MUTED, ACCENT, ERROR, TEAL = "#1b1b1b", "#5c5c5c", "#0067c0", "#c42b1c", "#0f766e"
 STATUS_COLORS = {
     "Starting": "#d97706", "Ready": "#16a34a", "Listening": "#dc2626", "Transcribing": "#2563eb",
@@ -233,6 +256,24 @@ def todo_stamp():
         return None
 
 
+def mix(a, b, t):
+    """The colour t of the way from a to b, both "#rrggbb"."""
+    a, b = int(a[1:], 16), int(b[1:], 16)
+    return "#" + "".join(f"{round(((a >> s) & 255) * (1 - t) + ((b >> s) & 255) * t):02x}" for s in (16, 8, 0))
+
+
+def ease(t):
+    return 1 - (1 - t) ** 3  # quick, then settling
+
+
+def rounded(x1, y1, x2, y2, r):
+    """The points of a rounded rectangle, for a smoothed canvas polygon."""
+    r = min(r, (x2 - x1) / 2, (y2 - y1) / 2)
+    return (x1 + r, y1, x1 + r, y1, x2 - r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y1 + r, x2, y2 - r, x2, y2 - r,
+            x2, y2, x2 - r, y2, x2 - r, y2, x1 + r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y2 - r, x1, y1 + r,
+            x1, y1 + r, x1, y1)
+
+
 class HintEntry(ttk.Entry):
     """An entry with grey hint text while it's empty, since Tk entries have no placeholder."""
 
@@ -275,6 +316,222 @@ class HintEntry(ttk.Entry):
             self.insert(0, hint)
 
 
+class ModelPicker:
+    """Settings > Answer model's picker, the way OpenClaw's /model and Hermes Agent's `hermes model` work: every
+    provider's models in one list, newest first, narrowed as you type. The providers are down the side, with a key box
+    for the one picked there. Enter or a double click uses the model."""
+    COLUMNS = (("model", "Model", 330), ("provider", "Provider", 140), ("price", "Price", 80), ("ctx", "Context", 70))
+
+    def __init__(self, app):
+        self.app, px = app, app.px
+        top = self.top = tk.Toplevel(app.root, bg=BG)
+        top.title("Pick a model")
+        top.transient(app.root)
+        w, h = px(860), px(560)
+        x = app.root.winfo_rootx() + (app.root.winfo_width() - w) // 2
+        y = app.root.winfo_rooty() + (app.root.winfo_height() - h) // 3
+        top.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
+        top.minsize(px(640), px(400))
+        top.protocol("WM_DELETE_WINDOW", self.close)
+        top.bind("<Escape>", lambda e: self.close())
+        self.order = list(providers.PROVIDERS)  # down the side, under All providers
+        self.only = None  # the provider picked down the side, None for all of them
+        self.rows = {}  # tree item: (provider, model)
+        self._typing = None
+        body = tk.Frame(top, bg=BG, padx=px(16), pady=px(14))
+        body.pack(fill="both", expand=True)
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(1, weight=1)
+        app._label(body, "Search", app.f_h2).grid(row=0, column=0, sticky="w", pady=(0, px(10)))
+        self.search = ttk.Entry(body)
+        self.search.grid(row=0, column=1, sticky="ew", pady=(0, px(10)))
+        self.search.bind("<KeyRelease>", self._typed)
+        self.search.bind("<Down>", lambda e: self._move(1))
+        self.search.bind("<Up>", lambda e: self._move(-1))
+        self.search.bind("<Return>", lambda e: self.use())
+        self.side = tk.Listbox(body, activestyle="none", exportselection=False, relief="flat", bd=0, width=26,
+                               highlightthickness=1, highlightbackground=LINE, highlightcolor=LINE, font=app.f_body,
+                               bg=SIDE, fg=TEXT, selectbackground=ACCENT, selectforeground="#ffffff")
+        self.side.grid(row=1, column=0, sticky="nsew", padx=(0, px(10)))
+        self.side.bind("<<ListboxSelect>>", lambda e: self._side_picked())
+        table = tk.Frame(body, bg=BG)
+        table.grid(row=1, column=1, sticky="nsew")
+        tree = self.tree = ttk.Treeview(table, columns=[c[0] for c in self.COLUMNS], show="headings",
+                                        selectmode="browse")
+        for ident, title, width in self.COLUMNS:
+            tree.heading(ident, text=title, anchor="w")
+            tree.column(ident, width=px(width), anchor="w", stretch=ident == "model")
+        bar = ttk.Scrollbar(table, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=bar.set)
+        tree.pack(side="left", fill="both", expand=True)
+        bar.pack(side="right", fill="y")
+        tree.tag_configure("nokey", foreground="#8a8a8a")
+        tree.tag_configure("current", font=app.f_bold)
+        tree.bind("<Double-1>", lambda e: self.use())
+        tree.bind("<Return>", lambda e: self.use())
+        self.key_row = tk.Frame(body, bg=BG)
+        self.key_row.grid(row=2, column=1, sticky="ew", pady=(px(8), 0))
+        self.key_title = app._label(self.key_row, "", app.f_bold)
+        self.key_title.pack(side="left")
+        self.key_box = HintEntry(self.key_row, "", secure=True, width=20)
+        self.key_box.pack(side="left", fill="x", expand=True, padx=(px(8), 0))
+        self.key_box.bind("<Return>", lambda e: self.save_key())
+        ttk.Button(self.key_row, text="Save key", command=self.save_key).pack(side="left", padx=(px(6), 0))
+        self.key_link = app._link(self.key_row, "Get a key", "")
+        self.key_link.pack(side="left", padx=(px(8), 0))
+        foot = tk.Frame(body, bg=BG)
+        foot.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(px(12), 0))
+        ttk.Button(foot, text="Use model", command=self.use).pack(side="right")
+        ttk.Button(foot, text="Cancel", command=self.close).pack(side="right", padx=(0, px(6)))
+        ttk.Button(foot, text="Refresh", command=self.refresh).pack(side="right", padx=(0, px(6)))
+        self.status = app._label(foot, "", app.f_small, MUTED, wraplength=px(520))
+        self.status.pack(side="left", fill="x", expand=True)
+        self.reload()
+        self.search.focus_set()
+        try:  # the main window waits while it's open, like a dialog
+            top.grab_set()
+        except tk.TclError:
+            pass
+
+    def reload(self):
+        """The providers down the side and the models again, from what providers.py knows now."""
+        counts = {p.id: len(providers.cached(p)["models"]) for p in self.order}
+        names = [f"All providers  ({sum(counts.values())})"] + [
+            p.name + (f"  ({counts[p.id]})" if counts[p.id] else "") + ("" if providers.ready(p) else SEP + "add key")
+            for p in self.order]
+        self.side.delete(0, "end")
+        for name in names:
+            self.side.insert("end", name)
+        at = 0 if self.only is None else self.order.index(self.only) + 1
+        self.side.selection_set(at)
+        self.side.see(at)
+        self._show_key()
+        self._fill()
+
+    def _side_picked(self):
+        picked = self.side.curselection()
+        if not picked:
+            return
+        self.only = None if picked[0] == 0 else self.order[picked[0] - 1]
+        self._show_key()
+        self._fill()
+        if self.only is not None and providers.stale(self.only):
+            self.refresh()
+
+    def _show_key(self):
+        p = self.only
+        if p is None or p.local:
+            self.key_row.grid_remove()
+            return
+        self.key_row.grid()
+        self.key_title.configure(text=f"{p.name} key")
+        self.key_box.clear()
+        self.key_box.set_hint("Saved, paste a new one to change it" if providers.key(p) else "Paste it here")
+        self.key_link.bind("<Button-1>", lambda e: webbrowser.open(p.key_url))
+
+    def _typed(self, event):
+        if event.keysym in ("Up", "Down", "Return", "Escape", "Tab"):
+            return
+        if self._typing:
+            self.top.after_cancel(self._typing)
+        self._typing = self.top.after(120, self._fill)
+
+    def _fill(self):
+        """The models with every word typed in the search box, the providers with a key first, newest first."""
+        self._typing = None
+        words = self.search.get().lower().split()
+        current = settings.get("llm_model")
+        kept = self.selected()
+        kept = providers.full(*kept) if kept else current
+        self.tree.delete(*self.tree.get_children())
+        self.rows, pick = {}, None
+        shown = [self.only] if self.only else sorted(self.order, key=lambda p: not providers.ready(p))
+        for p in shown:
+            ready = providers.ready(p)
+            for m in providers.cached(p)["models"]:
+                price = "this PC" if p.local else "free" if m["free"] else "paid"
+                if words and not all(w in f"{m['id']} {p.name} {price}".lower() for w in words):
+                    continue
+                full = providers.full(p, m["id"])
+                ctx = f"{round(m['ctx'] / 1000)}k" if m["ctx"] >= 1000 else ""
+                tags = ([] if ready else ["nokey"]) + (["current"] if full == current else [])
+                item = self.tree.insert("", "end", values=(m["id"], p.name, price if ready else "add key", ctx),
+                                        tags=tags)
+                self.rows[item] = (p, m["id"])
+                if full == kept or pick is None and full == current:
+                    pick = item
+        items = self.tree.get_children()
+        pick = pick or (items[0] if items else None)
+        if pick:
+            self.tree.selection_set(pick)
+            self.tree.see(pick)
+        self._say(len(items))
+
+    def _say(self, shown):
+        p = self.only
+        entry = providers.cached(p) if p else None
+        if p and entry["error"]:
+            self.status.configure(text=entry["error"] + ".", fg=ERROR)
+            return
+        when = ""
+        if p and entry["at"]:
+            ago = int((time.time() - entry["at"]) // 60)
+            when = f" Updated {'just now' if ago < 1 else f'{ago} min ago'}."
+        self.status.configure(text=f"{shown} models{f' on {p.name}' if p else ''}, newest first. Lists refresh by "
+                                   f"themselves every half hour.{when}", fg=MUTED)
+
+    def _move(self, step):
+        items = self.tree.get_children()
+        if items:
+            now = self.tree.selection()
+            at = items.index(now[0]) + step if now else 0
+            item = items[max(0, min(len(items) - 1, at))]
+            self.tree.selection_set(item)
+            self.tree.see(item)
+        return "break"
+
+    def selected(self):
+        picked = self.tree.selection()
+        return self.rows.get(picked[0]) if picked else None
+
+    def use(self):
+        picked = self.selected()
+        if not picked:
+            return
+        p, model_id = picked
+        if not providers.ready(p):
+            self.only = p
+            self.reload()
+            self.key_box.focus_set()
+            self.status.configure(text=f"Add your {p.name} key first, then pick the model again.", fg=ERROR)
+            return
+        self.app.set_model(providers.full(p, model_id))
+        self.close()
+
+    def save_key(self):
+        p, value = self.only, self.key_box.get().strip()
+        if p is None or not value:
+            return
+        error = self.app.save_model_key(p, value)
+        if error:
+            self.status.configure(text=error, fg=ERROR)
+            return
+        self._show_key()
+        self.status.configure(text=f"Saved your {p.name} key. Getting its models\u2026", fg=MUTED)
+
+    def refresh(self):
+        self.status.configure(text="Getting the lists\u2026", fg=MUTED)
+        self.app.refresh_models(force=True, provider=self.only)
+
+    def close(self):
+        try:
+            self.top.grab_release()
+        except tk.TclError:
+            pass
+        self.top.destroy()
+        self.app.picker = None
+
+
 class AssistantWindow:
     def __init__(self, root):
         self.root = root
@@ -285,6 +542,7 @@ class AssistantWindow:
         self.on_top = bool(settings.get("keep_on_top"))
         self.popup = bool(settings.get("popup"))
         self.s = root.winfo_fpixels("1i") / 96  # Windows display scaling, 1.0 at 100%
+        self._anims = {}  # what's moving: key -> its next frame
         self._setup_root()
         self._setup_styles()
         self.bubble = Bubble(root)
@@ -296,6 +554,7 @@ class AssistantWindow:
                       "priv": self._build_privacy(), "island": self._build_island(),
                       "settings": self._build_settings(), "keys": self._build_keys()}
         self._select_tab("keys" if missing_secrets() else "home")
+        self.root.after(300, self._slide_nav_bar)  # where the tabs are once the window's on screen
         self.root.after(50, self._drain)
         self.root.after(500, self._tick)
         self.root.after(150, self.root.focus_force)
@@ -314,7 +573,8 @@ class AssistantWindow:
         root.configure(bg=BG)
         if os.path.exists(ICON):
             root.iconbitmap(default=ICON)
-        w, h = self.px(W), self.px(H)
+        w = min(self.px(W), int(root.winfo_screenwidth() * 0.92))  # a small screen gets most of it
+        h = min(self.px(H), int(root.winfo_screenheight() * 0.88))
         x = (root.winfo_screenwidth() - w) // 2
         y = max(0, (root.winfo_screenheight() - h) // 2 - self.px(30))
         root.geometry(f"{w}x{h}+{x}+{y}")
@@ -339,16 +599,44 @@ class AssistantWindow:
         self.f_brand = ("Segoe UI Semibold", 13)
         self.f_value = ("Segoe UI Semibold", 19)
         self.f_mono = ("Consolas", 11)
+        icons = "Segoe Fluent Icons" if "Segoe Fluent Icons" in tkfont.families(self.root) else "Segoe MDL2 Assets"
+        self.f_icon, self.f_icon_big = (icons, 12), (icons, 15)
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont"):  # text boxes and lists in the same type as the rest
+            tkfont.nametofont(name).configure(family="Segoe UI", size=10)
+        self.root.option_add("*TCombobox*Listbox.font", self.f_body)
         style = ttk.Style(self.root)
         if "vista" in style.theme_names():
             style.theme_use("vista")
         style.configure(".", font=self.f_body)
-        style.configure("Treeview", rowheight=self.px(26), font=self.f_body)
+        style.configure("Treeview", rowheight=self.px(28), font=self.f_body)
+        style.map("Treeview", background=[("selected", ACCENT_SOFT)], foreground=[("selected", TEXT)])
         style.configure("Treeview.Heading", font=self.f_bold)
         style.configure("TButton", padding=(self.px(10), self.px(3)))
         style.configure("Hint.TEntry", foreground="#6e6e6e")
         style.configure("TCheckbutton", background=BG)
         style.configure("TCombobox", padding=self.px(2))
+        style.configure("Pick.TButton", anchor="w", padding=(self.px(8), self.px(4)))  # the answer model, as a box
+
+    def animate(self, key, ms, step, done=None):
+        """step(t) every frame as t goes from 0 to 1 over ms, eased. A newer one with the same key takes over."""
+        if key in self._anims:
+            self.root.after_cancel(self._anims.pop(key))
+        start = time.perf_counter()
+
+        def frame():
+            t = min(1.0, (time.perf_counter() - start) * 1000 / ms)
+            try:
+                step(ease(t))
+            except tk.TclError:  # its widget went
+                self._anims.pop(key, None)
+                return
+            if t < 1:
+                self._anims[key] = self.root.after(15, frame)
+            else:
+                self._anims.pop(key, None)
+                if done:
+                    done()
+        frame()
 
     def _label(self, parent, text="", font=None, fg=TEXT, bg=BG, **kw):
         anchor = "nw" if "wraplength" in kw else "w"  # if a long text runs out of room, lose the end, not the start
@@ -361,79 +649,184 @@ class AssistantWindow:
 
     # ------------------------------------------------------------------ layout
     def _build_sidebar(self):
-        side = tk.Frame(self.root, bg=SIDE, width=self.px(SIDEBAR))
+        side = tk.Frame(self.root, bg=NAV, width=self.px(SIDEBAR))
         side.grid(row=0, column=0, sticky="ns")
         side.pack_propagate(False)
-        self._label(side, "Hey Jev", self.f_brand, bg=SIDE).pack(fill="x", padx=self.px(22), pady=(self.px(22), self.px(14)))
+        brand = tk.Frame(side, bg=NAV)
+        brand.pack(fill="x", padx=self.px(20), pady=(self.px(22), self.px(18)))
+        self.logo = tk.Canvas(brand, width=self.px(30), height=self.px(24), bg=NAV, highlightthickness=0)
+        self.logo.pack(side="left")
+        self._draw_logo(1.0)
+        self.root.after(2500, self._blink)
+        self._label(brand, "Hey Jev", self.f_brand, "#ffffff", NAV).pack(side="left", padx=(self.px(10), 0))
+        self.nav = tk.Frame(side, bg=NAV)
+        self.nav.pack(fill="x", padx=self.px(10))
         self.tab_buttons = {}
         for key, title in TABS:
-            b = tk.Button(side, text=title, anchor="w", relief="flat", bd=0, bg=SIDE, fg=TEXT, font=self.f_body,
-                          activebackground=SELECT, activeforeground=TEXT, padx=self.px(12), pady=self.px(5),
-                          highlightthickness=1, highlightbackground=SIDE, highlightcolor=ACCENT, cursor="hand2",
-                          command=lambda k=key: self._select_tab(k))
-            b.pack(fill="x", padx=self.px(10), pady=1)
-            b.bind("<Enter>", lambda e, k=key: self._hover_tab(k, True))
-            b.bind("<Leave>", lambda e, k=key: self._hover_tab(k, False))
-            self.tab_buttons[key] = b
-        bottom = tk.Frame(side, bg=SIDE)
+            item = tk.Frame(self.nav, bg=NAV, cursor="hand2", takefocus=1, highlightthickness=1,
+                            highlightbackground=NAV, highlightcolor=GLOW)
+            item.pack(fill="x", pady=1)
+            icon = tk.Label(item, text=ICONS.get(key, ""), font=self.f_icon, fg=NAV_MUTED, bg=NAV, cursor="hand2")
+            icon.pack(side="left", padx=(self.px(12), self.px(10)), pady=self.px(7))
+            text = tk.Label(item, text=title, font=self.f_body, fg=NAV_TEXT, bg=NAV, anchor="w", cursor="hand2")
+            text.pack(side="left", fill="x", expand=True)
+            for w in (item, icon, text):
+                w.bind("<Button-1>", lambda e, k=key: self._select_tab(k))
+                w.bind("<Enter>", lambda e, k=key: self._hover_tab(k, True))
+                w.bind("<Leave>", lambda e, k=key: self._hover_tab(k, False, e))
+            for keysym in ("<Return>", "<space>"):
+                item.bind(keysym, lambda e, k=key: self._select_tab(k))
+            self.tab_buttons[key] = (item, icon, text)
+        self.nav_bar = tk.Frame(self.nav, bg=GLOW, width=self.px(3))  # slides to the tab you're on
+        bottom = tk.Frame(side, bg=NAV)
         bottom.pack(side="bottom", fill="x", padx=self.px(20), pady=(0, self.px(14)))
         self.timer_rows = []
         for _ in range(3):  # up to 3 timers, soonest on top
-            row = tk.Frame(bottom, bg=SIDE)
-            name = self._label(row, "", self.f_small, MUTED, SIDE)
-            left = tk.Label(row, text="", font=self.f_mono, fg=TEAL, bg=SIDE)
+            row = tk.Frame(bottom, bg=NAV)
+            name = self._label(row, "", self.f_small, NAV_TEXT, NAV)
+            left = tk.Label(row, text="", font=self.f_mono, fg=GLOW, bg=NAV)
             name.pack(side="left")
             left.pack(side="right")
             self.timer_rows.append((row, name, left))
-        self.hint = self._label(bottom, HINTS[self.mode], self.f_small, MUTED, SIDE, wraplength=self.px(SIDEBAR - 40))
-        self.hint.pack(fill="x", pady=(self.px(8), self.px(6)))
-        tk.Button(bottom, text="Quit Hey Jev", relief="flat", bd=0, bg=SIDE, fg=MUTED, font=self.f_small,
-                  activebackground=HOVER, cursor="hand2", anchor="w", highlightthickness=1, highlightbackground=SIDE,
-                  highlightcolor=ACCENT, command=self.quit).pack(fill="x")
+        self.hint = self._label(bottom, HINTS[self.mode], self.f_small, NAV_MUTED, NAV,
+                                wraplength=self.px(SIDEBAR - 40))
+        self.hint.pack(fill="x", pady=(self.px(8), self.px(8)))
+        tk.Button(bottom, text="\u23fb  Quit Hey Jev", relief="flat", bd=0, bg=NAV, fg=NAV_MUTED, font=self.f_small,
+                  activebackground=NAV_HOVER, activeforeground="#ffffff", cursor="hand2", anchor="w",
+                  highlightthickness=1, highlightbackground=NAV, highlightcolor=GLOW, command=self.quit).pack(fill="x")
 
-    def _hover_tab(self, key, inside):
-        if key != getattr(self, "current_tab", None):
-            self.tab_buttons[key].configure(bg=HOVER if inside else SIDE)
+    def _draw_logo(self, open_):
+        """Her eyes, as on her island: two glowing pills, open_ 1 open and 0 shut."""
+        c, px = self.logo, self.px
+        c.delete("all")
+        for x in (px(9), px(21)):
+            h = max(px(2), px(16) * open_)
+            for grow, colour in ((px(3), mix(NAV, GLOW, 0.18)), (px(1.5), mix(NAV, GLOW, 0.45)), (0, GLOW)):
+                c.create_polygon(rounded(x - px(4) - grow, px(12) - h / 2 - grow, x + px(4) + grow,
+                                         px(12) + h / 2 + grow, px(4) + grow), smooth=True, fill=colour, outline="")
+
+    def _blink(self):
+        self.animate("blink", 220, lambda t: self._draw_logo(abs(1 - 2 * t)),
+                     lambda: self.root.after(random.randint(3500, 8000), self._blink))
+
+    def _paint_tab(self, key, bg, on):
+        item, icon, text = self.tab_buttons[key]
+        item.configure(bg=bg, highlightbackground=bg)
+        icon.configure(bg=bg, fg=GLOW if on else NAV_MUTED)
+        text.configure(bg=bg, fg="#ffffff" if on else NAV_TEXT, font=self.f_bold if on else self.f_body)
+
+    def _hover_tab(self, key, inside, event=None):
+        if key == getattr(self, "current_tab", None):
+            return
+        item = self.tab_buttons[key][0]
+        if event is not None:  # from the tab onto its own icon or words is still on it
+            under = self.root.winfo_containing(event.x_root, event.y_root)
+            if under is not None and (under is item or under.master is item):
+                return
+        start, end = item.cget("bg"), NAV_HOVER if inside else NAV
+        self.animate(f"hover {key}", 140, lambda t: self._paint_tab(key, mix(start, end, t), False))
+
+    def _slide_nav_bar(self):
+        item = self.tab_buttons[self.current_tab][0]
+        self.nav.update_idletasks()
+        y, h = item.winfo_y() + self.px(8), max(self.px(4), item.winfo_height() - self.px(16))
+        if not self.nav_bar.winfo_ismapped() or not item.winfo_height():
+            self.nav_bar.place(x=0, y=y, width=self.px(3), height=h)
+            return
+        start = self.nav_bar.winfo_y()
+        self.animate("nav bar", 260, lambda t: self.nav_bar.place_configure(y=round(start + (y - start) * t),
+                                                                             height=h))
 
     def _build_main(self):
         main = tk.Frame(self.root, bg=BG)
         main.grid(row=0, column=1, sticky="nsew")
         header = tk.Frame(main, bg=BG)
-        header.pack(fill="x", padx=self.px(24), pady=(self.px(16), self.px(12)))
-        seg = tk.Frame(header, bg=LINE, padx=1, pady=1)  # the mode switch, a 1px border round two buttons
-        seg.pack(side="right", anchor="n")
-        self.mode_buttons = {}
-        for mode in MODES:
-            b = tk.Button(seg, text=MODE_LABELS[mode], relief="flat", bd=0, font=self.f_body, padx=self.px(12),
-                          pady=self.px(4), cursor="hand2", highlightthickness=0, command=lambda m=mode: self.set_mode(m))
-            b.pack(side="left")
-            self.mode_buttons[mode] = b
-        self._paint_mode()
+        header.pack(fill="x", padx=self.px(28), pady=(self.px(18), self.px(14)))
+        self.mode_switch = tk.Canvas(header, bg=BG, highlightthickness=0, cursor="hand2", takefocus=1)
+        self.mode_switch.pack(side="right", anchor="n")
+        self._build_mode_switch()
         status = tk.Frame(header, bg=BG)
         status.pack(side="left", fill="x", expand=True)
         row = tk.Frame(status, bg=BG)
         row.pack(anchor="w")
-        self.dot = tk.Label(row, text="\u25cf", font=("Segoe UI", 13), fg=STATUS_COLORS["Starting"], bg=BG)
+        self.dot = tk.Canvas(row, width=self.px(20), height=self.px(20), bg=BG, highlightthickness=0)
         self.dot.pack(side="left")
+        self.dot_colour, self.dot_busy, self.dot_job = STATUS_COLORS["Starting"], False, None
+        self._draw_dot()
         self.status = self._label(row, "Starting", self.f_status)
         self.status.pack(side="left", padx=(self.px(6), 0))
         self.detail = self._label(status, "Loading speech models\u2026", fg=MUTED)
-        self.detail.pack(anchor="w", fill="x")
+        self.detail.pack(anchor="w", fill="x", padx=(self.px(26), 0))
         tk.Frame(main, bg=LINE, height=1).pack(fill="x")
         self.page_area = tk.Frame(main, bg=BG)
         self.page_area.pack(fill="both", expand=True)
-        self.page_area.grid_rowconfigure(0, weight=1)
-        self.page_area.grid_columnconfigure(0, weight=1)
 
-    def _paint_mode(self):
-        for mode, b in self.mode_buttons.items():
-            on = mode == self.mode
-            b.configure(bg=ACCENT if on else BG, fg="#ffffff" if on else TEXT,
-                        activebackground=ACCENT if on else HOVER, activeforeground="#ffffff" if on else TEXT)
+    def _draw_dot(self, phase=None):
+        """Her status dot, and while she's busy a ring that grows from it and fades, phase 0 to 1."""
+        c, px, colour = self.dot, self.px, self.dot_colour
+        c.delete("all")
+        mid = px(10)
+        if phase is not None:
+            r = px(4) + px(6) * phase
+            c.create_oval(mid - r, mid - r, mid + r, mid + r, outline=mix(colour, BG, phase), width=px(2))
+        c.create_oval(mid - px(5), mid - px(5), mid + px(5), mid + px(5), fill=colour, outline="")
+
+    def _set_dot(self, colour, busy):
+        self.dot_colour, self.dot_busy = colour, busy
+        if busy and self.dot_job is None:
+            self._pulse()
+        elif not busy:
+            self._draw_dot()
+
+    def _pulse(self):
+        if not self.dot_busy:
+            self.dot_job = None
+            self._draw_dot()
+            return
+        self._draw_dot(time.perf_counter() % 1.3 / 1.3)
+        self.dot_job = self.root.after(33, self._pulse)
+
+    def _build_mode_switch(self):
+        """Hold Right Alt and Hey Jev as one pill, the one on in a thumb that slides across."""
+        c, px = self.mode_switch, self.px
+        measure = tkfont.Font(root=self.root, font=self.f_bold).measure
+        pad, h, x = px(3), px(32), px(3)
+        self.mode_spans = {}
+        for mode in MODES:
+            w = measure(MODE_LABELS[mode]) + px(28)
+            self.mode_spans[mode] = (x, x + w)
+            x += w
+        c.configure(width=x + pad, height=h)
+        c.create_polygon(rounded(0, 0, x + pad, h, h / 2), smooth=True, fill="#eef0f3", outline="")
+        a, b = self.mode_spans[self.mode]
+        self.mode_thumb = c.create_polygon(rounded(a, pad, b, h - pad, (h - 2 * pad) / 2), smooth=True,
+                                           fill=ACCENT, outline="")
+        self.mode_texts = {m: c.create_text((a + b) / 2, h / 2, text=MODE_LABELS[m], font=self.f_bold)
+                           for m, (a, b) in self.mode_spans.items()}
+        c.bind("<Button-1>", lambda e: self.set_mode(next((m for m, (a, b) in self.mode_spans.items()
+                                                           if a <= e.x < b), self.mode)))
+        c.bind("<Left>", lambda e: self.set_mode(MODES[0]))
+        c.bind("<Right>", lambda e: self.set_mode(MODES[-1]))
+        self._paint_mode(slide=False)
+
+    def _paint_mode(self, slide=True):
+        c, pad, h = self.mode_switch, self.px(3), int(self.mode_switch.cget("height"))
+        for mode, item in self.mode_texts.items():
+            c.itemconfigure(item, fill="#ffffff" if mode == self.mode else TEXT)
+        a2, b2 = self.mode_spans[self.mode]
+        a1, b1 = getattr(self, "mode_thumb_at", (a2, b2)) if slide else (a2, b2)
+
+        def step(t):
+            self.mode_thumb_at = a, b = a1 + (a2 - a1) * t, b1 + (b2 - b1) * t
+            c.coords(self.mode_thumb, *rounded(a, pad, b, h - pad, (h - 2 * pad) / 2))
+        if slide:
+            self.animate("mode", 240, step)
+        else:
+            step(1)
 
     def _page(self, title, subtitle, scroll=False):
-        page = tk.Frame(self.page_area, bg=BG, padx=self.px(24), pady=self.px(18))
-        page.grid(row=0, column=0, sticky="nsew")
+        page = tk.Frame(self.page_area, bg=BG, padx=self.px(28), pady=self.px(20))
+        page.place(x=0, y=0, relwidth=1, relheight=1)  # placed, not gridded, so it can slide in
         if scroll:  # a page taller than the window scrolls, with the mouse wheel too
             outer, canvas = page, tk.Canvas(page, bg=BG, highlightthickness=0, bd=0)
             bar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
@@ -592,13 +985,20 @@ class AssistantWindow:
             grid.grid_columnconfigure(c, weight=1, uniform="card")
         self.stat_cards = []
         for i in range(6):
-            card = tk.Frame(grid, bg=CARD, padx=self.px(16), pady=self.px(10))
-            card.grid(row=i // 3, column=i % 3, sticky="nsew", padx=(0, self.px(12) if i % 3 < 2 else 0), pady=(0, self.px(12)))
-            value = self._label(card, "", self.f_value, bg=CARD)
-            title = self._label(card, "", self.f_bold, bg=CARD)
-            sub = self._label(card, "", self.f_small, MUTED, CARD)
+            card = tk.Frame(grid, bg=BG, padx=self.px(16), pady=self.px(14), highlightthickness=1,
+                            highlightbackground=LINE, highlightcolor=LINE)
+            card.grid(row=i // 3, column=i % 3, sticky="nsew", padx=(0, self.px(14) if i % 3 < 2 else 0),
+                      pady=(0, self.px(14)))
+            tk.Label(card, text=STAT_ICONS[i], font=self.f_icon_big, fg=ACCENT, bg=ACCENT_SOFT, width=2,
+                     pady=self.px(4)).pack(anchor="w", pady=(0, self.px(8)))
+            value = self._label(card, "", self.f_value, bg=BG)
+            title = self._label(card, "", self.f_bold, bg=BG)
+            sub = self._label(card, "", self.f_small, MUTED, BG)
             for v in (value, title, sub):
                 v.pack(fill="x")
+            for w in (card, *card.winfo_children()):  # it lights up under the mouse
+                w.bind("<Enter>", lambda e, c=card, n=i: self._light_card(c, n, True))
+                w.bind("<Leave>", lambda e, c=card, n=i: self._light_card(c, n, False, e))
             self.stat_cards.append((value, title, sub))
         self._label(page, "Most used", self.f_h2).pack(fill="x", pady=(self.px(6), self.px(2)))
         self.top_actions = self._label(page, "", fg=MUTED, wraplength=self.px(660))
@@ -606,6 +1006,25 @@ class AssistantWindow:
         self._label(page, "How to use", self.f_h2).pack(fill="x", pady=(self.px(12), self.px(2)))
         self._label(page, HOW_TO, fg=MUTED, wraplength=self.px(660)).pack(fill="x")
         return page
+
+    def _count_up(self, key, label, text):
+        """A number counts up to itself, from where it was; any other text just shows."""
+        if not re.fullmatch(r"[\d,]+", text):
+            label.configure(text=text)
+            return
+        end = int(text.replace(",", ""))
+        was = label.cget("text").replace(",", "")
+        start = int(was) if was.isdigit() and int(was) <= end else 0
+        self.animate(key, 700, lambda t: label.configure(text=f"{round(start + (end - start) * t):,}"))
+
+    def _light_card(self, card, n, inside, event=None):
+        if event is not None:
+            under = self.root.winfo_containing(event.x_root, event.y_root)
+            if under is not None and (under is card or under.master is card):
+                return
+        start, end = card.cget("highlightbackground"), "#9cc3ea" if inside else LINE
+        self.animate(f"card {n}", 160, lambda t: card.configure(highlightbackground=mix(start, end, t),
+                                                                highlightcolor=mix(start, end, t)))
 
     def _load_stats(self):
         words = dictations = words_today = dictations_today = 0
@@ -651,11 +1070,11 @@ class AssistantWindow:
             (f"{sum(actions.values()):,}", "Commands done", f"from {heard:,} things she heard"),
             (fav_name if len(fav_name) <= 14 else fav_name[:13] + "\u2026", "Most opened app",
              f"opened {opened[fav]} times" if fav else "Say \u201cHey Jev, open Spotify\u201d"),
-            (f"{answered:,}", "Questions answered", "now by Claude Haiku" if opencode.is_anthropic(
-                settings.get("llm_model") or "") else "by free models, $0"),
+            (f"{answered:,}", "Questions answered", "by free models, $0" if opencode.is_free(
+                settings.get("llm_model")) else f"now on {providers.split(settings.get('llm_model'))[0].name}"),
         )
-        for (value, title, sub), (v, t, s) in zip(self.stat_cards, cards):
-            value.configure(text=v)
+        for i, ((value, title, sub), (v, t, s)) in enumerate(zip(self.stat_cards, cards)):
+            self._count_up(f"stat {i}", value, v)
             title.configure(text=t)
             sub.configure(text=s)
         merged = {}  # old and new names for the same thing count together
@@ -1149,7 +1568,9 @@ class AssistantWindow:
         def row(title, sub):
             r = count[0] * 2
             count[0] += 1
-            self._label(form, title, self.f_h2).grid(row=r, column=0, sticky="w", pady=(self.px(12), 0))
+            if r:  # a thin line between rows
+                tk.Frame(form, bg=LINE, height=1).grid(row=r, column=0, columnspan=2, sticky="new")
+            self._label(form, title, self.f_h2).grid(row=r, column=0, sticky="w", pady=(self.px(14), 0))
             self._label(form, sub, self.f_small, MUTED, wraplength=self.px(330)).grid(row=r + 1, column=0, sticky="w")
             return r
 
@@ -1341,7 +1762,9 @@ class AssistantWindow:
         form.grid_columnconfigure(0, weight=1)
 
         def row(r, title, sub):
-            self._label(form, title, self.f_h2).grid(row=r * 2, column=0, sticky="w", pady=(self.px(12), 0))
+            if r:  # a thin line between rows
+                tk.Frame(form, bg=LINE, height=1).grid(row=r * 2, column=0, columnspan=2, sticky="new")
+            self._label(form, title, self.f_h2).grid(row=r * 2, column=0, sticky="w", pady=(self.px(14), 0))
             label = self._label(form, sub, self.f_small, MUTED, wraplength=self.px(310))
             label.grid(row=r * 2 + 1, column=0, sticky="w")
             return label
@@ -1351,17 +1774,19 @@ class AssistantWindow:
         self.mic_menu.grid(row=0, column=1, rowspan=2, sticky="e")
         self.mic_menu.bind("<<ComboboxSelected>>", lambda e: self.mic_changed())
 
-        row(1, "Answer model", "The model that works out what you asked and answers: Claude Haiku 5.5 with your "
-                               "Anthropic key (paid per request), or a free one on OpenCode Zen or Kilo. Refresh lists "
-                               "the free ones that answer here, fastest first.")
+        row(1, "Answer model", "The model that works out what you asked and answers, from any provider: OpenCode "
+                               "Zen, Kilo, OpenRouter, Anthropic, OpenAI, Gemini and more. Click it for every model, "
+                               "newest first, with a search box. The lists refresh by themselves every half hour. "
+                               "Free ones say so, the rest are billed to your account with that provider.")
         models = tk.Frame(form, bg=BG)
         models.grid(row=2, column=1, rowspan=2, sticky="e")
-        self.llm_menu = ttk.Combobox(models, width=29, values=opencode.PAID_CHOICES + opencode.FALLBACK_FREE)
-        self.llm_menu.set(settings.get("llm_model"))
-        self.llm_menu.pack(side="left")
-        ttk.Button(models, text="Refresh", command=self.refresh_models).pack(side="left", padx=(self.px(6), 0))
-        for event in ("<<ComboboxSelected>>", "<Return>", "<FocusOut>"):
-            self.llm_menu.bind(event, lambda e: self.model_changed("llm_model", self.llm_menu))
+        models.grid_columnconfigure(0, weight=1)
+        self.model_button = ttk.Button(models, style="Pick.TButton", width=38, command=self.open_model_picker)
+        self.model_button.grid(row=0, column=0, sticky="ew")
+        self.models_info = self._label(models, "", self.f_small, MUTED, wraplength=self.px(330))
+        self.models_info.grid(row=1, column=0, sticky="w", pady=(self.px(4), 0))
+        self.picker = None
+        self._show_models()
 
         row(2, "Speech to text", "Turns what you say into text, on this PC. Nemotron shows your words as you talk, "
                                  "but it lost \u201cHey Jev\u201d in a real voice. Takes effect when Hey Jev next starts.")
@@ -1672,84 +2097,106 @@ class AssistantWindow:
         settings.put("turn_wait", wait)
         self._note(f"Saved. Quit Hey Jev and open it again for {WAITS[wait].split(' (')[0]}.")
 
-    def model_changed(self, name, box):
-        value = box.get().strip()
-        if value == (settings.get(name) or ""):
+    def open_model_picker(self):
+        if self.picker is not None:
+            self.picker.top.lift()
             return
-        if value and not opencode.allowed(value):  # free ones, or Anthropic's: any other paid model never gets saved
-            box.set(settings.get(name))
-            self._note(f"{value} isn't free. Hey Jev uses free models (ending in -free or :free), or Claude Haiku "
-                       f"with an Anthropic key.", error=True)
-            return
-        if opencode.is_anthropic(value) and not get_secret("ANTHROPIC_API_KEY"):
-            box.set(settings.get(name))
-            self._note("Add your Anthropic key in the Keys tab first.", error=True)
-            return
-        settings.put(name, value)
-        box.set(settings.get(name))  # an emptied box goes back to the default
-        model = settings.get(name)
-        key = get_secret("OPENCODE_ZEN_API_KEY")
-        if not key and not opencode.is_anthropic(model):
-            self._note(f"Saved, she now thinks with {model}")
-            return
-        self._note(f"Saved, checking {model} answers\u2026")
+        self.picker = ModelPicker(self)
+        self.refresh_models()  # any list that's old, read again while it's open
+
+    def set_model(self, value):
+        """Saves the answer model and checks it answers, saying how it went under it."""
+        p = providers.split(value)[0]
+        settings.put("llm_model", value)
+        self._show_models()
+        cost = "free" if opencode.is_free(value) else f"billed to your {p.name} account"
+        self.models_info.configure(text=f"Saved ({cost}). Checking it answers\u2026", fg=MUTED)
 
         def check():
-            ok, result = opencode.check_model(key, model)
-            self.events.put(("note", f"{model} answered in {result:.1f}s" if ok else f"{model}: {result}", not ok))
+            ok, result = opencode.check_model(get_secret("OPENCODE_ZEN_API_KEY"), value)
+            self.events.put(("model_check", f"It answered in {result:.1f}s ({cost})." if ok else
+                             f"It didn\u2019t answer: {result}", not ok))
         threading.Thread(target=check, daemon=True).start()
 
-    def refresh_models(self):
-        key = get_secret("OPENCODE_ZEN_API_KEY")
-        self._note("Checking which free models answer here\u2026" if key else "Getting the list from OpenCode\u2026")
+    def save_model_key(self, p, value):
+        """Saves a provider's key from the picker, and reads its list with it. Why it couldn't, or None."""
+        try:
+            save_secret(p.key, value)
+        except Exception as exc:
+            return str(exc)
+        if p.key == "OPENCODE_ZEN_API_KEY":
+            from siri import reload_keys
+            reload_keys()
+        if p.key in self.key_fields:  # the Keys tab says so too
+            self.key_fields[p.key].set_hint("Already saved")
+        self.refresh_models(force=True, provider=p)
+        return None
 
+    def refresh_models(self, force=False, provider=None):
+        """Reads the model lists again on a thread: provider's, or with force and no provider every one that can be
+        read; and any other that's gone stale."""
         def fetch():
-            try:
-                working, free = opencode.working_free_models(key) if key else (None, opencode.free_chat_models())
-                self.events.put(("models", working, free))
-            except Exception as exc:
-                self.events.put(("note", f"Couldn't get the model list: {exc}", True))
+            if force and provider is not None:
+                providers.refresh(provider)
+            providers.refresh_all(only_stale=not (force and provider is None))
+            self.events.put(("models",))
         threading.Thread(target=fetch, daemon=True).start()
+
+    def _auto_refresh(self):
+        """While the window's open, every list is read again once it's half an hour old."""
+        self.refresh_models()
+        self.root.after(providers.FRESH_FOR * 1000, self._auto_refresh)
 
     def _note(self, text, error=False):
         self.settings_note.configure(text=text, fg=ERROR if error else MUTED)
 
-    def _show_models(self, working, free):
-        """working is None without a key to check with, else the free models that answered, fastest first."""
-        current = settings.get("llm_model")
-        if working is None:
-            self.llm_menu.configure(values=opencode.PAID_CHOICES + (free or opencode.FALLBACK_FREE))
-            self._note(f"{len(free)} free models on OpenCode. Add your OpenCode key in Keys to check which answer here.")
-            return
-        self.llm_menu.configure(values=opencode.PAID_CHOICES + (working or free))
-        if not working:
-            self._note("None of OpenCode's free models answer outside OpenCode right now, so only simple commands like "
-                       "\u201copen Notepad\u201d or \u201cpause\u201d work.", error=True)
-        elif current not in working and opencode.is_free(current):
-            self._note(f"{current} doesn't answer here any more, pick one from the list. Working now: "
-                       f"{', '.join(working)}", error=True)
+    def _show_models(self):
+        """The answer model on its box, what's known of it under it, and the picker's lists if it's open."""
+        p, current = providers.split(settings.get("llm_model"))
+        self.model_button.configure(text=(current if len(current) <= 36 else current[:35] + "\u2026") + "  \u25be")
+        entry = providers.cached(p)
+        model = next((m for m in entry["models"] if m["id"] == current), None)
+        bits, bad = [p.name], False
+        if not providers.ready(p):
+            bits, bad = [f"Add your {p.name} key: click the model."], True
+        elif model is None and entry["models"] and not entry["error"]:
+            bits, bad = [f"It isn\u2019t on {p.name}\u2019s list any more, click to pick another."], True
         else:
-            self._note(f"{len(working)} of {len(free)} free models answer here, fastest first: {', '.join(working)}. "
-                       "The rest are busy, or only run inside OpenCode itself.")
+            bits.append("Free" if opencode.is_free(settings.get("llm_model")) else
+                        f"Paid, billed to your {p.name} account")
+            if model and model["ctx"] >= 1000:
+                bits.append(f"{round(model['ctx'] / 1000)}k context")
+        self.models_info.configure(text=SEP.join(bits), fg=ERROR if bad else MUTED)
+        if self.picker is not None:
+            self.picker.reload()
 
     # ------------------------------------------------------------------ keys
     def _build_keys(self):
-        page = self._page("Keys", "Saved in Windows Credential Manager. A key in .env wins over these. Saved keys stay hidden.")
+        page = self._page("Keys", "Saved in Windows Credential Manager. A key in .env wins over these. Saved keys stay "
+                                  "hidden.", scroll=True)
         form = tk.Frame(page, bg=BG)
         form.pack(fill="x")
         form.grid_columnconfigure(0, weight=1)
         self.key_fields = {}
-        for i, (title, key_name, use, url) in enumerate(KEY_ROWS):
+        for i, (title, key_name, use, url) in enumerate(KEY_ROWS + MODEL_KEY_ROWS):
+            r = i * 2 + (2 if i >= len(KEY_ROWS) else 0)  # the providers' rows go under their heading
             head = tk.Frame(form, bg=BG)
-            head.grid(row=i * 2, column=0, sticky="w", pady=(self.px(12), 0))
+            head.grid(row=r, column=0, sticky="w", pady=(self.px(12), 0))
             self._label(head, title, self.f_h2).pack(side="left")
             self._link(head, "Get a key", url).pack(side="left", padx=(self.px(8), 0))
-            self._label(form, use, self.f_small, MUTED).grid(row=i * 2 + 1, column=0, sticky="w")
-            hint = "Already saved" if get_secret(key_name) else ("Optional" if key_name in OPTIONAL else "Paste key")
+            self._label(form, use, self.f_small, MUTED).grid(row=r + 1, column=0, sticky="w")
+            hint = "Already saved" if get_secret(key_name) else ("Paste key" if key_name in KEY_NAMES and
+                                                                 key_name not in OPTIONAL else "Optional")
             field = HintEntry(form, hint, secure=True, width=40)
-            field.grid(row=i * 2, column=1, rowspan=2, sticky="e", pady=(self.px(12), 0))
+            field.grid(row=r, column=1, rowspan=2, sticky="e", pady=(self.px(12), 0))
             field.bind("<Return>", lambda e: self.save_keys())
             self.key_fields[key_name] = field
+        r = len(KEY_ROWS) * 2
+        self._label(form, "More answer model providers", self.f_h2).grid(row=r, column=0, columnspan=2, sticky="w",
+                                                                         pady=(self.px(26), 0))
+        self._label(form, "All optional. With a key saved, pick any of its models in Settings > Answer model; one "
+                          "that isn’t free is billed to your account there.", self.f_small, MUTED,
+                    wraplength=self.px(620)).grid(row=r + 1, column=0, columnspan=2, sticky="w")
         bar = tk.Frame(page, bg=BG)
         bar.pack(fill="x", pady=(self.px(20), 0))
         ttk.Button(bar, text="Save keys", command=self.save_keys).pack(side="right")
@@ -1760,14 +2207,16 @@ class AssistantWindow:
     def save_keys(self):
         try:
             saved = []
-            for key_name in KEY_NAMES:
-                field = self.key_fields[key_name]
+            for key_name, field in self.key_fields.items():
                 value = field.get()
                 if value:
                     save_secret(key_name, value)
                     saved.append(key_name)
                     field.clear()
                     field.set_hint("Already saved")
+            if saved:  # Settings > Answer model: the providers now ready, and their lists read with the key
+                self._show_models()
+                self.refresh_models()
             still_missing = missing_secrets()
             if still_missing:
                 names = ", ".join(n.replace("_API_KEY", "").replace("_", " ").title() for n in still_missing)
@@ -1806,12 +2255,15 @@ class AssistantWindow:
             self._load_mics()
             if not self.models_loaded:
                 self.models_loaded = True
-                self.refresh_models()
+                self._auto_refresh()
         self.current_tab = key
-        getattr(self.pages[key], "outer", self.pages[key]).tkraise()
-        for name, b in self.tab_buttons.items():
-            on = name == key
-            b.configure(bg=SELECT if on else SIDE, font=self.f_bold if on else self.f_body)
+        page = getattr(self.pages[key], "outer", self.pages[key])
+        page.tkraise()
+        rise = self.px(16)  # it comes up into place, over the page before's blank top
+        self.animate("page", 260, lambda t: page.place_configure(y=round(rise * (1 - t))))
+        for name in self.tab_buttons:
+            self._paint_tab(name, NAV_ON if name == key else NAV, name == key)
+        self._slide_nav_bar()
 
     # ------------------------------------------------------------------ assistant
     def _start_worker(self):
@@ -1841,7 +2293,9 @@ class AssistantWindow:
                 elif event[0] == "note":
                     self._note(event[1], error=event[2])
                 elif event[0] == "models":
-                    self._show_models(*event[1:])
+                    self._show_models()
+                elif event[0] == "model_check":
+                    self.models_info.configure(text=event[1], fg=ERROR if event[2] else MUTED)
                 elif event[0] == "island_apps":
                     self._show_island_apps(event[1])
         except queue.Empty:
@@ -1861,7 +2315,8 @@ class AssistantWindow:
             detail = " ".join(str(detail).split())
             self.detail.configure(text=detail if len(detail) <= 110 else detail[:109] + "\u2026")
         enrol = next((look for start, look in ENROL.items() if state.startswith(start)), None)
-        self.dot.configure(fg=STATUS_COLORS.get(state, STATUS_COLORS["Listening"] if enrol else TEXT))
+        self._set_dot(STATUS_COLORS.get(state, STATUS_COLORS["Listening"] if enrol else TEXT),
+                      state in BUSY or bool(enrol))
         if state == "Phone" and detail:  # next to the code box too, where you're looking
             self._phone_status(detail, error=detail.startswith(PHONE_BAD))
         pill, text = PILL.get(state) or enrol, detail

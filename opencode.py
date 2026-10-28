@@ -1,66 +1,43 @@
-"""OpenCode Zen, in place of OpenRouter: one key for the model that works out what you asked and answers it.
-Free models only.
+"""The model that works out what you asked and answers it, on whichever provider's picked in Settings (providers.py).
 
-Same setup as Hermes Agent's opencode-zen provider: an OPENCODE_ZEN_API_KEY from https://opencode.ai/zen
-and the OpenAI-style relay at https://opencode.ai/zen/v1. A paid model is refused before any request goes out,
-so nothing can be billed even if billing is turned on later.
+OpenCode Zen is the default, the same setup as Hermes Agent's opencode-zen provider: an OPENCODE_ZEN_API_KEY from
+https://opencode.ai/zen and the OpenAI-style relay at https://opencode.ai/zen/v1. Every other provider but Anthropic
+speaks the same API. A model that isn't free is billed to your own account with its provider.
 """
 import json
-import os
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
+import providers
 import settings
 
-BASE = os.getenv("OPENCODE_BASE_URL", "https://opencode.ai/zen/v1").rstrip("/")
+BASE = providers.OPENCODE_BASE
 # Kilo Gateway (kilo.ai), the same OpenAI-style API. Its models show here as "kilo/<id>", free ones end in ":free"
 KILO = "kilo/"
-KILO_BASE = "https://api.kilo.ai/api/gateway"
-# these answered in October 2026 but not with Hey Jev's JSON: a router that picked a safety model, or empty replies
-KILO_SKIP = ("openrouter/free", "kilo-auto/free", "apodex/", "nemotron-3.5-content-safety", "lyria")
+KILO_BASE = providers.KILO_BASE
 SESSION = requests.Session()  # one kept-open connection: an answer came in 0.6 s on it, 1.4 s on a fresh one
-# These speak a different API (Jev has its own endpoint, Muse Spark only does /responses), so they can't answer here
-NOT_CHAT = ("jev-", "muse-spark")
-FREE_EXTRA = {"big-pickle"}  # free on OpenCode's price list without "-free" in the name
 # OpenCode keeps most free chat models for its own app and turns other apps away with a 403. On 11 October 2026
 # space-bunny-free was gone (410) and Kilo's Nemotron 3 Super 404'd; these answered. Refresh in Settings checks again.
 FALLBACK_FREE = ["kilo/nvidia/nemotron-3-ultra-550b-a55b:free", "kilo/cohere/north-mini-code:free",
                  "kilo/nvidia/nemotron-3.5-lightning:free"]
-# Anthropic: the one paid choice, used only when it's picked in Settings and its key is saved. Billed per request
-# on your Anthropic account. Shown here as "anthropic/<id>"
+# Anthropic, on its own API, used when one of its models is picked in Settings and its key is saved. Billed per
+# request on your Anthropic account. Shown here as "anthropic/<id>"
 ANTHROPIC = "anthropic/"
 ANTHROPIC_BASE = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
 HAIKU = "anthropic/claude-haiku-5-5"
-PAID_CHOICES = [HAIKU]
 WHY = (("can only be used from within OpenCode", "OpenCode only lets this free model run inside OpenCode itself"),
-       ("isn't a free model", "it isn't free, and Hey Jev only uses free models"),
        ("unavailable", "not available right now"),
        ("429", "busy, too many people on it right now"),
-       ("401", "the key was turned down, check it in Keys"),
+       ("401", "the key was turned down, check it"),
        ("timed out", "it took too long to answer"))
 
 
 def is_free(model):
-    if model and model.startswith(KILO):
-        return model.endswith(":free")
-    return bool(model) and (model.endswith("-free") or model in FREE_EXTRA)
-
-
-def _where(model, key):
-    """(chat URL, key, model id) for OpenCode or Kilo."""
-    if model.startswith(KILO):
-        from secrets_store import get_secret
-        kilo_key = get_secret("KILO_API_KEY")
-        if not kilo_key:
-            raise RuntimeError("Add your Kilo key in the Keys tab")
-        return f"{KILO_BASE}/chat/completions", kilo_key, model[len(KILO):]
-    if not key:
-        raise RuntimeError("Add your OpenCode Zen key in the Keys tab")
-    return f"{BASE}/chat/completions", key, model
+    p, model_id = providers.split(model)
+    return bool(model_id) and providers.is_free(p, model_id)
 
 
 def is_anthropic(model):
@@ -68,13 +45,8 @@ def is_anthropic(model):
 
 
 def allowed(model):
-    """Free models, and Anthropic's, which you chose to pay for. Any other paid model is refused."""
-    return is_free(model) or is_anthropic(model)
-
-
-def require_free(model):
-    if not allowed(model):
-        raise RuntimeError(f"OpenCode ({model}) isn't a free model, Hey Jev only uses free ones")
+    """Any model on a provider in Settings: a free one, or one you pay for with your own key."""
+    return bool(model)
 
 
 def error_text(r):
@@ -97,32 +69,57 @@ def _text(content):
     return content.strip()
 
 
+# What a provider other than OpenCode and Kilo may not take: it's asked again without them, and from then on (PLAIN)
+EXTRAS = ("reasoning_effort", "stream_options")
+PLAIN = set()
+
+
 def chat(key, messages, max_tokens=400, timeout=30, model=None, on_text=None, stop=None, **extra):
-    """One chat completion on a free OpenCode Zen model. Returns (text, usage, model). extra goes in the request,
-    like reasoning_effort.
+    """One chat completion on the model picked in Settings, or model. Returns (text, usage, model). extra goes in the
+    request, like reasoning_effort. key: OpenCode Zen's, the other providers' are read for them.
     on_text(text so far): the reply streamed, called as each piece comes in, so she can start saying it before it's
     all there. stop: a threading.Event that ends the stream early, as when another try won."""
     model = model or settings.get("llm_model")
-    require_free(model)
     if is_anthropic(model):  # its own API: reasoning_effort and the like don't apply there
         return _anthropic(messages, max_tokens, timeout, model, on_text, stop)
-    url, key, model_id = _where(model, key)
-    body = {"model": model_id, "max_tokens": max_tokens, "messages": messages, **extra}
+    p, url, key, model_id = providers.endpoint(model, key)
+    own = p.id in ("opencode", "kilo")
+    who = "OpenCode" if own else p.name.split(" (")[0]
+    # OpenAI's newer models turn max_tokens down, max_completion_tokens works on all of them
+    body = {"model": model_id, "max_completion_tokens" if p.id == "openai" else "max_tokens": max_tokens,
+            "messages": messages, **extra}
     if on_text is not None:
         body.update(stream=True, stream_options={"include_usage": True})
-    r = SESSION.post(url, headers={"Authorization": f"Bearer {key}"}, json=body, timeout=timeout,
-                     stream=on_text is not None)
+    if model in PLAIN:
+        for name in EXTRAS:
+            body.pop(name, None)
+
+    def send():
+        return SESSION.post(url, headers={"Authorization": f"Bearer {key}"} if key else {}, json=body,
+                            timeout=timeout, stream=on_text is not None)
+    try:
+        r = send()
+    except requests.ConnectionError:
+        if not p.local:
+            raise
+        raise RuntimeError(f"{who} ({model}) isn't running on this PC, start it first")
+    if r.status_code in (400, 422) and not own and any(name in body for name in EXTRAS):
+        PLAIN.add(model)
+        for name in EXTRAS:
+            body.pop(name, None)
+        r.close()
+        r = send()
     if not r.ok:
-        raise RuntimeError(f"OpenCode ({model}) {error_text(r)}")
+        raise RuntimeError(f"{who} ({model}) {error_text(r)}")
     if on_text is not None:
-        return _streamed(r, model, on_text, stop)
+        return _streamed(r, model, on_text, stop, who)
     j = r.json()
     if not j.get("choices"):  # Kilo sends an error this way now and then
-        raise RuntimeError(f"OpenCode ({model}) unavailable: {str(j.get('error') or j)[:200]}")
+        raise RuntimeError(f"{who} ({model}) unavailable: {str(j.get('error') or j)[:200]}")
     return _text(j["choices"][0]["message"].get("content")), j.get("usage") or {}, model
 
 
-def _streamed(r, model, on_text, stop):
+def _streamed(r, model, on_text, stop, who="OpenCode"):
     """Server-sent events, as both Kilo and OpenCode send them: "data: {...}" lines, then "data: [DONE]". The words
     are in delta.content; a model's thinking (delta.reasoning / reasoning_content) is left out."""
     text, usage = "", {}
@@ -137,7 +134,7 @@ def _streamed(r, model, on_text, stop):
                 break
             j = json.loads(data)
             if j.get("error"):
-                raise RuntimeError(f"OpenCode ({model}) unavailable: {str(j['error'])[:200]}")
+                raise RuntimeError(f"{who} ({model}) unavailable: {str(j['error'])[:200]}")
             usage = j.get("usage") or usage
             for choice in j.get("choices") or []:
                 piece = (choice.get("delta") or {}).get("content")
@@ -294,35 +291,12 @@ def _anthropic(messages, max_tokens, timeout, model, on_text=None, stop=None):
     return _text(text), usage, model
 
 
-def _model_ids(timeout):
-    r = requests.get(f"{BASE}/models", timeout=timeout)
-    r.raise_for_status()
-    return [m["id"] for m in r.json().get("data", [])]
-
-
-def _kilo_ids(timeout):
-    from secrets_store import get_secret
-    if not get_secret("KILO_API_KEY"):
-        return []
-    try:
-        r = requests.get(f"{KILO_BASE}/models", timeout=timeout)
-        r.raise_for_status()
-    except Exception:
-        return []
-    return [KILO + m["id"] for m in r.json().get("data", []) if not any(s in m["id"] for s in KILO_SKIP)]
-
-
-def free_chat_models(timeout=10):
-    """Free models that answer on /chat/completions, from the live lists. Free ones come and go."""
-    return [i for i in _model_ids(timeout) + _kilo_ids(timeout) if is_free(i) and not i.startswith(NOT_CHAT)]
-
-
 def explain(error):
     """A plain reason for an OpenCode error, for the window."""
     for clue, why in WHY:
         if clue in error:
             return why
-    return error.split(") ", 1)[-1] if error.startswith(("OpenCode (", "Anthropic (")) else error
+    return re.sub(r"^[\w .]+ \([^)]*\) ", "", error)  # "OpenAI (openai/gpt-5.2) 429 ...": the model's said already
 
 
 def check_model(key, model, timeout=25):
@@ -333,12 +307,3 @@ def check_model(key, model, timeout=25):
         return True, time.time() - t
     except Exception as exc:
         return False, explain(str(exc))
-
-
-def working_free_models(key):
-    """(working, all free) from the live list, working ones fastest first. Each check is one tiny free request."""
-    free = free_chat_models()
-    with ThreadPoolExecutor(len(free) or 1) as pool:
-        results = list(zip(free, pool.map(lambda m: check_model(key, m), free)))
-    working = sorted((secs, m) for m, (ok, secs) in results if ok)
-    return [m for _, m in working], free

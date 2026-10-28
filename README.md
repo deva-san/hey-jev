@@ -17,7 +17,7 @@ This is a Windows port of [henryklunaris/hey-jev](https://github.com/henryklunar
 
 ## Models and billing
 
-One paid model is allowed: Claude Haiku 5.5 (`anthropic/claude-haiku-5-5`), only with your own Anthropic key in the Keys tab, and billed per request to your Anthropic account at Anthropic's prices. Hey Jev refuses any other model that isn't free before a request goes out, and Settings won't save one, so nothing else can be billed, even if billing is turned on at OpenCode or Kilo later.
+Any model on any provider in Settings > Answer model can be her answer model, the way Hermes Agent and OpenClaw pick one: OpenCode Zen, Kilo, OpenRouter, Anthropic, OpenAI, Google Gemini, xAI, Groq, DeepSeek, Mistral, Cerebras, Together, Nous Portal, Hugging Face, Moonshot, or Ollama and LM Studio on this PC. Free ones say so in the list. Any other is billed per request to your own account with that provider, at its prices, and only once you've picked it and saved its key.
 
 With the key, Haiku plans and answers, and also gets the screenshots, the day's summary and her learning. When Haiku is slow, a free model gets a second try: Kilo's `nvidia/nemotron-3-ultra-550b-a55b:free`. Without the key, she uses free models only, and screenshots go to Kilo's free `nvidia/nemotron-3.5-super-vl:free`, which reads pictures.
 
@@ -447,11 +447,11 @@ Say "Hey Jev, transcribe" and her island shows your words as you talk. Talk as l
 
 - Windows 10 or 11
 - Python 3.10 or newer (tested on 3.14). If you don't have it: `winget install Python.Python.3.12`, or the installer from [python.org](https://www.python.org/downloads/)
-- Two free API keys:
+- A free Fish Audio key, for her voice: [fish.audio](https://fish.audio/?fpr=henryk). Create a key on the API keys page. No credit needed for `s2.1-pro-free`.
+- A key for at least one answer model provider, any of the ones in the Keys tab, or Ollama or LM Studio on this PC with no key. None of them is required on its own. The free ones:
+  - Kilo: [kilo.ai](https://kilo.ai/docs/gateway/authentication). Sign in and copy your API key. Its `:free` models cost nothing, and the default model is one of them.
   - OpenCode Zen: [opencode.ai/zen](https://opencode.ai/zen). Sign in and create a key. It's the same key Hermes Agent calls `OPENCODE_ZEN_API_KEY`. No billing needed for the free models.
-  - Fish Audio: [fish.audio](https://fish.audio/?fpr=henryk). Create a key on the API keys page. No credit needed for `s2.1-pro-free`.
-  - Kilo (optional): [kilo.ai](https://kilo.ai/docs/gateway/authentication). Sign in and copy your API key. Only its `:free` models are used, so nothing is billed.
-- Anthropic (optional, paid): [platform.claude.com](https://platform.claude.com/settings/keys). A key with credit on it makes Claude Haiku 5.5 her answer model, billed per request.
+- Anthropic, OpenAI, OpenRouter, Gemini and the rest (optional, paid unless a model says free): a key with credit on it makes any of their models her answer model, billed per request.
 
 ## Setup
 
@@ -486,7 +486,7 @@ If she stops hearing you, untick Echo cancelling in Settings. Then, while someth
 
 ## Models
 
-The answer model in Settings works out what you asked and answers. Claude Haiku 5.5 is at the top of the list, and needs your Anthropic key first; this PC uses it. The rest are free models on OpenCode Zen or Kilo. Refresh checks which free models answer from Hey Jev right now and lists only those. Picking one checks it straight away.
+The answer model in Settings works out what you asked and answers. Click it and a picker opens, the way OpenClaw's and Hermes Agent's do: every provider's models in one table, newest first, with whether each is free and how much it reads at once. Type to search all of them ("claude", "nemotron free"), or pick a provider down the side; Enter or a double click uses the model. A provider without a key shows a box for it there, with a link to get one, and the Keys tab has every provider's key too. Each list is read live from the provider (`providers.py`), kept in `%APPDATA%\Hey Jev\models.json`, and read again by itself once it's half an hour old, so new models show up and ones taken away drop out; Refresh reads it now. Picking a model checks it answers straight away. Saved, a model is `<provider>/<model id>`, like `openai/gpt-5.2`; OpenCode Zen's keep their bare IDs.
 
 Free models differ on privacy: some keep nothing, others may use what you send to improve the model. [opencode.ai/docs/zen](https://opencode.ai/docs/zen/) lists which is which, and Kilo says some of its free ones log what they're sent. What goes to Anthropic follows your Anthropic account's terms.
 
@@ -506,7 +506,7 @@ Useful for seeing what she heard, planned and did:
 
 Tests: the unit tests live in `tests\`. Run them with `.venv\Scripts\python.exe -m unittest discover -s tests -t .`, never a bare `python -m unittest` from the repo root. `tests\support.py` points her app data at a temp folder and blocks anything that would act on the PC or go online, and a test run that reaches her real `%APPDATA%\Hey Jev` or `%LOCALAPPDATA%\Hey Jev` stops with an error instead of writing there. The hand checks in `checks\` use the real models and are run by hand, not by unittest. They work on a copy of her data in a temp folder, gone when they end, so nothing they do lands in her history, memory or logs; add `--real-data` to run one on her own.
 
-Keys can also go in a `.env` file in this folder (`OPENCODE_ZEN_API_KEY`, `FISH_AUDIO_API_KEY`). A key in `.env` takes priority over the one saved in Credential Manager. `.env` can also set `OPENCODE_MODEL`, free models only.
+Keys can also go in a `.env` file in this folder (`OPENCODE_ZEN_API_KEY`, `FISH_AUDIO_API_KEY`). A key in `.env` takes priority over the one saved in Credential Manager. `.env` can also set `OPENCODE_MODEL`, any model as Settings saves it. The other providers' keys go in `.env` by the names their own docs use, like `OPENAI_API_KEY`, `GEMINI_API_KEY` or `OPENROUTER_API_KEY`.
 
 ## How it works
 
@@ -547,7 +547,7 @@ With Claude Haiku as the answer model, what it reads and writes is billed per re
 - She stopped hearing you after an update. Untick Echo cancelling in Settings, that opens the mic the old way.
 - A video opens but doesn't play. Chrome waits until its window is on screen. She brings it to the front, but if Chrome was still starting it can stay behind: click it.
 - She misses "Hey Jev" in a quiet room. The log shows phrases that start with "hey" but didn't count, like `(not for me: 'Hey Jed, open Spotify')`. Add the word she heard to `WEAK` in `siri.py`. "Hey Jet" and "Hey Jeth", missed this way before, now count.
-- She says her brain isn't answering. On Claude Haiku, check the Anthropic key in the Keys tab and that your Anthropic account has credit. On a free model, it stopped working from outside OpenCode: open Settings, hit Refresh and pick another. Simple commands still work meanwhile.
+- She says her brain isn't answering. On Claude Haiku, check the Anthropic key in the Keys tab and that your Anthropic account has credit. On a free model, it's busy (429) or stopped working from outside OpenCode: open Settings, pick another from the list, or another provider. Simple commands still work meanwhile.
 - "Find my ..." finds nothing you know is there. She only sees what Windows Search has indexed: add the folder in Settings > Privacy & security > Searching Windows, or say the name the file has.
 - She types or scrolls in the wrong place. Steps go to the app in front, so click the window you mean first, or name it: "open Notepad and write...".
 - The app won't open again. It's still running with the window closed, the shortcut brings it back, or quit it with Ctrl+Q.
@@ -558,7 +558,8 @@ With Claude Haiku as the answer model, what it reads and writes is billed per re
 - `siri.py` all the logic: her name, the quick commands, the planner, the steps, Fish, the turn loop and the welcome
 - `speech.py` the ears: model downloads, Silero VAD, Smart Turn, where turns end, Parakeet (or Nemotron streaming, or Whisper), and the follow-up window. `checks/listen.py` checks them, `checks/open_mic.py` what she takes as hers without her name
 - `winplatform.py` the Windows side: apps, windows, volume, media, scrolling, dark mode, clipboard, the right Alt hook, the lock screen and starting with Windows
-- `opencode.py` OpenCode Zen and Kilo Gateway, free models only, and Anthropic's API for Claude Haiku
+- `opencode.py` the answer model's requests: OpenAI-style for every provider but Anthropic, which has its own API
+- `providers.py` the providers in Settings > Answer model, their keys, and their live model lists
 - `todo.py` the to-do list, `filesearch.py` finding your files in Windows Search's index and opening one safely
 - `tasks.py` the SQLite task queue, local schedule parser, command policy, hidden PowerShell runner, timeout, output cap and redaction
 - `messaging.py` WhatsApp and Telegram: the contacts book, the app links that type without sending, and the checks before and after a yes
