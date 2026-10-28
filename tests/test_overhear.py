@@ -97,6 +97,16 @@ class Echo(unittest.TestCase):
             self.assertTrue(siri.echo_of("send it to mum on whatsapp it says running late"))
         self.assertLess(len(made), 30)  # it was 2,126 for these four
 
+    def test_a_short_line_of_hers_heard_back_is_hers(self):
+        """28 October: her "Okay, on it now." came back as "Okay on it now", too short for ECHO_WORDS, and she
+        answered it as if you'd said it."""
+        siri.HER_SAID.append((time.time(), "Okay, on it now."))
+        self.assertTrue(siri.echo_of("Okay on it now"))
+        self.assertFalse(siri.echo_of("open notepad"))  # yours: nothing she said
+        self.assertFalse(siri.echo_of("yes"))  # one word is too little to tell
+        siri.HER_SAID.append((time.time() - 60, "Opening Notepad."))
+        self.assertFalse(siri.echo_of("Opening Notepad"))  # a minute ago: you saying it now
+
     def test_the_answers_are_hermes_own(self):
         rnd, words = random.Random(7), siri.words_of(" ".join(LINES)).split()
         for _ in range(300):

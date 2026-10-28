@@ -120,6 +120,15 @@ def is_free(provider, model_id, row=None):
     return bool(price) and all(str(price.get(k, "")) in ("0", "0.0") for k in ("prompt", "completion"))
 
 
+def free(model):
+    """True if a saved model is free: by its name, or by its provider's list ("kilo/reflection/beam-free" is free on
+    Kilo's list without ending in ":free")."""
+    p, model_id = split(model)
+    if not model_id:
+        return False
+    return is_free(p, model_id) or any(m["id"] == model_id and m["free"] for m in cached(p)["models"])
+
+
 def _when(created):
     """A list's created time as seconds: OpenAI-style lists give seconds, Anthropic an ISO date."""
     if isinstance(created, (int, float)):

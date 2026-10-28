@@ -341,6 +341,43 @@ def draw_eyes(cv, cx, cy, size, expr, open_=1.0, look=(0.0, 0.0), level=0.0, t=0
         sparkles(cv, cx, cy, size, t, a)
 
 
+ORB_DASHES = 32
+
+
+def draw_orb(cv, cx, cy, r, mode="idle", level=0.0, t=0.0, open_=1.0, look=(0.0, 0.0), colour=WHITE, glow=True,
+             a=1.0, halo=None):
+    """Atticus's orb (its thinking-orbs, MIT, by Jakub Antalik), drawn the island's way: a ring of short dashes
+    round an empty middle, r px from it, its edge wobbling with smooth noise. mode "idle": it breathes; "voice": it
+    ripples and the dashes stretch with level, a voice 0 to 1; "busy": a light runs round it while she thinks or
+    works. open_: shut for a blink, it squashes flat as her eyes do; look: it leans a little that way."""
+    if a <= 0.003:
+        return
+    cx, cy = cx + look[0] * r * 0.22, cy + look[1] * r * 0.16
+    level = min(1.0, max(0.0, level))
+    amp = {"voice": 0.06 + 0.16 * level, "busy": 0.08}.get(mode, 0.05 + 0.03 * math.sin(t * 1.3))
+    turn = t * {"busy": 0.9, "voice": 0.3}.get(mode, 0.12)
+    squash = 0.25 + 0.75 * open_
+    lw = max(1.1, r * 0.095)
+    gx = 0.22 if glow else 0.0
+    n = ORB_DASHES if r >= 14 else 22  # small, as on the capsule, fewer, so each dash stands apart as on Atticus's
+    for i in range(n):
+        th = i / n * math.tau + turn
+        wob = amp * (0.55 * math.sin(3 * th + 1.3 * t) + 0.3 * math.sin(5 * th - 1.9 * t + 1.1) +
+                     0.15 * math.sin(7 * th + 2.7 * t + 2.3))
+        length = r * (0.3 + (0.42 * level * (0.55 + 0.45 * math.sin(4 * th + 8 * t)) if mode == "voice" else 0.0))
+        if mode == "busy":
+            aa = 0.22 + 0.78 * (0.5 + 0.5 * math.cos(th - turn - t * 3.4)) ** 3
+        else:
+            aa = 0.78 + 0.22 * level if mode == "voice" else 0.85
+        rr = r * (1 + wob)
+        c, s = math.cos(th), math.sin(th) * squash
+        ax, ay = cx + c * (rr - length / 2), cy + s * (rr - length / 2)
+        bx, by = cx + c * (rr + length / 2), cy + s * (rr + length / 2)
+        g = lw + 3.5 * lw
+        cv.shape(lambda xs, ys, ax=ax, ay=ay, bx=bx, by=by: segment(xs, ys, ax, ay, bx, by, lw),
+                 (min(ax, bx) - g, min(ay, by) - g, max(ax, bx) + g, max(ay, by) + g), colour, a * aa, gx, lw, halo)
+
+
 def sparkles(cv, cx, cy, size, t, a=1.0):
     """Little stars that twinkle round the eyes when she's pleased."""
     for i, (ox, oy) in enumerate(((-1.85, -0.8), (1.9, -0.65), (1.55, 0.75), (-1.6, 0.7))):

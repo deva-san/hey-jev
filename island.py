@@ -29,6 +29,7 @@ from ctypes import wintypes as wt
 
 import numpy as np
 
+import askbox
 import bubble
 import dictation
 import island_art as art
@@ -85,6 +86,10 @@ GAZE_REACH = 220  # logical px from her eyes at which she looks as far as she ca
 BLINKS = {"open", "surprised", "focus", "think", "glasses", "headphones", "sleepy", "side"}  # as face.Eyes blinks
 MIC_STATES = {"listening", "read", "again", "dictating"}
 HINTS = ("Say \u201cstop", "Say \"stop", "Go ahead", "Let go")  # the window's hints, not words you said
+# what the answer card's top line says she's at (_panel_jev); while she works, what she's doing, if it says
+PANEL_STATUS = {"listening": "Listening", "window": "Still listening", "dictating": "Dictating", "read": "Read this out",
+                "again": "Once more", "thinking": "Thinking", "looking": "Looking at the screen", "doing": "Working",
+                "finishing": "Finishing", "error": "Something went wrong", "phone": "Phone"}
 CLICKABLE = ("media", "notification", "card")  # what takes clicks while you point at it: all else lets them through
 REST = 0.5  # seconds the pointer rests on Approve before a click on it counts: an agent's click moves it there first
 
@@ -155,6 +160,16 @@ class DynamicIsland:
     # the capsule (27 October 2026): how far it floats under the top at least, how wide its row gets at most, and
     # the glass cards' corners. Her eyes are the pill's small ones (SMALL_EYES), as big against its height
     FLOAT, CAPSULE_MAX_W, GLASS_CORNER = 10, 330, 18
+    # the answer card (28 October 2026): its width, its tallest, and how long it stays once she's answered, in ms
+    PANEL_W, PANEL_MAX_H, PANEL_LINGER = 360, 380, 8000
+    panel = False  # her turns in the answer card, else as the capsule or pill has them
+    asked_at = answered_at = None  # this turn: when your words ended and when she answered, for the card's "2.23 s"
+    receipt = None  # (Learned or Remembered, what, when): a line under her answer for RECEIPT_FOR seconds
+    steps = None  # her turn's steps, [label, live|done|failed], newest last (step); the card shows the last few
+    RECEIPT_FOR = 9.0
+    # her answer clicked: copied, with "Copied" where the time was for COPIED_FOR seconds; your words clicked: the
+    # typing box (askbox), made the first time
+    copied_at, COPIED_FOR, typing = 0.0, 1.6, None
 
     def __init__(self, root):
         self.root = root
@@ -192,8 +207,10 @@ class DynamicIsland:
     # ------------------------------------------------------------------ settings
     def _read_settings(self):
         g = settings.get
-        self.style = g("island_style") if g("island_style") in ("capsule", "pill") else "capsule"
-        self.face_style = g("island_face") if g("island_face") in ("eyes", "wave") else "eyes"
+        # the answer card is the capsule but for her turns, which it shows as Atticus's box does
+        self.panel = g("island_style") not in ("capsule", "pill")
+        self.style = "pill" if g("island_style") == "pill" else "capsule"
+        self.face_style = g("island_face") if g("island_face") in ("orb", "eyes", "wave") else "eyes"
         self.theme_name = g("island_theme") if g("island_theme") in ("system", "light", "dark", "amoled") else "amoled"
         self.border = bool(g("island_border"))
         self.align = g("island_align") if g("island_align") in ("left", "center", "right") else "center"
@@ -251,7 +268,7 @@ class DynamicIsland:
         # tall enough for a card's rows (_card) from the start: building the window again each time you point at it
         # would flicker, and the taller picture costs memory only (271 px for 140: 0.4 MB more at 100%, 0.8 MB at
         # 150%, measured 27 October), never time: only what changed is sent (_push)
-        self.island_max_h = max(140 * s, self._tallest_card())
+        self.island_max_h = max(140 * s, self._tallest_card(), self.PANEL_MAX_H * s)
         self.cw = int(math.ceil(max(self.CAP_MAX_W, self.CARD_W) * s)) + 2 * self.m
         self.ch = int(math.ceil(self.m + self.island_max_h + self.GAP * s + cap_h + self.m))
         self.top = tk.Toplevel(self.root)
@@ -341,6 +358,13 @@ class DynamicIsland:
             self.root.after_cancel(self.hide_job)
             self.hide_job = None
         text = re.sub(r"\[[^\]]*\]\s*", "", " ".join(str(text or "").split()))  # her [cheerful] tags aren't words
+        if state in MIC_STATES or state == "window":
+            self.asked_at = self.answered_at = None  # a new turn
+            self.steps = None
+        elif self.asked_at is None:
+            self.asked_at = time.time()  # your words are in
+        if state == "speaking" and self.answered_at is None:
+            self.answered_at = time.time()
         if not self.jev or self.jev["state"] != state:
             self.since = time.time()
             if state in ("error", "note"):  # hearts from a moment ago don't go with something going wrong
@@ -361,13 +385,90 @@ class DynamicIsland:
 
     def hide(self, delay=0):
         if delay:
+            if self.panel and self.jev and self.jev["state"] in ("speaking", "error"):
+                delay = max(delay, self.PANEL_LINGER)  # the answer card stays a while, to read or try again
             if self.jev and not self.hide_job:
-                self.hide_job = self.root.after(delay, self.hide)
+                self.hide_job = self.root.after(delay, self._hide_later)
             return
         self.hide_job = None
         if self.jev is None:
             return
         self.jev, self.you = None, ""
+        self.dirty = True
+        self._wake()
+
+    def _hide_later(self):
+        self.hide_job = None
+        if self.panel and self.hover and self.jev:  # not while you point at the answer card
+            self.hide_job = self.root.after(1500, self._hide_later)
+            return
+        self.hide()
+
+    def asked(self, text):
+        """A turn you typed, or asked again (siri's Asked): a new one on her card, timed from now, with your words in
+        its bubble and none of the last turn's steps."""
+        self.you = " ".join(str(text or "").split())
+        self.asked_at, self.answered_at, self.steps = time.time(), None, None
+        if self.jev:
+            self.dirty = True
+            self._wake()
+
+    def ask(self, text="", under=True):
+        """The typing box (askbox) under her card, or near the top of the screen with nothing up or under False
+        (right Alt tapped twice), with text in it: what you type goes to her as a turn of yours."""
+        if self.typing is None:
+            self.typing = askbox.AskBox(self.root, self._typed, self._box_colours, self.k)
+        self.typing.k = self.k  # as big as her card, after a change in the Island tab too
+        x0, y0, x1, y1 = getattr(self, "island_rect", (0, 0, 0, 0))
+        near = (self.origin.x + x0, self.origin.y + y1, x1 - x0) if under and self.jev and x1 > x0 else None
+        self.typing.open(text, near)
+
+    def _typed(self, text):
+        controls = getattr(sys.modules.get("siri"), "CONTROLS", [None])[0]
+        if controls is not None:
+            controls.put(("typed", text))
+
+    def _box_colours(self):
+        """The typing box in her card's colours: its glass, its hairline and its words."""
+        th = self.theme()
+        mix = lambda t: askbox.hexed(tuple((1 - t) * b + t * w for b, w in zip(th["body"], th["text"])))
+        return {"body": mix(0.09), "rim": mix(0.18), "text": askbox.hexed(th["text"]),
+                "muted": askbox.hexed(th["muted"])}
+
+    def step(self, state, label):
+        """A step of her turn (siri's Step): a new row, live, or the last one done or failed."""
+        rows = self.steps if self.steps is not None else []
+        if rows and rows[-1][0] == label and rows[-1][1] == "live":
+            rows[-1][1] = state
+        else:
+            rows.append([label, state])
+        self.steps = rows[-12:]
+        if self.panel and self.jev:
+            self.dirty = True
+            self._wake()
+
+    def learned(self, kind, text):
+        """What she learned or remembered (siri.receipt): a line on her answer card while it's up, else a popup."""
+        self.receipt = (kind, text, time.time())
+        if self.panel and self.jev:
+            self.dirty = True
+            self.root.after(int(self.RECEIPT_FOR * 1000) + 60, self._receipt_gone)
+        else:
+            self.popups.append(plugins.Activity("notifications", "notification", {
+                "app": "Hey Jev", "app_id": "", "title": kind, "text": text, "phone": False}, mood="happy"))
+            self.popups = self.popups[-6:]
+            self.dirty = True
+        self._wake()
+
+    def _receipt_gone(self):
+        """Its time's up: the card loses the line, and stops drawing for it."""
+        if self.receipt and time.time() - self.receipt[2] >= self.RECEIPT_FOR:
+            self.receipt = None
+            self.dirty = True
+            self._wake()
+
+    def _copied_gone(self):
+        """"Copied" has had its time: the card shows how long she took again."""
         self.dirty = True
         self._wake()
 
@@ -525,7 +626,9 @@ class DynamicIsland:
         cap = self._caption(state, text, bars)
         badge = sum(int(a.data.get("badge") or 0) for a in self.lives.values() if isinstance(a.data, dict))
         turn = self._turn()[1]  # how far her turn's got (step 3/5, round 5/30), beside her dots
-        if self.style == "capsule":  # her eyes, which the capsule always has: the Face setting is the pill's
+        if self.panel:
+            return self._panel_jev(state, expr, colour)
+        if self.style == "capsule":  # her eyes or the orb (the Face setting); the Siri wave is the pill's alone
             return self._capsule_jev(state, expr, colour, mode, cap, badge, turn)
         key = ("jev", state, self.face_style, badge, turn and (turn.get("status"), turn.get("progress")))
         if self.face_style == "wave":
@@ -559,11 +662,18 @@ class DynamicIsland:
         def draw(cv, ox, oy, Wn, Hn, a, now):
             t = now - self.t0
             e, open_, lx, ly, _ = self.eye
-            face.draw_eyes(cv, ox + Wn / 2, oy + Hn * 0.38, size, e, open_, (lx, ly), self.level if src else 0.0, t,
-                           th["eyes"], th["glow"], a)
+            if self.face_style == "orb":
+                orb = "voice" if mode in ("voice", "her") else "busy" if mode == "busy" else "idle"
+                face.draw_orb(cv, ox + Wn / 2, oy + Hn * 0.38, size * 0.95, orb, self.level if src else 0.0, t,
+                              open_, (lx, ly), th["eyes"], th["glow"], a, None if colour is th["text"] else colour)
+            else:
+                face.draw_eyes(cv, ox + Wn / 2, oy + Hn * 0.38, size, e, open_, (lx, ly), self.level if src else 0.0,
+                               t, th["eyes"], th["glow"], a)
             row_y = oy + Hn * 0.77
             iw = icon.shape[1] if icon is not None else 0
-            row_w = iw + (9 * k if iw else 0) + (n - 1) * step + 2 * r + (8 * k + 2 * gr if turn else 0)
+            dots = self.face_style != "orb" or mode == "ring"  # the orb shows the voice and the work itself
+            row_w = iw + (9 * k if iw else 0) + ((n - 1) * step + 2 * r if dots else 0) + \
+                (8 * k + 2 * gr if turn else 0)
             x = ox + Wn / 2 - row_w / 2
             if icon is not None:
                 cv.image(icon, x, row_y - icon.shape[0] / 2, a)
@@ -572,16 +682,193 @@ class DynamicIsland:
                 total = float(getattr(sys.modules.get("siri"), "FOLLOW_UP", 8.0))
                 left = max(0.0, 1 - (now - self.since) / total)
                 face.ring(cv, x + (n - 1) * step / 2 + r, row_y, 6.5 * k, 2.2 * k, left, ORANGE, th["track"], a)
-            else:
+            elif dots:
                 dots_mode = "voice" if mode in ("voice", "her") else "busy" if mode == "busy" else "still"
                 face.dots_row(cv, x + r, row_y, n, step, r, colour, self.level if mode in ("voice", "her") else 0.0,
                               t, dots_mode if dots_mode != "still" else "voice", a * (0.75 if mode == "still" else 1))
             if turn:
-                self._glyph(cv, x + (n - 1) * step + 2 * r + 8 * k + gr, row_y, gr, turn, now, a)
+                gx_ = x + ((n - 1) * step + 2 * r + 8 * k if dots else 0) + gr
+                self._glyph(cv, gx_, row_y, gr, turn, now, a)
             if badge:  # how many go on meanwhile, her turn's row too, in the corner: point at her for the card
                 self._badge(cv, ox + Wn - 13 * k, oy + 13 * k, badge, a)
         return Layout(key, "jev", W, H, draw, cap=cap, eyes=expr, animated=state not in ("error", "note", "phone"),
                       wander=False)
+
+    def _panel_jev(self, state, expr, colour):
+        """Her turn as Atticus's box has it (28 October 2026, the owner's pick, her own eyes kept): her eyes and what
+        she's doing at the top, with x to close it; what you said in a bubble on the right, the words coming in as
+        you say them; her answer under it, coming in line by line; and once she's answered, how long it took and Try
+        again, which asks her the same again."""
+        k, th = self.k, self.theme()
+        W, pad, head_h = self.PANEL_W * k, 20 * k, 44 * k
+        inner = W - 2 * pad
+        f_status, f_q = self._text(round(12.5 * k), 500), self._text(round(13.5 * k), 400)
+        f_a, f_foot = self._text(round(15 * k), 400), self._text(round(10.5 * k), 400)
+        text = self.jev["text"]
+        live = state in MIC_STATES or state == "window"
+        busy = state in ("thinking", "looking", "doing", "finishing")
+        own = LOOKS.get(state, LOOKS["listening"])[3].rstrip("\u2026").strip()
+        heard = (text if text and text != own and not text.startswith(HINTS) else "") if live else self.you
+        answer = text if state in ("speaking", "error", "note", "phone") and text != own else ""
+        status = PANEL_STATUS.get(state, "")
+        if busy and text and not bubble._same(text, self.you):
+            status = text  # what she's at: "Opening Settings"
+        qx, qy = 14 * k, 9 * k
+        q_lines = self._wrap([(w, True) for w in heard.split()], inner * 0.8 - 2 * qx, 4, live, f_q) if heard else []
+        q_w = max((f_q.measure(" ".join(w for w, _ in line)) for line in q_lines), default=0) + 2 * qx
+        q_h = len(q_lines) * f_q.line + 2 * qy
+        a_lh = f_a.line + 4 * k
+        a_lines = self._wrap([(w, True) for w in answer.split()], inner, 6, False, f_a) if answer else []
+        done = state == "speaking" and self.answered_at is not None and self.asked_at is not None
+        took = f"{max(0.0, self.answered_at - self.asked_at):.2f} s" if done else ""
+        again = done and bool(self.you)
+        copied = time.time() - self.copied_at < self.COPIED_FOR
+        got = self.receipt if self.receipt and time.time() - self.receipt[2] < self.RECEIPT_FOR else None
+        f_got = self._text(round(11 * k), 600)
+        f_step, step_h = self._text(round(12 * k), 500), 19 * k
+        rows = [list(r) for r in (self.steps or [])][-(3 if answer else 4):]
+        earlier = len(self.steps or []) - len(rows)
+        y_q = 12 * k + head_h + 8 * k
+        y_s = (y_q + q_h if q_lines else 12 * k + head_h) + 12 * k  # the steps, under your words
+        s_h = (len(rows) + (1 if earlier else 0)) * step_h
+        y_a = (y_s + s_h + 6 * k) if rows else (y_s - 12 * k + 14 * k)
+        y_f = (y_a + len(a_lines) * a_lh if a_lines else y_a - 14 * k) + 16 * k
+        H = (y_f + f_foot.line if took or again or copied else y_f - 16 * k) + 16 * k
+        y_r = H - 4 * k  # the receipt, under the time and Try again
+        if got:
+            H += f_got.line + 10 * k
+        H = min(self.island_max_h, H)
+        eyes_w, eyes, _ = self._face(expr, colour, voice=live or state == "speaking", busy=busy)
+        x_r, x_cx, x_cy = 11 * k, W - pad - 9 * k, 12 * k + head_h / 2
+        full = bool(settings.get("full_access"))  # Atticus's orange "Full access" pill, by the x
+        f_badge = self._text(round(11 * k), 600)
+        badge_w = (f_badge.measure("Full access") + 2 * 9 * k + 10 * k) if full else 0
+        badge_h = 22 * k
+        badge_x1 = W - pad - 9 * k - x_r - 8 * k
+        redo = "Try again"
+        redo_w = f_foot.measure(redo)
+        hot = [("close", x_cx - x_r - 3 * k, x_cy - x_r - 3 * k, x_cx + x_r + 3 * k, x_cy + x_r + 3 * k)]
+        if full:
+            hot.append(("full", badge_x1 - badge_w, x_cy - badge_h / 2, badge_x1, x_cy + badge_h / 2))
+        if q_lines and not live:  # your words: in the typing box, to fix and send again
+            hot.append(("words", W - pad - q_w, y_q, W - pad, y_q + q_h))
+        if a_lines:  # her answer: copied
+            hot.append(("answer", pad - 4 * k, y_a - 3 * k, W - pad, y_a + len(a_lines) * a_lh))
+        if again:
+            hot.append(("again", W - pad - redo_w - 6 * k, y_f - 4 * k, W - pad + 6 * k, y_f + f_foot.line + 4 * k))
+        fill = tuple(0.91 * b + 0.09 * t for b, t in zip(th["body"], th["text"]))  # Atticus's white at 9% on the glass
+        rim = tuple(0.82 * b + 0.18 * t for b, t in zip(th["body"], th["text"]))
+        answered_at = self.answered_at
+
+        def draw(cv, ox, oy, Wn, Hn, a, now):
+            cy = oy + x_cy
+            eyes(cv, ox + pad - 8 * k, cy, a, now)
+            if status:
+                col = th["muted"]
+                if live or busy:  # it shimmers while she's at it, as Atticus's does
+                    s = 0.35 * (0.5 + 0.5 * math.sin((now - self.t0) * 3.4))
+                    col = tuple(m + (t - m) * s for m, t in zip(th["muted"], th["text"]))
+                sx = ox + pad - 8 * k + eyes_w + 4 * k
+                words = f_status.fit(status, max(20 * k, ox + Wn - pad - 2 * x_r - 8 * k - sx -
+                                                 (badge_w + 8 * k if full else 0)))
+                cv.text(f_status.render(words), sx, cy - f_status.line / 2 - 1, col, a)
+            xc = ox + Wn - pad - 9 * k
+            cv.shape(lambda xs, ys: face.circle(xs, ys, xc, cy, x_r), (xc - x_r - 1, cy - x_r - 1, xc + x_r + 1,
+                                                                        cy + x_r + 1), fill, a)
+            if full:
+                bx1 = ox + Wn - pad - 9 * k - x_r - 8 * k
+                bx0, bh = bx1 - badge_w, badge_h / 2
+                tint = tuple(0.87 * b + 0.13 * o for b, o in zip(th["body"], ORANGE))
+                cv.shape(lambda xs, ys: face.rbox(xs, ys, (bx0 + bx1) / 2, cy, badge_w / 2, bh, bh),
+                         (bx0 - 1, cy - bh - 1, bx1 + 1, cy + bh + 1), tint, a)
+                dx = bx0 + 9 * k + 2.5 * k
+                cv.shape(lambda xs, ys: face.circle(xs, ys, dx, cy, 2.5 * k), (dx - 4 * k, cy - 4 * k, dx + 4 * k,
+                                                                             cy + 4 * k), ORANGE, a)
+                cv.text(f_badge.render("Full access"), dx + 5 * k, cy - f_badge.line / 2 - 1, (1.0, 0.70, 0.25), a)
+            face.close_glyph(cv, xc, cy, 4.6 * k, th["text"], a * 0.85)
+            if q_lines:
+                bx1, by0 = ox + Wn - pad, oy + y_q
+                bx0, by1 = bx1 - q_w, by0 + q_h
+                mx, my = (bx0 + bx1) / 2, (by0 + by1) / 2
+
+                def bubble_sd(xs, ys):  # round, but for its bottom-right corner: Atticus's tail
+                    return np.minimum(face.rbox(xs, ys, mx, my, q_w / 2, q_h / 2, 16 * k),
+                                      face.rbox(xs, ys, (mx + bx1) / 2, (my + by1) / 2, q_w / 4, q_h / 4, 5 * k))
+                box = (bx0 - 2, by0 - 2, bx1 + 2, by1 + 2)
+                cv.shape(lambda xs, ys: np.abs(bubble_sd(xs, ys)) - 0.5, box, rim, a)
+                cv.shape(bubble_sd, box, fill, a)
+                ty = by0 + qy
+                for line in q_lines:
+                    cv.text(f_q.render(" ".join(w for w, _ in line)), bx0 + qx - 2, ty, th["text"], a * 0.94)
+                    ty += f_q.line
+            sy = oy + y_s
+            if earlier:
+                cv.text(f_step.render(f"+{earlier} earlier"), ox + pad + 10 * k, sy, th["muted"], a * 0.8)
+                sy += step_h
+            for label, how in rows:  # a dot each: white and pulsing while it runs, green done, red failed
+                cy_ = sy + f_step.line / 2 + 1
+                pulse = 0.55 + 0.45 * math.sin((now - self.t0) * 6.0) if how == "live" else 1.0
+                dot = th["text"] if how == "live" else GREEN if how == "done" else RED
+                cv.shape(lambda xs, ys, cy_=cy_: face.circle(xs, ys, ox + pad + 2.5 * k, cy_, 2.5 * k),
+                         (ox + pad - 2 * k, cy_ - 5 * k, ox + pad + 7 * k, cy_ + 5 * k), dot, a * pulse)
+                words = f_step.fit(label, Wn - 2 * pad - 12 * k)
+                cv.text(f_step.render(words), ox + pad + 10 * k, sy, th["text"] if how == "live" else th["muted"], a)
+                sy += step_h
+            if a_lines:
+                col = RED if state == "error" else th["muted"] if state == "note" else th["text"]
+                since = now - (answered_at or now - 10)
+                for i, line in enumerate(a_lines):
+                    e = min(1.0, max(0.0, since * 5.0 - i * 0.6))  # line by line, rising a little into place
+                    e = 1 - (1 - e) ** 3
+                    if e > 0:
+                        cv.text(f_a.render(" ".join(w for w, _ in line)), ox + pad - 2,
+                                oy + y_a + i * a_lh + (1 - e) * 5 * k, col, a * e)
+            if copied:
+                cv.text(f_foot.render("\u2713 Copied"), ox + pad - 2, oy + y_f, GREEN, a)
+            elif took:
+                cv.text(f_foot.render(took), ox + pad - 2, oy + y_f, th["muted"], a)
+            if again:
+                cv.text(f_foot.render(redo), ox + Wn - pad - redo_w - 2, oy + y_f, th["muted"], a)
+            if got:  # green, then fading over its last 2 s
+                left = self.RECEIPT_FOR - (now - got[2])
+                fade = a * max(0.0, min(1.0, left / 2.0))
+                label = f"\u2713 {got[0]}"
+                lw = f_got.measure(label)
+                cv.text(f_got.render(label), ox + pad - 2, oy + y_r, GREEN, fade)
+                rest = f_got.fit(got[1], max(20 * k, Wn - 2 * pad - lw - 10 * k))
+                cv.text(f_got.render(rest), ox + pad + lw + 6 * k, oy + y_r, th["muted"], fade)
+        key = ("jev", state, "panel", heard, answer, status, took, round(H), full, got and got[2],
+               tuple(tuple(r) for r in rows), copied, earlier)
+        return Layout(key, "jev", W, H, draw, radius=self.GLASS_CORNER * k, hot=hot, eyes=expr, wander=False,
+                      animated=state not in ("error", "note", "phone") or bool(a_lines) or bool(got), face=True)
+
+    def _panel_press(self, name):
+        """x on her turn's box: it goes; Try again: the same words asked again, as a turn of yours. Your words: in
+        the typing box, to fix and send again; her answer: copied (28 October 2026, as Atticus's box has them)."""
+        if name == "close":
+            self.hide()
+        elif name == "words" and self.you:
+            self.ask(self.you)
+        elif name == "answer" and self.jev and self.jev["text"]:
+            try:
+                win.set_clipboard(self.jev["text"])
+            except RuntimeError as exc:  # another app kept the clipboard: nothing says Copied
+                print(f"  island: not copied, {exc}")
+                return
+            self.copied_at = time.time()
+            self.dirty = True
+            self._wake()
+            self.root.after(int(self.COPIED_FOR * 1000) + 60, self._copied_gone)
+        elif name == "full" and self._steady(time.time()):  # the badge turns it off, never her own clicks
+            settings.put("full_access", False)
+            settings.put("full_access_until", 0)
+            print("  full access: off, from her island")
+            self.dirty = True
+            self._wake()
+        elif name == "again" and self.you:
+            controls = getattr(sys.modules.get("siri"), "CONTROLS", [None])[0]
+            if controls is not None:
+                controls.put(("again", self.you))
 
     def _badge(self, cv, cx, cy, n, a):
         """A small grey pill with n in it, centred on cx, cy."""
@@ -681,10 +968,10 @@ class DynamicIsland:
         return Caption(key, w, h, draw, animated=bool(bars), live=live if bars else None,
                        live_box=live_box if bars else None)
 
-    def _wrap(self, tokens, width, rows, newest):
+    def _wrap(self, tokens, width, rows, newest, f=None):
         """Words with whether each is kept, in lines no wider than width: the newest rows while words come in,
-        else the first ones, with an ellipsis where some were left out."""
-        f = self.f_main
+        else the first ones, with an ellipsis where some were left out. f: the font, f_main unless said."""
+        f = f or self.f_main
         space = f.measure(" ") or 4
         lines, cur, cur_w = [], [], 0.0
         for word, kept in tokens:
@@ -1076,13 +1363,16 @@ class DynamicIsland:
         to one side all but touched what's beside them (27 October previews)."""
         return 3.2 * self.SMALL_EYES * self.k
 
-    def _face(self, expr, tint=None, voice=False):
+    def _face(self, expr, tint=None, voice=False, busy=False):
         """Her eyes as a part of a capsule's row: (width, draw, expr). The pill's own (face.draw_eyes, face.Eyes:
         her blinks, her glances about, her reactions), as big; expr: how they look (face.MOODS), unless a reaction's
         on. tint: the colour of what's going on, in their glow (MOOD_TINTS while a reaction lasts); voice: they
-        bounce with it, as on the pill's big face."""
+        bounce with it, as on the pill's big face; busy: she's thinking or working. With the Face setting on the
+        orb (Atticus's, 28 October 2026), the orb in their place, rippling with the voice, a light running round it
+        while she's busy and breathing when nothing's on, blinking and looking as they would."""
         k, th = self.k, self.theme()
         size, w = self.SMALL_EYES * k, self._eyes_w()
+        orb = self.face_style == "orb"
 
         def draw(cv, x, cy, a, now):
             cx = x + w / 2
@@ -1091,6 +1381,11 @@ class DynamicIsland:
             colour = MOOD_TINTS.get(self._mood(now), tint)
             halo = None if colour is None or not th["glow"] else \
                 tuple(TINT * c + (1 - TINT) * w_ for c, w_ in zip(colour, th["eyes"]))
+            if orb:
+                face.draw_orb(cv, cx, cy, 9 * k, "voice" if voice else "busy" if busy else "idle",
+                              self.level if voice else 0.0, now - self.t0, open_, (lx, ly), th["eyes"], th["glow"], a,
+                              halo)
+                return
             face.draw_eyes(cv, cx, cy, size, e, open_, (lx, ly), self.level if voice else 0.0, now - self.t0,
                            th["eyes"], th["glow"], a, halo)
         return w, draw, expr
@@ -1127,7 +1422,8 @@ class DynamicIsland:
         """Nothing going on: just her eyes, glancing about or at the mouse while it moves. Drawn again when she
         blinks or glances, a reaction comes and goes or the mouse moves her eyes a pixel, and never in between. The
         time was beside them till the owner asked for it to go (27 October)."""
-        return self._capsule(("idle",), "idle", [self._face("open")])
+        # the orb breathes while nothing's on, 10 frames a second: about 2 ms each, so it costs next to nothing
+        return self._capsule(("idle",), "idle", [self._face("open")], rate=10 if self.face_style == "orb" else 0)
 
     def _ink(self, colour):
         """A colour for words on the glass: as it is on dark glass, darker on light glass, where amber "40%" was
@@ -1144,7 +1440,7 @@ class DynamicIsland:
         icon = self._front_icon(round(17 * k))
         n, step, r = 5, 8.6 * k, 2.4 * k
         gr = 5.5 * k
-        parts = [self._face(expr, colour, voice=state in MIC_STATES or state == "speaking")]
+        parts = [self._face(expr, colour, voice=state in MIC_STATES or state == "speaking", busy=mode == "busy")]
         if icon is not None:
             parts.append((icon.shape[1], lambda cv, x, cy, a, now: cv.image(icon, x, cy - icon.shape[0] / 2, a)))
 
@@ -1159,7 +1455,8 @@ class DynamicIsland:
                 dots_mode = "voice" if mode in ("voice", "her") else "busy" if mode == "busy" else "still"
                 face.dots_row(cv, x + r, cy, n, step, r, colour, self.level if mode in ("voice", "her") else 0.0, t,
                               dots_mode if dots_mode != "still" else "voice", a * (0.75 if mode == "still" else 1))
-        parts.append(((n - 1) * step + 2 * r, dots))
+        if self.face_style != "orb" or mode == "ring":  # the orb shows the voice and the work itself
+            parts.append(((n - 1) * step + 2 * r, dots))
         if turn:
             parts.append((2 * gr, lambda cv, x, cy, a, now: self._glyph(cv, x + gr, cy, gr, turn, now, a)))
         if badge:
@@ -1723,7 +2020,7 @@ class DynamicIsland:
         x0, y0, x1, y1 = getattr(self, "island_rect", (0, 0, 0, 0))
         near = x0 - 6 <= x <= x1 + 6 and y0 - 6 <= y <= y1 + 6
         lay = self.layout
-        clickable = lay is not None and lay.kind in CLICKABLE
+        clickable = lay is not None and (lay.kind in CLICKABLE or (lay.kind == "jev" and bool(lay.hot)))
         if (px, py) != self.rest_pos:  # moved: Approve waits for it to rest again (_steady)
             self.rest_pos, self.rest_at = (px, py), now
         if near:
@@ -1784,6 +2081,8 @@ class DynamicIsland:
             self.runner.do("media", name)
         elif lay.kind == "card":
             self._press(lay.press.get(name), right)
+        elif lay.kind == "jev" and name and not right:  # the answer card's x and Try again
+            self._panel_press(name)
 
     def _press(self, what, right):
         """A click on a card: a right click, or one on the card itself, keeps it open or lets it go; a button is its

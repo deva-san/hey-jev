@@ -51,27 +51,30 @@ NEW_LOOKS = {"selected_files", "installed_apps", "top_apps", "where", "open_wind
 # task on the screen, and nothing else; and the same job in the background (siri.queue_job), made a task row before
 # anything runs, so it's in no other set
 NEW_JOB = {"task", "todo_list", "background"}
+# an app's window on a side or a screen (siri.placed, 28 October 2026, as Atticus places them): moved like open, so
+# read-safe and a routine's, said once it's there
+NEW_PLACE = {"place"}
 
 
 class Golden(unittest.TestCase):
     """Each set siri worked out from the registry equals the literal it replaced, plus only the new look-ups."""
 
     def test_the_gate_sets_are_what_they_were(self):
-        for name, old in (("READ_SAFE", OLD_READ_SAFE), ("POWER_STEPS", OLD_POWER_STEPS),
-                          ("ASKS_YES", OLD_ASKS_YES), ("ROUTINE_STEPS", OLD_ROUTINE_STEPS),
-                          ("SPEAK_FIRST", set(OLD_SPEAK_FIRST) | {"task"}), ("SAY_AFTER", OLD_SAY_AFTER)):
+        for name, old in (("READ_SAFE", OLD_READ_SAFE | NEW_PLACE), ("POWER_STEPS", OLD_POWER_STEPS),
+                          ("ASKS_YES", OLD_ASKS_YES), ("ROUTINE_STEPS", OLD_ROUTINE_STEPS | NEW_PLACE),
+                          ("SPEAK_FIRST", set(OLD_SPEAK_FIRST) | {"task"}), ("SAY_AFTER", OLD_SAY_AFTER | NEW_PLACE)):
             with self.subTest(name):
                 self.assertEqual(set(getattr(siri, name)), old)
                 self.assertIsInstance(getattr(siri, name), frozenset)
 
     def test_the_planner_knows_the_same_steps_and_the_new_look_ups(self):
-        self.assertEqual(set(siri.KNOWN_STEPS), OLD_KNOWN_STEPS | NEW_LOOKS | NEW_JOB)
+        self.assertEqual(set(siri.KNOWN_STEPS), OLD_KNOWN_STEPS | NEW_LOOKS | NEW_JOB | NEW_PLACE)
         self.assertEqual(set(siri.INFO), OLD_INFO | NEW_LOOKS)
         self.assertNotIn("agent_resume", siri.KNOWN_STEPS)  # only her own question makes one
         self.assertNotIn("watch_start", siri.KNOWN_STEPS)
 
     def test_the_waits_are_the_same_plain_dict(self):
-        self.assertEqual(siri.WAIT_AFTER, OLD_WAIT_AFTER)
+        self.assertEqual(siri.WAIT_AFTER, {**OLD_WAIT_AFTER, "place": 0.3})
         self.assertIs(type(siri.WAIT_AFTER), dict)  # agent.py reads it with .get, and tests swap it for {}
 
     def test_the_words_each_step_needs_without_her_name_are_the_same(self):

@@ -23,6 +23,11 @@ DEFAULTS = {
     "name": "",  # what she calls you
     "welcome": True,  # hello when you sign in or come back to the laptop, and what she can do
     "met": False,  # she's introduced herself since her memory was last started fresh, see backup.py --fresh
+    "onboarded": False,  # her walkthrough's been through once (onboarding.py); Settings > Walkthrough shows it again
+    # Full access (Settings > Safety, siri.full_access_ok): she sends a message or installs what you ask by name
+    # without asking first. Off unless you turn it on in the window; full_access_until: when it goes off by itself
+    "full_access": False,
+    "full_access_until": 0,
     "voice_id": "off",  # only your voice: off, learning (scores, turns nobody away) or on, see voiceid.py
     # quick decisions: off, shadow (logged only) or on (lets plain room talk go), see decider.py. On since its "sure it
     # isn't for her" was right 16 times in 18 on 8 October, while she spoke or acted on 22 of 88 room-talk turns
@@ -54,8 +59,12 @@ DEFAULTS = {
     # the island (island.py), all changed in the Island tab
     # capsule (27 October 2026: a floating glass capsule with her glowing eyes, the owner's pick from the mockups) or
     # pill (the black pill with Nixi's eyes it was before)
-    "island_style": "capsule",
-    "island_face": "eyes",  # eyes (Nixi's) or wave (the Siri wave)
+    # panel (28 October 2026, the owner's pick): the capsule, but her turns open into a box as Atticus has them, what
+    # you said in a bubble, her answer, how long it took and Try again
+    "island_style": "panel",
+    # eyes (Nixi's, her own: the owner wants them, 28 October 2026), orb (Atticus's ring of dashes, there to pick) or
+    # wave (the Siri wave, the pill's alone)
+    "island_face": "eyes",
     "island_theme": "amoled",  # system, light, dark or amoled (pure black)
     "island_border": False,  # a thin line round it
     "island_align": "center",  # left, center or right of the screen's top

@@ -995,22 +995,199 @@ def bring_to_front(hwnd):
         user32.SwitchToThisWindow(hwnd, True)
 
 
+# --------------------------------------------------------------------------- A window by name, on a side or a screen
+# "Chrome on the left, Notepad on the right", "VS Code on my big screen" (28 October 2026). After Atticus for
+# Windows' winctl.py (FindlayHi/atticus-windows, MIT): every display with its name and whether it's the laptop's own
+# panel, from Windows' display configuration, and a window put by its visible frame, so it lands exactly on its
+# half whatever its invisible resize borders. Real pixels throughout (_real_pixels), as SetWindowPos takes them
+class MONITORINFOEX(ctypes.Structure):
+    _fields_ = [("cbSize", DWORD), ("rcMonitor", RECT), ("rcWork", RECT), ("dwFlags", DWORD),
+                ("szDevice", wintypes.WCHAR * 32)]
+
+
+class _LUID(ctypes.Structure):
+    _fields_ = [("LowPart", DWORD), ("HighPart", LONG)]
+
+
+class _PATH_INFO(ctypes.Structure):  # DISPLAYCONFIG_PATH_INFO, flattened (72 bytes)
+    _fields_ = [("srcAdapter", _LUID), ("srcId", ctypes.c_uint32), ("srcMode", ctypes.c_uint32),
+                ("srcFlags", ctypes.c_uint32), ("tgtAdapter", _LUID), ("tgtId", ctypes.c_uint32),
+                ("tgtMode", ctypes.c_uint32), ("tech", ctypes.c_uint32), ("rot", ctypes.c_uint32),
+                ("scale", ctypes.c_uint32), ("rate", ctypes.c_uint32 * 2), ("order", ctypes.c_uint32),
+                ("avail", BOOL), ("tgtFlags", ctypes.c_uint32), ("flags", ctypes.c_uint32)]
+
+
+class _DC_HEADER(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_uint32), ("size", ctypes.c_uint32), ("adapter", _LUID), ("id", ctypes.c_uint32)]
+
+
+class _SOURCE_NAME(ctypes.Structure):
+    _fields_ = [("h", _DC_HEADER), ("gdi", wintypes.WCHAR * 32)]
+
+
+class _TARGET_NAME(ctypes.Structure):
+    _fields_ = [("h", _DC_HEADER), ("flags", ctypes.c_uint32), ("tech", ctypes.c_uint32), ("mfr", ctypes.c_uint16),
+                ("product", ctypes.c_uint16), ("connector", ctypes.c_uint32), ("friendly", wintypes.WCHAR * 64),
+                ("path", wintypes.WCHAR * 128)]
+
+
+_BUILT_IN_TECH = {6, 11, 13, 0x80000000}  # LVDS, embedded DisplayPort, UDI embedded, "internal": a laptop's panel
+SIDES = ("left", "right", "top", "bottom", "full", "center")
+
+
+def _panels():
+    """{GDI device name (\\\\.\\DISPLAY1): (its friendly name, built in?)} from the display configuration, {} if
+    Windows won't say."""
+    out, n_path, n_mode = {}, ctypes.c_uint32(), ctypes.c_uint32()
+    try:
+        if user32.GetDisplayConfigBufferSizes(2, ctypes.byref(n_path), ctypes.byref(n_mode)):
+            return out
+        paths, modes = (_PATH_INFO * n_path.value)(), (ctypes.c_byte * (64 * max(1, n_mode.value)))()
+        if user32.QueryDisplayConfig(2, ctypes.byref(n_path), paths, ctypes.byref(n_mode), modes, None):
+            return out
+        for p in paths[:n_path.value]:
+            src = _SOURCE_NAME(_DC_HEADER(1, ctypes.sizeof(_SOURCE_NAME), p.srcAdapter, p.srcId))
+            tgt = _TARGET_NAME(_DC_HEADER(2, ctypes.sizeof(_TARGET_NAME), p.tgtAdapter, p.tgtId))
+            if user32.DisplayConfigGetDeviceInfo(ctypes.byref(src)) == 0:
+                user32.DisplayConfigGetDeviceInfo(ctypes.byref(tgt))
+                out[src.gdi] = (tgt.friendly or "", p.tech in _BUILT_IN_TECH)
+    except (AttributeError, OSError):
+        pass
+    return out
+
+
+def _on_battery_power_pc():
+    """True on a laptop (it has a battery): for the panel Windows didn't name."""
+    class SPS(ctypes.Structure):
+        _fields_ = [("ac", ctypes.c_byte), ("flag", ctypes.c_byte), ("pct", ctypes.c_byte), ("saver", ctypes.c_byte),
+                    ("life", DWORD), ("full", DWORD)]
+    s = SPS()
+    return bool(kernel32.GetSystemPowerStatus(ctypes.byref(s))) and s.flag != -128 and not s.flag & 128
+
+
+def monitors():
+    """[{name, x, y, w, h, work: (x, y, w, h), built_in, primary}], the primary first, in real pixels."""
+    found = []
+    PROC = ctypes.WINFUNCTYPE(BOOL, wintypes.HANDLE, wintypes.HDC, ctypes.POINTER(RECT), wintypes.LPARAM)
+
+    def each(handle, _dc, _rect, _lparam):
+        info = MONITORINFOEX()
+        info.cbSize = ctypes.sizeof(info)
+        if user32.GetMonitorInfoW(handle, ctypes.cast(ctypes.pointer(info), ctypes.POINTER(MONITORINFO))):
+            found.append(info)
+        return True
+    with _real_pixels():
+        user32.EnumDisplayMonitors(None, None, PROC(each), 0)
+    names, out, seen = _panels(), [], {}
+    for info in found:
+        friendly, built_in = names.get(info.szDevice, ("", False))
+        name = friendly or ("Built-in Display" if built_in else "Display")
+        seen[name] = seen.get(name, 0) + 1
+        m, w = info.rcMonitor, info.rcWork
+        out.append({"name": name if seen[name] == 1 else f"{name} {seen[name]}", "x": m.left, "y": m.top,
+                    "w": m.right - m.left, "h": m.bottom - m.top,
+                    "work": (w.left, w.top, w.right - w.left, w.bottom - w.top), "built_in": built_in,
+                    "primary": bool(info.dwFlags & 1)})
+    out.sort(key=lambda d: not d["primary"])
+    if len(out) > 1 and not any(d["built_in"] for d in out) and _on_battery_power_pc():
+        out[0]["built_in"] = True  # Windows didn't say: a laptop's own panel is usually the primary
+    return out
+
+
+def pick_monitor(mons, screen, at):
+    """The display screen means: "laptop" (the built-in one), "monitor" (the biggest other one), "other" (one that
+    isn't where the window is), "primary", "current" (where the window's middle is, at (x, y)), or a display's name.
+    The current one when none fits."""
+    here = next((m for m in mons if m["x"] <= at[0] < m["x"] + m["w"] and m["y"] <= at[1] < m["y"] + m["h"]),
+                mons[0] if mons else None)
+    screen = str(screen or "current").lower()
+    if screen == "laptop":
+        return next((m for m in mons if m["built_in"]), here)
+    if screen == "monitor":
+        others = [m for m in mons if not m["built_in"]] or [m for m in mons if m is not here]
+        return max(others, key=lambda m: m["w"] * m["h"]) if others else here
+    if screen == "other":
+        return next((m for m in mons if m is not here), here)
+    if screen == "primary":
+        return next((m for m in mons if m["primary"]), here)
+    return next((m for m in mons if screen in m["name"].lower()), here)
+
+
+def rect_for(where, area, size):
+    """Where a window goes in a work area (x, y, w, h): a half, the whole of it, or the middle at its own size."""
+    x, y, w, h = area
+    cw, ch = min(size[0], w), min(size[1], h)
+    return {"left": (x, y, w // 2, h), "right": (x + w // 2, y, w - w // 2, h), "top": (x, y, w, h // 2),
+            "bottom": (x, y + h // 2, w, h - h // 2), "full": (x, y, w, h),
+            "center": (x + (w - cw) // 2, y + (h - ch) // 2, cw, ch)}[where]
+
+
+def window_frame(hwnd):
+    """The window's visible frame, (x, y, w, h), without its invisible resize borders."""
+    r = RECT()
+    if dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, ctypes.byref(r), ctypes.sizeof(r)):
+        user32.GetWindowRect(hwnd, ctypes.byref(r))
+    return r.left, r.top, r.right - r.left, r.bottom - r.top
+
+
+def set_window_frame(hwnd, x, y, w, h):
+    """Moves it so its visible frame lands exactly there: the window's own rectangle is a few pixels bigger."""
+    r = RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(r))
+    fx, fy, fw, fh = window_frame(hwnd)
+    dl, dt, dr, db = fx - r.left, fy - r.top, r.right - (fx + fw), r.bottom - (fy + fh)
+    user32.SetWindowPos(hwnd, None, x - dl, y - dt, w + dl + dr, h + dt + db, 0x0014)  # NOZORDER | NOACTIVATE
+
+
+def place_window(app, where="full", screen="current", wait=3.0):
+    """Puts app's front window on a side of a screen (where in SIDES, screen as pick_monitor reads it), opening it
+    first if it has none. Returns where it went, in words; RuntimeError if it has no window to move."""
+    if where not in SIDES:
+        raise RuntimeError("I can put a window on the left, right, top or bottom, full screen or in the middle")
+    windows = app_windows(app)
+    if not windows:
+        open_app(app)
+        end = time.time() + wait
+        while not windows and time.time() < end:  # a window just opened can take a moment to show
+            time.sleep(0.2)
+            windows = app_windows(app)
+    if not windows:
+        raise RuntimeError(f"{app.name} has no window to move")
+    hwnd = windows[0]
+    with _real_pixels():
+        if user32.IsZoomed(hwnd) or user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)  # a maximised window can't be moved: put back first
+        fx, fy, fw, fh = window_frame(hwnd)
+        mons = monitors()
+        if not mons:
+            raise RuntimeError("Windows didn't tell me about the screens")
+        m = pick_monitor(mons, screen, (fx + fw // 2, fy + fh // 2))
+        set_window_frame(hwnd, *rect_for(where, m["work"], (fw, fh)))
+        if where == "full":
+            user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE, on the display it now sits on
+    bring_to_front(hwnd)
+    return f"{app.name} {where} on {m['name']}"
+
+
 def open_app(app, wait=8.0):
-    """Like `open -a`: bring it to the front if it's open, else launch it and wait for its window."""
+    """Like `open -a`: bring it to the front if it's open, else launch it and wait for its window. True if a window of
+    it was seen (or a new one came to the front), False if none came in wait seconds: she says so, rather than that
+    it's open (28 October 2026, Atticus's rule, only what she saw)."""
     windows = app_windows(app)
     if windows:
         bring_to_front(windows[0])
-        return
+        return True
     front = user32.GetForegroundWindow()
     launch(app.name)
     start = time.time()
     while time.time() - start < wait:
         time.sleep(0.2)
         if app_windows(app):
-            return
+            return True
         now = user32.GetForegroundWindow()  # web apps like YouTube run as chrome.exe, so their windows never match
         if now and now != front and _is_app_window(now):  # a new window came to the front, that's it
-            return
+            return True
+    return False
 
 
 def focus_app(app):

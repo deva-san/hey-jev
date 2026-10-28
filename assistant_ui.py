@@ -17,6 +17,7 @@ import activity
 import hermes_memory
 import history
 import messaging
+import onboarding
 import opencode
 import providers
 import settings
@@ -47,8 +48,8 @@ TABS = (("home", "Home"), ("todo", "To-do"), ("tasks", "Tasks"), ("contacts", "C
 # the Island tab's choices: what's saved, what it says
 POPUP_STYLES = {"island": "Her island at the top", "card": "The iPhone card at the top",
                 "pill": "The Siri pill at the bottom"}
-ISLAND_STYLES = {"capsule": "Glass capsule", "pill": "Black pill"}
-ISLAND_FACES = {"eyes": "Her eyes", "wave": "The Siri wave"}
+ISLAND_STYLES = {"panel": "Answer card", "capsule": "Glass capsule", "pill": "Black pill"}
+ISLAND_FACES = {"eyes": "Her eyes", "orb": "The orb", "wave": "The Siri wave"}
 ISLAND_THEMES = {"amoled": "AMOLED black", "dark": "Dark", "light": "Light", "system": "Like Windows"}
 ISLAND_ALIGN = {"center": "In the middle", "left": "On the left", "right": "On the right"}
 hermes_memory.set_memory_dir(os.path.join(win.APPDATA_DIR, "memories"))  # the same places siri.py keeps them
@@ -543,6 +544,7 @@ class AssistantWindow:
         self.popup = bool(settings.get("popup"))
         self.s = root.winfo_fpixels("1i") / 96  # Windows display scaling, 1.0 at 100%
         self._anims = {}  # what's moving: key -> its next frame
+        self.walkthrough = None  # her setup window while it's open (onboarding.py)
         self._setup_root()
         self._setup_styles()
         self.bubble = Bubble(root)
@@ -555,6 +557,8 @@ class AssistantWindow:
                       "settings": self._build_settings(), "keys": self._build_keys()}
         self._select_tab("keys" if missing_secrets() else "home")
         self.root.after(300, self._slide_nav_bar)  # where the tabs are once the window's on screen
+        if not settings.get("onboarded"):  # the first time: her walkthrough, over the window
+            self.root.after(700, self.open_walkthrough)
         self.root.after(50, self._drain)
         self.root.after(500, self._tick)
         self.root.after(150, self.root.focus_force)
@@ -745,6 +749,11 @@ class AssistantWindow:
         self.mode_switch = tk.Canvas(header, bg=BG, highlightthickness=0, cursor="hand2", takefocus=1)
         self.mode_switch.pack(side="right", anchor="n")
         self._build_mode_switch()
+        # Atticus's orange pill while Full access is on (Settings > Safety); a click turns it off
+        self.full_badge = tk.Label(header, text="\u25cf  Full access", font=self.f_small, fg="#b86e00", bg="#fff1db",
+                                   padx=self.px(10), pady=self.px(4), cursor="hand2")
+        self.full_badge.bind("<Button-1>", lambda e: self.set_full_access(False))
+        self._show_full_badge()
         status = tk.Frame(header, bg=BG)
         status.pack(side="left", fill="x", expand=True)
         row = tk.Frame(status, bg=BG)
@@ -760,6 +769,34 @@ class AssistantWindow:
         tk.Frame(main, bg=LINE, height=1).pack(fill="x")
         self.page_area = tk.Frame(main, bg=BG)
         self.page_area.pack(fill="both", expand=True)
+
+    def _show_full_badge(self):
+        on = bool(settings.get("full_access"))
+        if on and not self.full_badge.winfo_ismapped():
+            self.full_badge.pack(side="right", anchor="n", padx=(0, self.px(12)), pady=(self.px(4), 0),
+                                 before=self.mode_switch)
+        elif not on and self.full_badge.winfo_ismapped():
+            self.full_badge.pack_forget()
+        if hasattr(self, "full_var") and self.full_var.get() != on:
+            self.full_var.set(on)
+
+    def set_full_access(self, on, hours=0):
+        """Full access on (only from here, after a yes in a dialog) or off (from anywhere)."""
+        if on:
+            ok = messagebox.askyesno(
+                "Turn on Full access?",
+                "Jev will send the messages you ask for and install the apps you ask for without asking first.\n\n"
+                "She'll still ask before deleting, paying or buying, and she never types passwords.\n\n"
+                "Only for what you say with her name.", parent=self.root)
+            if not ok:
+                self.full_var.set(False)
+                return
+        settings.put("full_access", bool(on))
+        settings.put("full_access_until", time.time() + hours * 3600 if on and hours else 0)
+        self._show_full_badge()
+        if hasattr(self, "settings_note"):
+            self._note("Full access is on: she sends and installs what you ask without asking first." if on else
+                       "Full access is off: she asks before sending or installing.")
 
     def _draw_dot(self, phase=None):
         """Her status dot, and while she's busy a ring that grows from it and fades, phase 0 to 1."""
@@ -979,6 +1016,12 @@ class AssistantWindow:
     def _build_home(self):
         page = self._page("Your Jev stats", "Everything since you started using Jev. Refreshes each time you open this tab.",
                           scroll=True)
+        ask = tk.Frame(page, bg=BG)  # typing to her instead of talking (28 October 2026, as Atticus's box has it)
+        ask.pack(fill="x", pady=(0, self.px(16)))
+        self.ask_box = HintEntry(ask, "Type to Jev instead of talking (or tap right Alt twice, anywhere)", width=64)
+        self.ask_box.pack(side="left", fill="x", expand=True, ipady=self.px(3))
+        self.ask_box.bind("<Return>", lambda e: self.ask_typed())
+        ttk.Button(ask, text="Send", command=self.ask_typed).pack(side="left", padx=(self.px(8), 0))
         grid = tk.Frame(page, bg=BG)
         grid.pack(fill="x")
         for c in range(3):
@@ -1006,6 +1049,13 @@ class AssistantWindow:
         self._label(page, "How to use", self.f_h2).pack(fill="x", pady=(self.px(12), self.px(2)))
         self._label(page, HOW_TO, fg=MUTED, wraplength=self.px(660)).pack(fill="x")
         return page
+
+    def ask_typed(self):
+        """Home's typing box: what you typed goes to her as a turn of yours, as if said with her name."""
+        text = " ".join(self.ask_box.get().split())
+        if text:
+            self.controls.put(("typed", text))
+            self.ask_box.clear()
 
     def _count_up(self, key, label, text):
         """A number counts up to itself, from where it was; any other text just shows."""
@@ -1610,10 +1660,12 @@ class AssistantWindow:
 
         combo(row("Popup", "Her island has her eyes and the plugins below. The card and the pill show only her "
                            "turns."), "popup_style", POPUP_STYLES, self.style_changed)
-        combo(row("Style", "The glass capsule floats under the top of the screen, her glowing eyes following the "
-                           "mouse; the black pill sits at the top, as it was."), "island_style", ISLAND_STYLES)
+        combo(row("Style", "The answer card is the glass capsule, but when you talk to her it opens into a box: "
+                           "your words, her answer, how long it took and Try again. The black pill sits at the top, "
+                           "as it was."), "island_style", ISLAND_STYLES)
         combo(row("Face", "Her eyes blink, look about and react: hearts when you say thanks, glasses while she reads "
-                          "the screen, headphones while music plays. Or the Siri wave as she listens and talks."),
+                          "the screen, headphones while music plays. Or the orb, a ring that ripples with a voice, or "
+                          "the Siri wave on the pill."),
               "island_face", ISLAND_FACES)
         combo(row("Theme", "AMOLED is pure black, like a phone's notch. Like Windows follows light and dark mode."),
               "island_theme", ISLAND_THEMES)
@@ -1911,6 +1963,29 @@ class AssistantWindow:
         self.wait_menu.set(WAITS.get(settings.get("turn_wait"), WAITS["patient"]))
         self.wait_menu.grid(row=36, column=1, rowspan=2, sticky="e")
         self.wait_menu.bind("<<ComboboxSelected>>", lambda e: self.wait_changed())
+        row(19, "Walkthrough", "Her setup and a short tour: what she needs, trying her out, and what she can do.")
+        # Safety, at the top: Full access, as Atticus has it, off unless turned on here
+        safety = tk.Frame(page, bg=BG)
+        safety.pack(fill="x", before=form)
+        safety.grid_columnconfigure(0, weight=1)
+        self._label(safety, "Full access", self.f_h2).grid(row=0, column=0, sticky="w", pady=(self.px(4), 0))
+        self._label(safety, "She does what you clearly ask by name without asking first: sends the message, installs "
+                            "the app. She still never types passwords or card numbers, never pays or buys, never "
+                            "deletes for good, and never acts on words she wasn't sure were for her.", self.f_small,
+                    MUTED, wraplength=self.px(330)).grid(row=1, column=0, sticky="w")
+        full = tk.Frame(safety, bg=BG)
+        full.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.full_var = tk.BooleanVar(value=bool(settings.get("full_access")))
+        self.full_for = ttk.Combobox(full, state="readonly", width=16, values=["Until I turn it off", "For an hour"])
+        self.full_for.current(0)
+        self.full_for.pack(side="left", padx=(0, self.px(8)))
+        ttk.Checkbutton(full, text="Full access", variable=self.full_var,
+                        command=lambda: self.set_full_access(self.full_var.get(),
+                                                             1 if self.full_for.current() == 1 else 0)).pack(
+            side="left")
+        tk.Frame(safety, bg=LINE, height=1).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(self.px(12), 0))
+        ttk.Button(form, text="Show it again", command=self.open_walkthrough).grid(row=38, column=1, rowspan=2,
+                                                                                    sticky="e")
         self.settings_note = self._label(page, "", self.f_small, MUTED, wraplength=self.px(660))
         self.settings_note.pack(fill="x", pady=(self.px(18), 0))
         self.models_loaded = False
@@ -2302,13 +2377,42 @@ class AssistantWindow:
             pass
         self.root.after(50, self._drain)
 
+    def open_walkthrough(self):
+        if self.walkthrough is not None:
+            self.walkthrough.top.lift()
+            return
+        self.walkthrough = onboarding.Walkthrough(self)
+
     def _set_status(self, state, detail):
+        if self.walkthrough is not None:  # Try it now: the key lights up as she listens, green once she's heard
+            self.walkthrough.status(state, detail)
         if state == "Heard":  # what she heard you say, on its own line above the popup: nothing else changes
             if self.popup:
                 self.bubble.caption(detail)
             return
         if state == "Mood":  # how her eyes react on the island (thanks: hearts): nothing else changes
             getattr(self.bubble, "react", lambda mood: None)(detail)
+            return
+        if state == "Step":  # a step of her turn, live, done or failed: a row on her card, nothing else
+            kind, _, text = str(detail).partition("\t")
+            getattr(self.bubble, "step", lambda kind, text: None)(kind, text)
+            return
+        if state == "Asked":  # typed to her or asked again: a new turn on her card, your words in its bubble
+            getattr(self.bubble, "asked", lambda text: None)(detail)
+            return
+        if state == "Type":  # right Alt tapped twice: the typing box at the top of the screen, else Home's
+            ask = getattr(self.bubble, "ask", None)
+            if ask is not None:
+                ask("", under=False)
+            else:
+                self._select_tab("home")
+                self.root.deiconify()
+                self.root.lift()
+                self.ask_box.focus_force()
+            return
+        if state == "Learned":  # what she learned or remembered: a line on her card (siri.receipt), nothing else
+            kind, _, text = str(detail).partition("\t")
+            getattr(self.bubble, "learned", lambda kind, text: None)(kind, text)
             return
         self.status.configure(text=state)
         if detail is not None:  # None keeps what's there, like her last reply
@@ -2352,11 +2456,13 @@ class AssistantWindow:
                 row.pack_forget()
         self._todo_tick()
         self._tasks_tick()
+        self._show_full_badge()  # said off by voice or the phone, or run out: the pill goes too
         self.root.after(500, self._tick)
 
     def set_mode(self, mode):
-        if mode == self.mode:
-            return
+        siri = sys.modules.get("siri")
+        if mode == self.mode and not (siri is not None and hasattr(siri, "paused") and siri.paused()):
+            return  # on her break, picking the mode it's in ends it
         self.mode = mode
         settings.put("mode", mode)
         self.hint.configure(text=HINTS[mode])

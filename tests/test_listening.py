@@ -134,14 +134,19 @@ class Blocks(queue.Queue):
 
 
 class Controls:
-    """The window's control queue: these commands, then Stop."""
+    """The window's control queue: these commands, then Stop. A function among them is run, then the queue is
+    empty for a moment, as between your clicks (the loop's idle tick)."""
 
     def __init__(self, commands=()):
         self.commands = list(commands)
 
     def get(self, timeout=None):
         if self.commands:
-            return self.commands.pop(0)
+            command = self.commands.pop(0)
+            if callable(command):
+                command()
+                raise queue.Empty
+            return command
         raise Stop
 
 
@@ -1200,6 +1205,58 @@ class IslandTap(Case):
         self.assertFalse(a.rec.marking)
         self.assertEqual([m for m in self.tap(a, says=False) if isinstance(m, siri.Mark)], [])
 
+
+
+class Typed(Case):
+    """28 October 2026, after Atticus's box: words typed to her (the typing box, Home's box) are a turn of yours off
+    the controls loop, with her card told a new one's begun; right Alt tapped twice opens the typing box."""
+
+    def run_with(self, commands):
+        said = []
+        with mock.patch.object(siri, "emit", lambda notify, state, detail="": said.append((state, detail))):
+            a = self.assistant(commands=commands)
+        return a, said
+
+    def test_typed_words_are_a_turn_of_yours(self):
+        a, said = self.run_with([("typed", "open notepad")])
+        self.assertIn("run_turn", a.threads)
+        self.assertIn(("Asked", "open notepad"), said)
+        self.assertIn("> typed: 'open notepad'", a.out.getvalue())
+
+    def test_try_again_tells_her_card_too(self):
+        a, said = self.run_with([("again", "open notepad")])
+        self.assertIn(("Asked", "open notepad"), said)
+        self.assertEqual(siri.RETRY["words"], "open notepad")
+        siri.RETRY["words"] = None
+
+    def test_right_alt_tapped_twice_opens_the_typing_box(self):
+        a, said = self.run_with(["press", "release", "press", "release"])
+        self.assertEqual(said.count(("Type", "")), 1)
+        self.assertNotIn("ptt_turn", a.threads)  # nothing said, nothing to hear
+
+    def test_a_break_hears_only_right_alt_then_goes_back(self):
+        """28 October 2026, Atticus's pause: "take a break" switches to right Alt only, and back once it's over."""
+        seen = []
+        self.addCleanup(siri.PAUSE.update, until=0.0, mode=None)
+        a, said = self.run_with([lambda: siri.PAUSE.update(until=time.time() + 60),
+                                 lambda: seen.append(siri.MIC[0].wake) or siri.PAUSE.update(until=0.0)])
+        self.assertEqual(seen, [False])  # on the break: the mic only for right Alt
+        self.assertTrue(a.rec.wake)  # and listening again after it
+        self.assertIsNone(siri.PAUSE["mode"])
+        self.assertIn("\n[break over]", a.out.getvalue())
+
+    def test_picking_a_mode_in_the_window_ends_a_break(self):
+        self.addCleanup(siri.PAUSE.update, until=0.0, mode=None)
+        a, said = self.run_with([lambda: siri.PAUSE.update(until=time.time() + 60), ("mode", "wake")])
+        self.assertFalse(siri.paused())
+        self.assertTrue(a.rec.wake)
+
+    def test_one_tap_or_two_far_apart_dont(self):
+        a, said = self.run_with(["press", "release"])
+        self.assertNotIn(("Type", ""), said)
+        with mock.patch.object(siri, "TAP_TWICE", 0.0):
+            a, said = self.run_with(["press", "release", "press", "release"])
+        self.assertNotIn(("Type", ""), said)
 
 
 # --------------------------------------------------------------------------- T2: checks/listen.py's report

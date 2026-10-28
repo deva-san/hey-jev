@@ -508,6 +508,255 @@ class Repeats(Home):
         self.assertIn("you may save it as a routine", asked[0][1]["content"])
 
 
+class FirstTime(Home):
+    """28 October 2026, Atticus's way: a request the model planned is learned the first time it works, so asked again
+    in the same words it happens at once with no model (siri.learn_first), and asked about another app it runs on
+    that app (siri.swapped_routine)."""
+
+    STEPS = [{"do": "open", "app": "Notepad"}, {"do": "keys", "keys": "win+up"}]
+
+    def setUp(self):
+        super().setUp()
+        siri.LAST_AUTO.update(name="", at=0.0)
+        self.addCleanup(siri.LAST_AUTO.update, name="", at=0.0)
+        siri.TURN_SKILLS.clear()
+        self.addCleanup(siri.TURN_SKILLS.clear)
+        quiet = contextlib.redirect_stdout(io.StringIO())
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
+
+    def learn(self, said="open notepad and make it full screen", steps=None, failed=(), gate=False, planned=True):
+        siri.learn_first(said, steps or self.STEPS, list(failed), gate, planned)
+        siri._skill_cache[0] = 0.0
+        return dict(siri.routines())
+
+    def test_once_is_enough_and_it_runs_with_no_model(self):
+        known = self.learn()
+        self.assertIn("open notepad and make it full screen", known)
+        skill = known["open notepad and make it full screen"]
+        self.assertTrue(skill["dir"].startswith(siri.AUTO))
+        self.assertFalse(skill.get("model", True))  # kept out of her prompt: it runs on its words alone
+        plan = siri._quick("Open Notepad and make it full screen.")
+        self.assertEqual(plan["steps"], self.STEPS)
+
+    def test_only_what_the_model_planned_and_went_through(self):
+        for kw in ({"planned": False},  # a shortcut or a routine already
+                   {"failed": ["Notepad didn't open"]},
+                   {"gate": "cold"},  # said across the room
+                   {"said": "open it and make it full screen"},  # points at something
+                   {"said": "notepad"},  # too few words to be a request of its own
+                   {"steps": [self.STEPS[0], {"do": "type", "text": "hello"}]},  # what's typed is the moment's
+                   {"steps": [{"do": "screen", "task": "read the page"}]},  # the model looks anyway
+                   {"steps": [self.STEPS[0], {"do": "keys", "keys": "ctrl+enter"}]}):  # sends
+            with self.subTest(kw=kw):
+                self.assertEqual(self.learn(**kw), {})
+
+    def test_not_with_learning_off(self):
+        with mock.patch.object(siri.settings, "get", lambda key, *a: False if key == "learning" else None):
+            siri.learn_first("open notepad and make it full screen", self.STEPS, [], False, True)
+        siri._skill_cache[0] = 0.0
+        self.assertEqual(dict(siri.routines()), {})
+
+    def test_a_correction_straight_after_forgets_it(self):
+        self.assertTrue(self.learn())
+        siri.learn_first("no I meant open notepad", [], [], False, False)
+        siri._skill_cache[0] = 0.0
+        self.assertEqual(dict(siri.routines()), {})
+
+    def test_one_that_fails_when_it_runs_is_forgotten(self):
+        name = self.learn()["open notepad and make it full screen"]["dir"]
+        siri.TURN_SKILLS.add(name)  # this turn ran it
+        siri.learn_first("open notepad and make it full screen", self.STEPS, ["Notepad didn't open"], False, False)
+        siri._skill_cache[0] = 0.0
+        self.assertEqual(dict(siri.routines()), {})
+
+    def test_it_shows_and_forget_what_you_just_learned_takes_it_back(self):
+        said = []
+        with mock.patch.object(siri, "NOTIFY", [lambda state, detail: said.append((state, detail))]):
+            self.learn()
+        self.assertEqual(said, [("Learned", "Learned	Next time “open notepad and make it full screen” "
+                                            "is instant.")])
+        self.assertTrue(siri.undo_learning())
+        siri._skill_cache[0] = 0.0
+        self.assertEqual(dict(siri.routines()), {})
+
+    def test_the_same_about_another_app_runs_on_that_app(self):
+        self.learn()
+        plan = siri._quick("open calculator and make it full screen")
+        self.assertEqual(plan["steps"], [{"do": "open", "app": "Calculator"}, self.STEPS[1]])
+        self.assertIsNone(siri._quick("open calculator and make it full screen", gate="cold"))  # not from the room
+
+    def test_not_when_the_app_is_named_elsewhere_in_it(self):
+        self.learn("open notepad and search notepad tips", [{"do": "open", "app": "Notepad"},
+                                                           {"do": "google", "query": "notepad tips"}])
+        self.assertIsNone(siri.swapped_routine("open calculator and search notepad tips"))
+        self.assertIsNone(siri.swapped_routine("open calculator and search calculator tips"))
+
+
+class TryAgain(Home):
+    """28 October 2026, Atticus's Try again: the last request asked again as a correction, the model told what she did
+    and to do it another way; after the model's own failure, only asked again."""
+
+    def setUp(self):
+        super().setUp()
+        self.thought, self.quick, self.learned = [], [], []
+
+        def think(text, gate, notify=None, sure=1.0):
+            self.thought.append((str(text), siri.RETRYING[0]))
+            return siri.make_plan(say="Okay.")
+        for name, value in (("think", think), ("quick", lambda *a, **k: self.quick.append(a) or None),
+                            ("run_plan", lambda plan, notify: ([], False, None, [plan.get("say") or ""])),
+                            ("learn_later", lambda *a, **k: self.learned.append(k.get("corrected"))),
+                            ("emit", lambda *a, **k: None)):
+            p = mock.patch.object(siri, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(siri.RETRY.update, words=None)
+        quiet = contextlib.redirect_stdout(io.StringIO())
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
+
+    def turn_before(self, said="open spotify and play lofi", **plan):
+        plan = {"steps": [{"do": "open", "app": "Spotify"}], "say": "Opening it now.", **plan}
+        history.add(said, "", plan["say"], json.dumps(plan), gate="named")
+
+    def test_the_cards_try_again_is_a_correction(self):
+        self.turn_before()
+        siri.RETRY["words"] = "open spotify and play lofi"
+        siri.handle("open spotify and play lofi", "open spotify and play lofi")
+        self.assertEqual(self.quick, [])  # not the shortcut that answered it before
+        text, note = self.thought[0]
+        self.assertIn("Your last answer to this was wrong", note)
+        self.assertIn("open Spotify", note)
+        self.assertEqual(self.learned, [True])  # her correction review looks at it
+        self.assertEqual(siri.RETRYING[0], "")  # and no later turn is told
+
+    def test_saying_its_wrong_asks_the_last_request_again(self):
+        self.turn_before()
+        siri.handle("That's wrong, try again.", "That's wrong, try again.")
+        self.assertEqual(self.thought[0][0], "open spotify and play lofi")
+        self.assertIn("Do it a different way", self.thought[0][1])
+
+    def test_after_the_models_own_failure_its_only_asked_again(self):
+        self.turn_before(steps=[], say="That's taking too long. Try again, or pick a faster model in Settings.",
+                         llm_failed=True)
+        siri.handle("try again", "try again")
+        self.assertEqual(self.thought[0], ("open spotify and play lofi", ""))
+        self.assertEqual(self.learned, [None])  # not a correction
+
+    def test_a_routine_learned_on_its_own_that_answered_it_is_forgotten(self):
+        forgot = []
+        with mock.patch.object(siri, "forget_auto", lambda name, why: forgot.append(name)):
+            note = siri.retry_note({"steps": [], "say": "", "skills_used": ["learned-open-spotify", "work-mode"]})
+        self.assertEqual(forgot, ["learned-open-spotify"])  # not one you taught her
+        self.assertIn("Last time you did: nothing", note)
+
+    def test_only_try_again_words(self):
+        for said, want in (("try again", True), ("that's wrong, try again", True), ("thats wrong try again", True),
+                           ("not what I asked", True), ("do it again", False), ("try again later", False)):
+            with self.subTest(said=said):
+                self.assertEqual(bool(siri.TRY_AGAIN.fullmatch(siri.plain(said))), want)
+
+
+class StrongerModel(Home):
+    """28 October 2026, after Atticus's MODEL_OFFER: when the free model fails, or a task in an app it planned falls
+    short, she offers a stronger model you saved a key for, and only your yes tries it, on that model alone."""
+
+    def setUp(self):
+        super().setUp()
+        self.thought, self.said, self.fail = [], [], RuntimeError("Kilo said 429 Too Many Requests")
+        self.plan = siri.make_plan(say="Lima.")
+
+        def think(text, gate, notify=None, sure=1.0):
+            self.thought.append((str(text), siri.RETRYING[0], siri.STRONGER_TURN.get(), gate))
+            if self.fail:
+                raise self.fail
+            return self.plan
+        anthropic = siri.providers.BY_ID["anthropic"]
+        for target, name, value in (
+                (siri, "think", think), (siri, "quick", lambda *a, **k: None),
+                (siri, "run_plan", lambda plan, notify: ([], False, None, [plan.get("say") or ""])),
+                (siri, "learn_later", lambda *a, **k: None), (siri, "emit", lambda *a, **k: None),
+                (siri, "say", lambda line, notify: self.said.append(line)),
+                (siri.providers, "key", lambda p: "sk-test" if p is anthropic else ""),
+                (siri.providers, "cached", lambda p: {"at": 0, "models": [], "error": ""})):
+            p = mock.patch.object(target, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(siri.OFFER.update, words=None, model=None, plan=None, until=0.0)
+        self.addCleanup(siri.STRONGER_TURN.set, None)
+        quiet = contextlib.redirect_stdout(io.StringIO())
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
+
+    def test_the_free_model_failing_offers_a_stronger_one_and_yes_tries_it(self):
+        siri.handle("Jev, what's the capital of Peru", "what's the capital of Peru")
+        self.assertEqual(self.said, ["Want me to try that with Claude Sonnet?"])
+        self.assertEqual(siri.OFFER["model"], "anthropic/claude-sonnet-5-5")
+        self.fail = None
+        siri.handle("Yes.", "Yes.", gate=True)
+        text, note, model, gate = self.thought[-1]
+        self.assertEqual((text, model), ("what's the capital of Peru", "anthropic/claude-sonnet-5-5"))
+        self.assertEqual(note, "")  # the model's own failure: only asked again
+        self.assertFalse(gate)  # heard as the first was, by name
+        self.assertIsNone(siri.OFFER["model"])
+        with mock.patch.object(siri.opencode, "chat", side_effect=lambda key, messages, **kw: (kw["model"], {}, "")):
+            siri.STRONGER_TURN.set("anthropic/claude-sonnet-5-5")
+            self.assertEqual(siri.ask_model([{"role": "user", "content": "hi"}])[0], "anthropic/claude-sonnet-5-5")
+
+    def test_a_task_in_an_app_it_planned_falling_short_is_offered_too(self):
+        self.fail = None
+        self.plan = siri.make_plan([{"do": "screen", "task": "send hi to Mum"}], "On it.")
+        self.addCleanup(siri.agent.LAST_FAILURE.update, dict(siri.agent.LAST_FAILURE))
+
+        def fell_short(plan, notify):
+            siri.agent.LAST_FAILURE.update(app="WhatsApp", at=time.time())
+            return [], False, None, ["I couldn't find the Send button."]
+        with mock.patch.object(siri, "run_plan", fell_short):
+            siri.handle("Jev, send hi to Mum on WhatsApp", "send hi to Mum on WhatsApp")
+        self.assertEqual(self.said, ["Want me to try that with Claude Sonnet?"])
+        siri.handle("try again", "try again", gate=True)
+        text, note, model, _ = self.thought[-1]
+        self.assertEqual(model, "anthropic/claude-sonnet-5-5")
+        self.assertIn("Your last answer to this was wrong", note)  # told what it tried, as data
+
+    def test_never_without_a_key_offline_or_with_a_strong_model_picked(self):
+        with mock.patch.object(siri.providers, "key", lambda p: ""):
+            siri.handle("Jev, what's the capital of Peru", "what's the capital of Peru")
+        self.fail = siri.requests.ConnectionError("Max retries exceeded with url")
+        siri.handle("Jev, what's the capital of Peru", "what's the capital of Peru")
+        self.assertEqual(self.said, [])
+        self.assertIsNone(siri.stronger_model("openai/gpt-5.2"))  # you picked a strong one yourself
+        self.assertEqual(siri.stronger_model("anthropic/claude-haiku-5-5"), "anthropic/claude-sonnet-5-5")
+
+    def test_her_offer_is_for_the_next_thing_said_and_never_twice(self):
+        siri.handle("Jev, what's the capital of Peru", "what's the capital of Peru")
+        self.fail = None
+        siri.handle("Jev, open notepad", "open notepad")  # something else: the offer's gone
+        siri.handle("Yes.", "Yes.", gate=True)
+        self.assertIsNone(self.thought[-1][2])  # not on the stronger model
+        self.said.clear()
+        self.fail = RuntimeError("Kilo said 429 Too Many Requests")
+        siri.OFFER.update(words="what's the capital of Peru", model="anthropic/claude-sonnet-5-5", plan={},
+                          until=time.time() + 30)
+        siri.handle("Yes.", "Yes.", gate=True)  # on the stronger one, and it fails too: not offered again
+        self.assertEqual(self.thought[-1][2], "anthropic/claude-sonnet-5-5")
+        self.assertEqual(self.said, [])
+
+    def test_the_newest_of_its_family_and_how_she_says_it(self):
+        rows = [{"id": "claude-opus-6-0"}, {"id": "claude-sonnet-6-0"}, {"id": "claude-sonnet-5-5"}]
+        with mock.patch.object(siri.providers, "cached", lambda p: {"at": 0, "models": rows, "error": ""}):
+            self.assertEqual(siri.stronger_model("kilo/x/y:free"), "anthropic/claude-sonnet-6-0")
+        for model, name in (("anthropic/claude-sonnet-5-5", "Claude Sonnet"), ("openai/gpt-5.2", "GPT-5.2"),
+                            ("google/gemini-3.1-pro-preview", "Gemini 3.1 Pro"), ("xai/grok-4", "Grok 4")):
+            self.assertEqual(siri.model_name(model), name)
+        for said, want in (("yes", True), ("Yes, please.", True), ("sure", True), ("try again", True),
+                           ("try it with the stronger one", True), ("open notepad", False), ("no", False),
+                           ("right", False), ("please", False)):  # you pay for it: a clear yes
+            with self.subTest(said=said):
+                self.assertEqual(siri.took_offer(said), want)
+
+
 class PromptSize(Home):
     def test_with_full_memory_and_40_skills_her_prompt_stays_within_its_budget(self):
         """PLAN's budget: 3,000 tokens or less for the fixed part, 4,000 in total with full memory, and a test fails if

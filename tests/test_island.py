@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import threading
+import sys
 import time
 import unittest
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from tests.test_watchers import until
 
 import activity
 import agent
+import askbox
 import dictation
 import island
 import island_face as face
@@ -554,18 +556,165 @@ class Capsule(unittest.TestCase):
     def capsule(self, **kw):
         return fonted(self, **dict({"style": "capsule"}, **kw))
 
-    def test_the_setting_is_the_capsule_until_the_pill_is_picked(self):
+    def test_the_setting_is_the_answer_card_until_another_is_picked(self):
+        """28 October 2026: the answer card, Atticus's box for her turns, is the capsule the rest of the time."""
         self.addCleanup(settings.put, "island_style", None)
-        self.assertEqual(settings.DEFAULTS["island_style"], "capsule")
+        self.assertEqual(settings.DEFAULTS["island_style"], "panel")
         isl = bare()
-        for saved, want in (("pill", "pill"), ("capsule", "capsule"), ("nonsense", "capsule"), (None, "capsule")):
+        for saved, style, panel in (("pill", "pill", False), ("capsule", "capsule", False),
+                                    ("panel", "capsule", True), ("nonsense", "capsule", True), (None, "capsule", True)):
             settings.put("island_style", saved)
             isl._read_settings()
-            self.assertEqual(isl.style, want, saved)
+            self.assertEqual((isl.style, isl.panel), (style, panel), saved)
         isl.theme_name = "amoled"
         self.assertIs(isl.theme(), island.GLASS["dark"])
         isl.style = "pill"
         self.assertIs(isl.theme(), island.THEMES["amoled"])
+
+    def card(self, state, text="", you="", asked=None, answered=None):
+        isl = self.capsule(panel=True, you=you, _front_icon=lambda size: None, level=0.0, since=time.time())
+        isl.island_max_h = isl.PANEL_MAX_H * isl.k
+        isl.jev, isl.asked_at, isl.answered_at = {"state": state, "text": text}, asked, answered
+        return isl
+
+    def test_the_answer_card_has_your_words_her_answer_how_long_and_try_again(self):
+        """28 October 2026, as Atticus's box: her eyes and x on top, your words in a bubble, her answer, then how long
+        it took and Try again."""
+        now = time.time()
+        listening = self.card("listening", "Play Blinding Lights by")._jev()
+        self.assertEqual([h[0] for h in listening.hot], ["close"])
+        self.assertIn("Play Blinding Lights by", listening.key)  # your words, as they come
+        isl = self.card("speaking", "Playing Blinding Lights on Spotify.", "Play Blinding Lights", now - 2.23, now)
+        lay = isl._jev()
+        self.assertEqual([h[0] for h in lay.hot], ["close", "words", "answer", "again"])
+        self.assertIn("2.23 s", lay.key)
+        self.assertGreater(lay.h, listening.h)
+        self.assertGreater(drawn(lay).max(), 0.5)
+        self.assertIsNone(lay.cap)  # it all goes in the card: nothing under it
+        self.assertEqual(lay.radius, isl.GLASS_CORNER * isl.k)
+
+    def test_the_answer_card_stays_a_while_and_try_again_asks_again(self):
+        isl = self.card("speaking", "Done.", "open notepad", time.time() - 1, time.time())
+        later = []
+        isl.root = mock.Mock(after=lambda ms, f: later.append(ms) or "job")
+        isl.hide_job = None
+        isl.hide(900)
+        self.assertEqual(later, [isl.PANEL_LINGER])  # not 0.9 s: there's an answer to read
+        asked = mock.Mock()
+        with mock.patch.dict(sys.modules, {"siri": mock.Mock(CONTROLS=[asked])}):
+            isl._panel_press("again")
+        asked.put.assert_called_once_with(("again", "open notepad"))
+
+    def test_her_answer_copies_and_your_words_open_to_fix(self):
+        """28 October 2026, as Atticus's box: a click on her answer copies it, with "Copied" where the time was; one
+        on your words opens the typing box with them in, under the card, and what you send is a turn of yours."""
+        now = time.time()
+        isl = self.card("speaking", "It’s 24 degrees in Chennai.", "weather in chennai", now - 1.5, now)
+        isl.root, isl._wake = mock.Mock(), lambda: None
+        timed = isl._jev()
+        with mock.patch.object(island.win, "set_clipboard") as clip:
+            isl._panel_press("answer")
+        clip.assert_called_once_with("It’s 24 degrees in Chennai.")
+        lay = isl._jev()
+        self.assertIs(lay.key[-2], True)
+        self.assertEqual(lay.h, timed.h)  # "Copied" takes the time's place, nothing moves
+        self.assertGreater(drawn(lay).max(), 0.5)
+        isl.copied_at = now - 5
+        self.assertIs(isl._jev().key[-2], False)  # and gives it back
+        isl.copied_at = 0.0
+        with mock.patch.object(island.win, "set_clipboard", side_effect=RuntimeError("Couldn't open the clipboard")):
+            isl._panel_press("answer")  # another app had it: no "Copied"
+        self.assertIs(isl._jev().key[-2], False)
+        opened = []
+        isl.typing = mock.Mock(open=lambda text, near: opened.append((text, near)))
+        isl.origin, isl.island_rect = SimpleNamespace(x=100, y=0), (20, 10, 560, 300)
+        isl._panel_press("words")
+        self.assertEqual(opened, [("weather in chennai", (120, 300, 540))])  # under the card, as wide
+        sent = mock.Mock()
+        with mock.patch.dict(sys.modules, {"siri": mock.Mock(CONTROLS=[sent])}):
+            isl._typed("weather in chennai tomorrow")
+        sent.put.assert_called_once_with(("typed", "weather in chennai tomorrow"))
+        colours = isl._box_colours()
+        self.assertTrue(all(len(c) == 7 and c.startswith("#") for c in colours.values()))
+
+    def test_a_turn_you_typed_starts_afresh_on_the_card(self):
+        isl = self.card("speaking", "Done.", "open notepad", time.time() - 9, time.time() - 8)
+        isl.steps, isl._wake = [["Opening Notepad", "done"]], lambda: None
+        isl.asked("open   paint")
+        self.assertEqual(isl.you, "open paint")
+        self.assertIsNone(isl.answered_at)
+        self.assertIsNone(isl.steps)
+        self.assertAlmostEqual(isl.asked_at, time.time(), delta=1)
+
+    def test_what_she_learned_shows_under_her_answer(self):
+        """28 October 2026, Atticus's receipts: a green line on the card, else a popup; never said."""
+        now = time.time()
+        isl = self.card("speaking", "Done.", "work mode", now - 1, now)
+        plain = isl._jev()
+        isl.receipt = ("Learned", "Next time “work mode” is instant.", now)
+        lay = isl._jev()
+        self.assertGreater(lay.h, plain.h)
+        self.assertTrue(lay.animated)
+        self.assertGreater(drawn(lay).max(), 0.5)
+        isl.receipt = ("Learned", "old", now - 60)  # gone after its 9 s
+        self.assertEqual(isl._jev().h, plain.h)
+        gone = self.card("listening")
+        gone.jev, gone.popups, gone.root = None, [], mock.Mock()
+        gone._wake = lambda: None
+        gone.learned("Remembered", "About you: website careerid.in")
+        self.assertEqual(gone.popups[-1].data["title"], "Remembered")
+
+    def test_her_steps_show_as_rows_live_then_done(self):
+        """28 October 2026, as Atticus lists its steps: a row each, the last few, "+N earlier" over them."""
+        isl = self.card("doing", "Opening Spotify", "open spotify and play lofi")
+        isl.panel, isl.jev = True, {"state": "doing", "text": "Opening Spotify"}
+        isl.root, isl.hide_job, isl._wake, isl._place = mock.Mock(), None, lambda: None, lambda *a: None
+        isl.step("live", "Opening Spotify")
+        self.assertEqual(isl.steps, [["Opening Spotify", "live"]])
+        isl.step("done", "Opening Spotify")  # the same row, now done
+        isl.step("live", "Searching Spotify: lofi")
+        self.assertEqual(isl.steps, [["Opening Spotify", "done"], ["Searching Spotify: lofi", "live"]])
+        without = self.card("doing", "Opening Spotify", "open spotify and play lofi")._jev()
+        self.assertGreater(isl._jev().h, without.h)
+        for i in range(6):
+            isl.step("done", f"step {i}")
+        self.assertEqual(isl._jev().key[-1], 4)  # eight steps: the last four shown, four earlier
+        isl.show("listening")  # a new turn: no rows
+        self.assertIsNone(isl.steps)
+
+    def test_the_turn_times_itself(self):
+        isl = self.card("listening")
+        isl.root, isl.hide_job, isl.t0 = mock.Mock(), None, time.time()
+        isl.eyes, isl._place, isl._wake = face.Eyes(), lambda *a: None, lambda: None
+        isl.show("listening", "open")
+        self.assertIsNone(isl.asked_at)
+        isl.show("thinking")
+        self.assertIsNotNone(isl.asked_at)
+        isl.show("speaking", "Done.")
+        self.assertGreaterEqual(isl.answered_at, isl.asked_at)
+        isl.show("listening")  # the next turn starts again
+        self.assertIsNone(isl.asked_at)
+
+    def test_her_eyes_are_the_face_until_another_is_picked(self):
+        """28 October 2026: her eyes stay her face, the owner's wish; Atticus's orb is there to pick."""
+        self.addCleanup(settings.put, "island_face", None)
+        self.assertEqual(settings.DEFAULTS["island_face"], "eyes")
+        isl = bare()
+        for saved, want in (("eyes", "eyes"), ("wave", "wave"), ("orb", "orb"), ("nonsense", "eyes"), (None, "eyes")):
+            settings.put("island_face", saved)
+            isl._read_settings()
+            self.assertEqual(isl.face_style, want, saved)
+
+    def test_the_orb_breathes_when_nothing_is_on_and_shows_the_voice_itself(self):
+        orb = self.capsule(face_style="orb", _front_icon=lambda size: None)
+        eyes = self.capsule(face_style="eyes", _front_icon=lambda size: None)
+        idle = orb._capsule_idle()
+        self.assertEqual(idle.rate, 10)  # a slow breath, not a frame every 16 ms
+        self.assertGreater(drawn(idle).max(), 0.5)
+        self.assertEqual(eyes._capsule_idle().rate, 0)  # her eyes draw nothing between blinks, as before
+        for isl in (orb, eyes):
+            isl.jev, isl.you, isl.since = {"state": "listening", "text": ""}, "", time.time()
+        self.assertLess(orb._jev().w, eyes._jev().w)  # no dots beside the orb: it ripples with the voice itself
 
     def test_it_floats_under_the_top_with_round_ends(self):
         isl = self.capsule(align="center", off_x=0, off_y=0, visible_window=False)
@@ -860,3 +1009,63 @@ class Drawing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TypingBox(unittest.TestCase):
+    """28 October 2026, after Atticus's box: typing to her instead of talking. Enter sends it, in one line, as a turn
+    of yours; its grey hint is never sent; Up and Down go back through what you typed; clicking away keeps a draft."""
+
+    def setUp(self):
+        import tkinter as tk
+        try:
+            self.root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"no display for Tk: {exc}")
+        self.root.withdraw()
+        self.addCleanup(self.root.destroy)
+        self.sent = []
+        self.box = askbox.AskBox(self.root, self.sent.append)
+        self.addCleanup(self.box.close)
+
+    def test_enter_sends_what_you_typed_in_one_line(self):
+        self.box.open()
+        self.assertTrue(self.box.visible)
+        self.assertTrue(self.box.hinting)
+        self.assertEqual(self.box.typed(), "")
+        self.box._enter()
+        self.assertEqual(self.sent, [])  # the hint isn't yours
+        self.box._set("  open   notepad ")
+        self.box._enter()
+        self.assertEqual(self.sent, ["open notepad"])
+        self.assertFalse(self.box.visible)
+
+    def test_your_words_open_in_it_to_fix(self):
+        self.box.open("play  blinding lights", near=(100, 40, 540))
+        self.assertEqual(self.box.typed(), "play blinding lights")
+        self.assertEqual(self.box.entry.index("insert"), len("play blinding lights"))  # the cursor at the end
+        self.assertFalse(self.box.hinting)
+
+    def test_up_and_down_go_back_through_what_you_typed(self):
+        for text in ("one", "two"):
+            self.box.open()
+            self.box._set(text)
+            self.box._enter()
+        self.box.open()
+        self.box._recall(-1)
+        self.assertEqual(self.box.typed(), "two")
+        self.box._recall(-1)
+        self.box._recall(-1)
+        self.assertEqual(self.box.typed(), "one")  # the oldest stays
+        self.box._recall(1)
+        self.box._recall(1)
+        self.assertEqual(self.box.typed(), "")  # past the newest: empty again
+
+    def test_clicking_away_keeps_a_draft_esc_doesnt(self):
+        self.box.open()
+        self.box._set("half typed")
+        self.box.close()
+        self.box.open()
+        self.assertEqual(self.box.typed(), "half typed")
+        self.box.close(keep=False)
+        self.box.open()
+        self.assertEqual(self.box.typed(), "")

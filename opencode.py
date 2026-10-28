@@ -36,8 +36,7 @@ WHY = (("can only be used from within OpenCode", "OpenCode only lets this free m
 
 
 def is_free(model):
-    p, model_id = providers.split(model)
-    return bool(model_id) and providers.is_free(p, model_id)
+    return providers.free(model)
 
 
 def is_anthropic(model):

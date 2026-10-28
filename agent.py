@@ -100,7 +100,7 @@ EDITABLE = {"edit", "document", "combobox"}
 GONE = "That's not on screen any more, so I've not done it."
 LEAVE_IT = "you'll need to do that bit yourself"
 PRIVATE_LINE = f"That's a payment or password page, so {LEAVE_IT}."  # one in OFF_LIMITS
-CHAT_LINE = "Chats have their own messaging, where I read a message back first, so I don't type or click in them."
+CHAT_LINE = "I don't click in chats. Ask me to message them instead."
 CHAT_APPS = re.compile(r"whatsapp|telegram|signal|slack|discord|teams|skype|messenger|viber|wechat|element|zulip|"
                        r"mattermost|google chat", re.I)  # opened by name in a live run: siri.CHATS by their names
 # Browsers. Only Chrome, Edge and Brave tell her the site (winplatform.browser_site); in the others, or in one of those
@@ -1168,7 +1168,7 @@ TO_HERSELF = re.compile(r"\b(?:the user|user(?:'s)? (?:says?|said|wants?|asked|m
                         r"instead|so that|in order to|whether)\b", re.I)
 LOOKS_ONLY = re.compile(r"(?:look|check|describe|read|tell|find out|see|inspect|identify|report|summari[sz]e|sum up|"
                         r"what|which|who|where|why|how|is|are|does|did|has|have)\b", re.I)
-SAY_BACK = 12  # words of a task said back as it is: "Okay: turn on night light in Settings."
+SAY_BACK = 10  # words of a task said back as it is: "Okay: turn on night light in Settings."
 # What a task that starts by looking may go on to do ("... and fill in every field"), and what it's told it mustn't
 # yet ("Do not click anything yet"), which isn't doing. Not "open": "which page is open" only describes
 ACTS_TOO = re.compile(r"\b(?:fill(?:s|ing)? (?:in|out)|click|press|tap|type|write|send|submit|post|play|pause|"
@@ -1184,7 +1184,8 @@ def task_words(task):
     task = " ".join(str(task or "").split())
     parts = re.split(r"(?<=[.!?;])\s+", task, maxsplit=1) if task else [""]
     first = parts[0].rstrip(".!?;: ")
-    if not first or len(parts) > 1 or TO_HERSELF.search(first) or len(first.split()) > SAY_BACK or len(first) > 80:
+    if not first or len(parts) > 1 or TO_HERSELF.search(first) or len(first.split()) > SAY_BACK or len(first) > 80 \
+            or "/" in first:  # "click the chat/contact named ..." is written for herself, not to be said
         return None
     return first
 

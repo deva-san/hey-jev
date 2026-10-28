@@ -804,17 +804,20 @@ def plan_of(body: str) -> Optional[Dict[str, Any]]:
 
 
 def build_content(name: str, description: str, notes: str = "", triggers=(), steps=None, say: str = "",
-                  procedure: Optional[Dict[str, Any]] = None) -> str:
+                  procedure: Optional[Dict[str, Any]] = None, hidden: bool = False) -> str:
     """A SKILL.md in Hermes' format from the parts the model sends. Hey Jev: each value written as JSON, which YAML
     reads the same way, so Hermes' parser takes it whatever it holds (a bare "on" is a boolean to YAML 1.1); the
     description cut to Hermes' 60 letters for a new skill; triggers under "When to Use", where Hermes keeps them.
-    procedure: one of her procedures (agent.py), kept in the plan with no steps of its own."""
+    procedure: one of her procedures (agent.py), kept in the plan with no steps of its own. hidden: left out of the
+    model's prompt (disable-model-invocation), for a routine she learned on her own, which runs on its words alone."""
     description = " ".join(str(description).split())
     if len(description) > SKILL_PROMPT_DESC_LIMIT:
         description = description[:SKILL_PROMPT_DESC_LIMIT].rsplit(" ", 1)[0].rstrip(",.;:") or \
             description[:SKILL_PROMPT_DESC_LIMIT]
     head = [f"name: {json.dumps(name)}", f"description: {json.dumps(description, ensure_ascii=False)}",
             'platforms: ["windows"]']
+    if hidden:
+        head.append("disable-model-invocation: true")
     triggers = [" ".join(str(t).split()) for t in (triggers or []) if str(t).strip()]
     if triggers:
         head.append(f"triggers: {json.dumps(triggers, ensure_ascii=False)}")
