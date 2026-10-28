@@ -99,6 +99,22 @@ class Backup(unittest.TestCase):
         self.assertEqual(read(os.path.join(self.data, "memories", "MEMORY.md")), "Chrome is the browser.")
         self.assertEqual(self.turns(), ["open notepad"])
 
+    def test_what_her_old_chats_meant_is_backed_up_and_cleared_with_them(self):
+        """history.py keeps what each turn's words meant beside history.db (history.VECTORS), for recall by meaning:
+        it goes into a backup and comes back with it, and a fresh start clears it with her old chats, or an old
+        turn's meaning would wait there for the new turn that gets its id."""
+        path = os.path.join(self.data, history.VECTORS)
+        with open(path, "wb") as f:
+            f.write(b"\x01" * history.RECORD.itemsize)
+        self.assertIn(history.VECTORS, backup.WIPE)
+        with zipfile.ZipFile(backup.backup()) as z:
+            self.assertIn("appdata/" + history.VECTORS, z.namelist())
+        saved = backup.fresh()
+        self.assertFalse(os.path.exists(path))
+        backup.restore(saved)
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), b"\x01" * history.RECORD.itemsize)
+
     def test_nothing_is_touched_while_she_is_running(self):
         with mock.patch.object(backup, "running", lambda: True):
             for call in (backup.backup, backup.fresh):

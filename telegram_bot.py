@@ -14,6 +14,10 @@ never run late: a "shut down" from last night must not run this morning. Risky s
 Yes and No buttons, and only a tap answers it. A voice note is written out by the speech-to-text on this PC, never
 a cloud service (it does pass through Telegram's servers, as every Telegram voice note does). Long replies are split
 the way Hermes splits them. Runs on its own thread, so voice turns aren't held up.
+
+A background job asked from here shows how it's getting on as one message edited in place every 10 s at most
+(progress, Hermes' heartbeats from a running process, without the extra messages), and a finished one's note or
+report can come as a file (send_document), only one of her own notes, only to you.
 """
 import asyncio
 import collections
@@ -32,7 +36,7 @@ import settings
 from hermes_memory.gateway_bits import (ALPHABET, CODE_LENGTH, CODE_TTL_SECONDS, LOCKOUT_SECONDS, MAX_FAILED_ATTEMPTS,
                                         _hash_code, truncate_message, utf16_len)
 from secrets_store import get_secret
-from winplatform import own_data
+from winplatform import APPDATA_DIR, own_data
 
 TOKEN = "TELEGRAM_BOT_TOKEN"
 OLDEST = 120  # seconds: a message older than this is dropped
@@ -49,6 +53,13 @@ ALBUM_MOST = 4  # pictures of an album she looks at
 # 2.6 GB free here) and holds speech-to-text, and so her ears at the PC, for as long as it takes
 VOICE_SECONDS = 180
 FORWARDED = "That's forwarded, so it's someone else's words: I've not done anything with it. Tell me what you'd like."
+# A background job's progress on your phone is one message, edited in place: at most this often, seconds. Telegram
+# lets a bot make about one change a second in a chat, and a research round or a coding job's edit can come faster
+PROGRESS_EVERY = 10.0
+# What send_document may send: a note or a report of hers (research Markdown, a coding job's report), from her own
+# notes folder only, so nothing a model or a message named can send your files off the PC. A research note is a few KB
+DOCUMENT_BYTES = 5 * 1024 * 1024
+DOCUMENT_KINDS = (".md", ".txt")
 # when the bot sent you something, [start, end] each: Telegram on this PC shows it too, see watch.own_reply
 SENDS = collections.deque(maxlen=50)
 
@@ -71,6 +82,34 @@ def prune_files(max_age=KEEP_FOR):
 def files_dir():
     """Where what you send her from your phone is kept, to send on: Phone files, beside her log."""
     return own_data(os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "Hey Jev", "Phone files"))
+
+
+def document_roots():
+    """The folders send_document may send from: her notes (siri.NOTES_DIR), where research and coding job reports
+    are saved."""
+    return [os.path.join(APPDATA_DIR, "notes")]
+
+
+def confined(path):
+    """path as a real, full path if it's a note or report in her own notes folder (links followed first, so one
+    pointing out of it doesn't count), a Markdown or text file of at most DOCUMENT_BYTES; else None."""
+    if not path:
+        return None
+    try:
+        real = os.path.realpath(str(path))
+        if os.path.splitext(real)[1].lower() not in DOCUMENT_KINDS or not os.path.isfile(real) or \
+                os.path.getsize(real) > DOCUMENT_BYTES:
+            return None
+    except (OSError, ValueError):
+        return None
+    for root in document_roots():
+        root = os.path.normcase(os.path.realpath(root))
+        try:
+            if os.path.commonpath([os.path.normcase(real), root]) == root:
+                return real
+        except ValueError:  # on another drive
+            continue
+    return None
 
 
 def _sending():
@@ -210,6 +249,8 @@ class Bot:
         self.answered = {}  # her questions already answered with a tap: (chat, message) -> when
         self.albums = {}  # (chat, album) -> the pictures of an album that have come in, see _album
         self.sending = set()  # sends started on the loop itself, held until done (see _call)
+        self.progressing = {}  # a job's key -> its progress message: {"chat", "message", "at", "text"} (progress)
+        self.progress_lock = threading.Lock()
         self.loop, self.app, self.thread, self.why = None, None, None, ""
         self.stopping, self.again = False, False  # stop() asked for, and start() asked for again meanwhile
         self.lock = threading.Lock()
@@ -667,4 +708,64 @@ class Bot:
             except Exception as exc:
                 print(f"  telegram: buttons already off ({type(exc).__name__})")
             await self.app.bot.send_message(chat, note, reply_to_message_id=message)
+        return self._call(go)
+
+    def progress(self, chat, key, text, final=False):
+        """A background job's progress on your phone (siri.progress_tick): one message per job, key, sent the first
+        time and then edited in place (edit_message_text), at most every PROGRESS_EVERY seconds, so a long job is a
+        line that moves on, not a message a round. final: its last word ("Done"), made whatever the wait, and the job
+        forgotten after. Only to your paired chat. True if Telegram was given the text; False if it was skipped (too
+        soon, the same as before, not your chat) or failed, when the next call tries again."""
+        if chat is None or chat != owner():
+            return False
+        text = str(text or "")[:4000]
+        now = time.time()
+        with self.progress_lock:
+            entry = self.progressing.get(key)
+            if entry is not None and entry["chat"] != chat:  # paired again since: a new message in the new chat
+                entry = None
+            if entry is not None and (entry["text"] == text or (not final and now - entry["at"] < PROGRESS_EVERY)):
+                if final:
+                    self.progressing.pop(key, None)
+                return False
+            if entry is None:
+                entry = self.progressing[key] = {"chat": chat, "message": None, "at": now, "text": ""}
+            entry["at"], entry["text"], message = now, text, entry["message"]
+
+        async def go():
+            if message is None:
+                sent = await self.app.bot.send_message(chat, text)
+                entry["message"] = getattr(sent, "message_id", None)
+            else:
+                await self.app.bot.edit_message_text(text, chat_id=chat, message_id=message)
+        ok = self._call(go)
+        with self.progress_lock:
+            if final or (not ok and message is None):  # done with, or its first message never went: afresh next time
+                self.progressing.pop(key, None)
+            elif not ok and entry["text"] == text:  # an edit that failed (a flood limit, _call's timeout): the same
+                entry["text"] = ""  # line goes again next time, never skipped as "the same", the phone left stale
+        return ok
+
+    def send_document(self, chat, path, caption=""):
+        """A finished job's note or report as a file to your phone: research's Markdown, a coding job's report. Only
+        to your paired chat, only from her own notes folder and at most DOCUMENT_BYTES (confined), read here, off the
+        bot's loop. False if it couldn't, or wasn't allowed to."""
+        if chat is None or chat != owner():
+            return False
+        real = confined(path)
+        if real is None:
+            print("  telegram: that file isn't one of her notes, so it wasn't sent")
+            return False
+        try:
+            with open(real, "rb") as f:
+                data = f.read(DOCUMENT_BYTES + 1)
+        except OSError as exc:
+            print(f"  telegram: couldn't read the note ({type(exc).__name__})")
+            return False
+        if len(data) > DOCUMENT_BYTES:  # it grew since it was looked at
+            return False
+
+        async def go():
+            await self.app.bot.send_document(chat, document=io.BytesIO(data), filename=os.path.basename(real),
+                                             caption=str(caption or "")[:1024] or None)
         return self._call(go)

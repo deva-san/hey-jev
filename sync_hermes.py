@@ -30,7 +30,8 @@ def rewrite(text, pairs, where):
 
 
 def pieces(source, names, where):
-    """The source of each named top-level definition (or Class.method, dedented, decorators off), in that order."""
+    """The source of each named top-level definition (with its decorators: @dataclass makes the class), or of a
+    Class.method (dedented, decorators off: @staticmethod means nothing outside the class), in that order."""
     tree = ast.parse(source)
     lines = source.splitlines(keepends=True)
     found = {}
@@ -50,7 +51,8 @@ def pieces(source, names, where):
         if name not in found:
             raise SystemExit(f"{where}: {name} isn't there any more")
         node = found[name]
-        start = node.lineno if not getattr(node, "decorator_list", None) else node.lineno  # def line, decorators off
+        decorators = [] if "." in name else getattr(node, "decorator_list", [])
+        start = decorators[0].lineno if decorators else node.lineno
         text = "".join(lines[start - 1:node.end_lineno])
         out.append(textwrap.dedent(text) if "." in name else text)
     return "\n\n".join(p.rstrip() + "\n" for p in out)

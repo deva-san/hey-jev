@@ -252,7 +252,6 @@ class WaitsForAnotherQuestion(unittest.TestCase):
 
     def tearDown(self):
         siri.PENDING.update(plan=None, until=0.0, origin="voice")
-        siri.HEARD.update(words=None, until=0.0)
         siri.ASKED.update(alias="", until=0.0)
 
     def test_held_while_a_question_waits(self):
@@ -261,7 +260,7 @@ class WaitsForAnotherQuestion(unittest.TestCase):
         self.assertTrue(siri.voice_question_waiting())
         siri.PENDING.update(origin="phone")  # only the phone's button answers that one
         self.assertFalse(siri.voice_question_waiting())
-        siri.HEARD.update(words="open notepad", until=time.time() + 10)  # "Did you say: ...?"
+        siri.ASKED.update(alias="mum", until=time.time() + 10)  # "What's Mum's number?"
         self.assertTrue(siri.voice_question_waiting())
 
 

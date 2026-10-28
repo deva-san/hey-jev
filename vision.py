@@ -9,6 +9,24 @@ import numpy as np
 import winplatform as win
 
 WIDTH = 1280  # the free model pointed inside the right button 6 times out of 6 at this size
+# Where your mouse pointer is, ringed on the screenshot for "what is this?" (27 October 2026, live: the owner put the
+# pointer on Claude's Context bar and asked, and nothing told the model which "this"). Red, thick enough to survive
+# the shrink to WIDTH, and round, so it's never taken for the page's own
+POINTER_RING, POINTER_R, POINTER_W = (255, 45, 85), 24, 5
+
+
+def mark(rgb, x, y):
+    """rgb with a ring round x, y (whole pixels in it), where the mouse pointer is. rgb as it was if x, y is off it."""
+    h, w = rgb.shape[:2]
+    if not (0 <= x < w and 0 <= y < h):
+        return rgb
+    out = np.array(rgb, copy=True)
+    pad = POINTER_R + POINTER_W
+    y0, y1, x0, x1 = max(0, y - pad), min(h, y + pad + 1), max(0, x - pad), min(w, x + pad + 1)
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    ring = np.abs(np.hypot(xx - x, yy - y) - POINTER_R) <= POINTER_W / 2
+    out[y0:y1, x0:x1][ring] = POINTER_RING
+    return out
 
 
 def shrink(rgb, width=WIDTH):
@@ -37,7 +55,8 @@ def png(rgb):
 class Shot:
     """A screenshot ready to send: url is the picture, w and h its size in pixels, rect where it is on the screen."""
 
-    def __init__(self, rgb, rect):
+    def __init__(self, rgb, rect, pointer=False):
+        self.pointer = pointer  # the mouse pointer's ringed on it (mark)
         self.small = shrink(rgb)
         self.h, self.w = self.small.shape[:2]
         self.rect, self.scale = rect, (rect[2] - rect[0]) / self.w
@@ -56,10 +75,20 @@ class Shot:
         return round(self.rect[0] + x * self.scale), round(self.rect[1] + y * self.scale)
 
 
-def capture():
+def of_window(hwnd):
+    """One window as it looks, behind others too (winplatform.window_image, PrintWindow), as a Shot: a job in the
+    background sees its own window this way, never what you have in front. Raises if Windows won't draw it."""
+    rgb, rect = win.window_image(hwnd), win.window_rect(hwnd)
+    if rgb is None or rect is None:
+        raise RuntimeError("that window couldn't be seen")
+    return Shot(rgb, (rect[0], rect[1], rect[0] + rgb.shape[1], rect[1] + rgb.shape[0]))
+
+
+def capture(pointer=None):
     """The window in front now, with what's open from it (winplatform.front_area), cut from the screen it's on, as a
     Shot. Not the whole screen: WhatsApp or your bank beside Settings went to the model with it, when only the window
-    in front had been judged. Her popup is left out of it. Raises if there's no window in front to cut it to."""
+    in front had been judged. Her popup is left out of it. Raises if there's no window in front to cut it to.
+    pointer: where the mouse pointer is (real pixels), to ring on it (mark), for "what is this?"."""
     rgb, rect = win.screenshot()
     area = win.front_area()
     if area is None:
@@ -68,4 +97,8 @@ def capture():
     right, bottom = min(rect[2], area[2]), min(rect[3], area[3])
     if right - left < 8 or bottom - top < 8:  # off this screen
         raise RuntimeError("there's no window in front to look at")
-    return Shot(rgb[top - rect[1]:bottom - rect[1], left - rect[0]:right - rect[0]], (left, top, right, bottom))
+    part = rgb[top - rect[1]:bottom - rect[1], left - rect[0]:right - rect[0]]
+    ringed = pointer is not None and left <= pointer[0] < right and top <= pointer[1] < bottom
+    if ringed:
+        part = mark(part, int(pointer[0] - left), int(pointer[1] - top))
+    return Shot(part, (left, top, right, bottom), ringed)

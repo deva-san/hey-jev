@@ -4,9 +4,10 @@
     python backup.py --restore FILE   put a backup back (what's there now is backed up first, so it can be undone)
     python backup.py --fresh          back up, then clear her memory, skills and old chats; she introduces herself
 
-The zip holds all of %APPDATA%\\Hey Jev (memory, skills, history.db, settings, contacts, tasks, personality), the
-Dictionary (vocabulary.json) and app list (apps.json) from this folder, and her voice profile and decider data from
-%LOCALAPPDATA%\\Hey Jev when they exist. The models and logs aren't in it: a fresh start never touches them.
+The zip holds all of %APPDATA%\\Hey Jev (memory, skills, history.db and what its turns meant, settings, contacts,
+tasks, personality), the Dictionary (vocabulary.json) and app list (apps.json) from this folder, and her voice
+profile and decider data from %LOCALAPPDATA%\\Hey Jev when they exist. The models and logs aren't in it: a fresh
+start never touches them.
 """
 import argparse
 import ctypes
@@ -31,8 +32,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_FILES = ("vocabulary.json", "apps.json")  # the Dictionary and the app list live next to the code
 LOCAL_DIRS = ("voice", "decider")  # in %LOCALAPPDATA%\Hey Jev: her picture of your voice, the decider's data
 # What --fresh clears in %APPDATA%\Hey Jev: what she knows about you, her notes and day files (memories), the skills
-# she learned, and old chats. Settings, contacts, tasks, SOUL.md, the Dictionary and the app list stay.
-WIPE = ("memories", "skills", "history.db", "history.db-wal", "history.db-shm")
+# she learned, and old chats with what their words meant (history.VECTORS, beside history.db: left behind, an old
+# turn's meaning would wait for the new turn that gets its id). Settings, contacts, tasks, SOUL.md, the Dictionary
+# and the app list stay.
+WIPE = ("memories", "skills", "history.db", "history.db-wal", "history.db-shm", "history-vectors.bin")
 SIDE_FILES = (".db-wal", ".db-shm", ".db-journal")  # SQLite's own; the backup copy of the .db already has them merged
 
 

@@ -1,6 +1,10 @@
 """The model path: parse_plan, ask_plan, think, let_go, the learning loop, and web.py's search and read. The model, the
 web and the PC are all stubbed: nothing goes online or acts."""
 import json
+import os
+import shutil
+import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -8,7 +12,10 @@ from urllib.parse import urljoin
 
 from tests.support import siri
 
+import history  # noqa: E402
 import web  # noqa: E402
+
+RECENT = history.recent  # the real one: Turn stubs it out
 
 
 class FakeModel:
@@ -147,6 +154,95 @@ class TaskSteps(Turn):
         recent = [(0, "remind me every day at 9 to take my medicine",
                    '{"steps": [{"do": "schedule", "when": "", "repeat": "daily at 9 AM"}], "say": ""}')]
         self.assertIn(siri.TASK_STEPS, self.system("make it 10 instead", recent))
+
+    def test_the_cached_start_is_the_same_whatever_was_asked(self):
+        """27 October: TASK_STEPS took TASK_STUB's place inside PROMPT, and LIST_STEPS went in after the note line,
+        so the start Haiku keeps (opencode.Cached) changed with the words. Both are written out after it now."""
+        plain, task, listed = (self.system(w) for w in ("open notepad", "run the tests in hey-jev",
+                                                         "add milk to my to-do list"))
+        self.assertEqual(plain[:plain.cache_at], task[:task.cache_at])
+        self.assertEqual(plain[:plain.cache_at], listed[:listed.cache_at])
+        self.assertIn(siri.TASK_STUB, plain[:plain.cache_at])
+        self.assertIn(siri.LIST_ANCHOR, plain[:plain.cache_at])
+        self.assertIn(siri.TASK_STEPS, task[task.cache_at:])
+        self.assertIn(siri.LIST_STEPS, listed[listed.cache_at:])
+        self.assertNotIn(siri.LIST_STEPS, task)
+        self.assertNotIn(siri.TASK_STEPS, plain + listed)
+
+
+class BlocksByMeaning(unittest.TestCase):
+    """27 October: a block's steps are also written out when the words miss its regex but are close in meaning to
+    one of its BLOCK_EXAMPLES, with the decider's encoder (made-up numbers here)."""
+
+    def setUp(self):
+        import numpy as np
+        unit = lambda *v: np.asarray(v, np.float32) / np.linalg.norm(v)  # noqa: E731
+        self.vectors = {"compile my app": unit(0.9, 0.1, 0.4), "what's on my plate today": unit(0.1, 0.9, 0.4),
+                        "tell me a joke": unit(0, 0, 1)}
+        self.asked = []
+        encoder = type("Encoder", (), {"last": None})()
+
+        def encode(text):  # keeps the last, as decider.Decider.encode does
+            self.asked.append(text)
+            encoder.last = (text, self.vectors[text])
+            return encoder.last[1]
+        encoder.encode = encode
+        self.encoder = encoder
+        for p in (patch.object(siri.decider, "available", lambda: True),
+                  patch.object(siri.decider, "get", lambda: encoder),
+                  patch.object(siri.filesearch, "recent", lambda: None),
+                  patch.dict(siri._block_vectors, {"task": [unit(1, 0, 0)], "list": [unit(0, 1, 0)]}, clear=True)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def ranked(self, text):
+        """As think() does first: her skills ranked by the words, which leaves them the encoder's last."""
+        self.encoder.encode(text)
+        return text
+
+    def test_close_in_meaning_is_written_out(self):
+        self.assertFalse(siri.TASK_WORDS.search("compile my app") or siri.LIST_WORDS.search("what's on my plate today"))
+        tasks, lists, more = siri.gated_blocks(self.ranked("compile my app"), [])
+        self.assertEqual((tasks, lists), (True, False))
+        self.assertEqual(more, siri.MORE_STEPS + siri.TASK_STEPS)
+        self.assertEqual(siri.gated_blocks(self.ranked("what's on my plate today"), [])[2],
+                         siri.MORE_STEPS + siri.LIST_STEPS)
+
+    def test_far_in_meaning_is_left_out(self):
+        self.assertEqual(siri.gated_blocks(self.ranked("tell me a joke"), []), (False, False, ""))
+
+    def test_words_not_worked_out_yet_go_by_the_regexes_alone(self):
+        """Working them out took 19 ms (median) and 25 at worst, not clearly under 20: never on the voice thread."""
+        self.ranked("tell me a joke")
+        self.asked.clear()
+        self.assertEqual(siri.gated_blocks("compile my app", []), (False, False, ""))
+        self.assertEqual(self.asked, [])
+
+    def test_ranking_skills_leaves_the_words_asked_last_even_after_a_description_changed(self):
+        entry = {"dir": "build-helper", "description": "Builds things", "triggers": []}
+        self.vectors["build helper: Builds things. "] = self.vectors["tell me a joke"]
+        with patch.dict(siri._skill_vectors, clear=True):
+            siri.rank_skills("compile my app", [entry])
+        self.assertEqual(self.encoder.last[0], "compile my app")
+        self.assertTrue(siri.gated_blocks("compile my app", [])[0])
+
+    def test_words_that_hit_both_regexes_arent_worked_out(self):
+        self.assertEqual(siri.gated_blocks("run the build and add it to my to-do list", [])[:2], (True, True))
+        self.assertEqual(self.asked, [])
+
+    def test_before_its_examples_are_worked_out_it_goes_by_the_words_and_warms_them_once(self):
+        started = []
+        with patch.dict(siri._block_vectors, clear=True), patch.object(siri, "_warming", []), \
+                patch.object(siri.threading, "Thread", lambda target, daemon: type(
+                    "T", (), {"start": lambda _: started.append(target)})()):
+            self.assertEqual(siri.gated_blocks("compile my app", []), (False, False, ""))
+            siri.gated_blocks("compile my app", [])
+        self.assertEqual(started, [siri.warm_blocks])
+
+    def test_without_the_decider_its_the_words_alone(self):
+        with patch.object(siri.decider, "available", lambda: False):
+            self.assertEqual(siri.gated_blocks("compile my app", []), (False, False, ""))
+        self.assertEqual(self.asked, [])
 
 
 class Lookups(Turn):
@@ -416,6 +512,18 @@ class RoomTalk(unittest.TestCase):
                      "That sounded like someone speaking nearby, not a request for me."):
             self.assertTrue(siri.let_go({"steps": [], "say": said}), said)
 
+    def test_asking_what_room_talk_meant_is_let_go(self):
+        """Free models' questions back to room talk, 9 to 21 October: without her name she never asks what you meant."""
+        for said in ("What do you need me to do, Hari?", "Merlin is what, Hari? Can you finish the sentence?",
+                     "I'm lost, Hari \u2014 can you repeat that? Couldn't make out what you meant.",
+                     "Not following you, Hari \u2014 what do you want me to do? Just say it.",
+                     "Could you clarify what you'd like me to do with that message?",
+                     "Notepad's open \u2014 what do you want me to do with it, Hari?"):
+            self.assertTrue(siri.let_go({"steps": [], "say": said}), said)
+        for said in ("What would you like me to type to Amma?", "Which Harish profile should I open?",
+                     "Who should I message, and what should it say?"):  # what she needs to know to do it
+            self.assertIsNone(siri.let_go({"steps": [], "say": said}), said)
+
     def test_an_answer_is_not_let_go(self):
         for plan in ({"steps": [], "say": "It's 5 PM."},
                      {"steps": [], "say": "It was said to you, Hari. Your C drive is nearly full."},
@@ -477,14 +585,23 @@ class Learning(Turn):
         self.assertEqual(started, [1])
 
     def test_a_review_leaves_out_overheard_chat(self):
-        siri.learn_later("Who was that on the phone", [], [], "cold")
-        turns = [(time.time() - 30, "Who was that on the phone", '{"steps": [], "say": "Sounds like Ravi."}'),
-                 (time.time() - 20, "no, I said Zostel", '{"steps": [], "say": "Got it, Zostel."}'),
-                 (time.time() - 10, "open Zostel", '{"steps": [{"do": "website", "url": "https://zostel.com"}]}')]
+        """After a restart too: her history keeps which turns she heard without her name (its gate). The list of
+        them in memory that this was before was gone once she restarted, and the room talk was looked back at."""
+        root = tempfile.mkdtemp(prefix="heyjev-planner-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         model = FakeModel('{"memory": [], "skills": [], "words": {}}')
-        with patch.object(siri.history, "recent", lambda *a, **k: turns), patch.object(siri, "ask_model", model), \
-                patch.object(siri, "skills_block", lambda: ""):
-            siri.review(wait=0)
+        with patch.object(history, "DB", os.path.join(root, "history.db")), \
+                patch.object(history, "DAYS_DIR", os.path.join(root, "days")):
+            history.add("Who was that on the phone", "", "Sounds like Ravi.",
+                        '{"steps": [], "say": "Sounds like Ravi."}', gate="cold")
+            history.add("no, I said Zostel", "", "Got it, Zostel.", '{"steps": [], "say": "Got it, Zostel."}',
+                        gate="follow")
+            history.add("open Zostel", "opened zostel.com", "", '{"steps": [{"do": "website", "url": '
+                                                                 '"https://zostel.com"}]}')
+            with patch.object(siri.history, "recent", RECENT), patch.object(siri, "ask_model", model), \
+                    patch.object(siri, "skills_block", lambda: ""), \
+                    patch.dict(siri._learning, lock=threading.Lock()):  # not one an earlier test's review holds
+                siri.review(wait=0)
         said = model.calls[0][0][-1]["content"]
         self.assertIn("Zostel", said)
         self.assertNotIn("on the phone", said)
@@ -513,6 +630,72 @@ class WebSearch(unittest.TestCase):
             self.assertEqual(found, {"wikipedia": [{"title": "Iron Man 2"}]})
             web.search("who directed iron man 2")  # what was late isn't left out for the next ten minutes
         self.assertEqual(len(wiki), 2)
+
+
+class WebCache(unittest.TestCase):
+    """27 October, found while mapping: web._cache never let anything go, every page she read kept while she ran."""
+
+    def setUp(self):
+        web._cache.clear()
+        self.addCleanup(web._cache.clear)
+
+    def test_only_the_latest_looks_are_kept(self):
+        self.assertEqual(web.CACHE_MOST, 256)
+        with patch.object(web, "CACHE_MOST", 3):
+            for n in range(4):
+                web._cached("read", n, 600, lambda n=n: f"page {n}")
+            self.assertEqual(web._cached("read", 1, 600, lambda: self.fail("read again")), "page 1")  # still kept
+            web._cached("read", 4, 600, lambda: "page 4")
+        self.assertEqual(list(web._cache), [("read", 3), ("read", 1), ("read", 4)])  # 1 was used again, 2 wasn't
+
+
+class DefaultModel(unittest.TestCase):
+    """27 October, found while mapping: the model a fresh install starts on was space-bunny-free, gone (410) from
+    OpenCode since 11 October, so every request failed until Settings refreshed the list."""
+
+    def test_a_fresh_install_starts_on_a_free_model_that_answers(self):
+        with patch.dict(siri.os.environ, {"OPENCODE_MODEL": ""}), patch.object(siri.settings, "_data", {}):
+            model = siri.settings.get("llm_model")
+        self.assertEqual(model, siri.FAST_MODEL)
+        self.assertTrue(siri.opencode.allowed(model))
+        self.assertIn(model, siri.opencode.FALLBACK_FREE)
+
+
+class CurrentYears(unittest.TestCase):
+    """22 October 2026: "GTA six launched any new trailer" was searched as "GTA 6 new trailer 2024 2025", the model's
+    own "now", and found 2024's stories a week after the launch trailer came out."""
+    NOW = time.localtime().tm_year
+
+    def q(self, query, said):
+        return siri.current_query(query, said)
+
+    def test_a_recent_year_they_didnt_say_is_taken_out(self):
+        a, b = self.NOW - 2, self.NOW - 1
+        self.assertEqual(self.q(f"GTA 6 new trailer {a} {b}", "GTA six launched any new trailer"), "GTA 6 new trailer")
+        self.assertEqual(self.q(f"FIFA World Cup {self.NOW - 4} winner", "who won the last world cup"),
+                         "FIFA World Cup winner")
+        self.assertEqual(self.q(f"Python latest version in {a}-{str(b)[2:]}", "python latest version"),
+                         "Python latest version")
+
+    def test_one_they_said_or_counted_back_to_stays_and_so_does_this_years(self):
+        old = self.NOW - 2
+        for query, said in ((f"who won the {old} T20 World Cup", f"who won the {old} T20 World Cup"),
+                            (f"India GDP growth {self.NOW - 1}", "what was India's GDP growth last year"),
+                            (f"iPhone price {self.NOW}", "latest iphone price"),
+                            (f"x {old}", ""),  # the words aren't known
+                            ("World War 2 1945", "when did world war two end")):
+            self.assertEqual(self.q(query, said), query, said)
+
+    def test_every_search_she_makes_goes_without_it(self):
+        searched = []
+        siri.agent.SAID.set("GTA six launched any new trailer")
+        self.addCleanup(siri.agent.SAID.set, "")
+        with patch.object(siri.web, "search", lambda q, links=False: searched.append(q) or {}), \
+                patch.object(siri.web, "news", lambda t, n=6, links=False: searched.append(t) or []):
+            out = siri.run_info([{"do": "web", "query": f"GTA 6 trailer {self.NOW - 1}"},
+                                 {"do": "news", "topic": f"GTA 6 {self.NOW - 1}"}])
+        self.assertEqual(searched, ["GTA 6 trailer", "GTA 6"])
+        self.assertIn('"web": "GTA 6 trailer"', out)
 
 
 class WebRead(unittest.TestCase):
@@ -606,6 +789,11 @@ class PromptBits(unittest.TestCase):
     def test_timer_label_only_when_named(self):
         line = next(l for l in siri.PROMPT.splitlines() if l.startswith('{"do":"timer"'))
         self.assertIn("label and alert only", line)
+
+    def test_night_light_has_its_own_step(self):
+        """With its thinking off, Haiku turned on dark mode for "turn on night light" 4 times in 4: it had no step
+        of its own, only a walk through Settings."""
+        self.assertIn('{"do":"dark_mode","on":true} {"do":"night_light","on":true}', siri.PROMPT)
 
 
 if __name__ == "__main__":

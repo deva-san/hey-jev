@@ -351,7 +351,7 @@ That is 54 errors, against 22 wrong actions or replies (13 + 9).
 **Goal:** she learns from you like Hermes, fixes mistakes as soon as you correct her, tidies unused skills, and
 finds the right moment in past chats.
 
-- **How Hermes code comes in:** `hermes_memory/UPSTREAM.json` holds commit 3569fba6 and the file list.
+- **How Hermes code comes in:** `hermes_memory/UPSTREAM.json` holds the pinned commit and the file list.
   - A dev-only `sync_hermes.py` copies the file bodies unchanged and rewrites a fixed set of imports.
   - It prints what changed upstream since the last pin, so updates are a reviewed step, not a surprise.
   - A ~60-line `_compat.py` supplies the few helpers the copied code expects.

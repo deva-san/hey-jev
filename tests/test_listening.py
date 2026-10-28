@@ -78,7 +78,9 @@ class FakeEars:
 
 
 def listener(ears, **kw):
-    """A real speech.Listener on the fake voice detector, keeping every phrase it makes."""
+    """A real speech.Listener on the fake voice detector, keeping every phrase it makes. Quick to end a turn unless
+    a test asks for another wait, as Assistant is."""
+    kw.setdefault("wait", "quick")
     phrases = []
     ear = speech.Listener(FakeVAD(), ears, lambda audio, kind, text, ms: phrases.append((len(audio), kind, str(text),
                                                                                           ear.pos)), **kw)
@@ -147,7 +149,9 @@ class Assistant:
     """siri.run_voice_assistant on fakes, run until its control loop is out of commands. var(name) and put(name,
     value) read and change the variables its inner functions share, threads[name] is what each thread would run."""
 
-    def __init__(self, ears=None, mode="wake", commands=(), unplugged=()):
+    def __init__(self, ears=None, mode="wake", commands=(), unplugged=(), wait="quick"):
+        """wait: Settings > Wait before answering. "quick" by default, the turn ending at the first pause as it did
+        before 25 October, so these tests feed the loop as they always have; Patient's own tests ask for it."""
         self.ears, self.threads, self.streams, self.timer_done, self.back = ears or FakeEars(), {}, [], None, None
         self.unplugged, self.out = set(unplugged), io.StringIO()  # mics that won't open, and what it printed
         assistant = self
@@ -180,6 +184,7 @@ class Assistant:
                     (siri, "warm", lambda: None),
                     (siri.threading, "Thread", Thread)):
                 stack.enter_context(mock.patch.object(target, name, value))
+            stack.enter_context(mock.patch.dict(siri.settings._load(), {"turn_wait": wait}))  # read as it starts
             stack.enter_context(contextlib.redirect_stdout(self.out))
             try:
                 siri.run_voice_assistant(controls=Controls(commands), mode=mode)
@@ -372,7 +377,7 @@ class BareGreeting(Case):
             ear.feed(block)
         self.assertEqual([p[2] for p in phrases], ["Hello."])
         quiet = (phrases[0][3] - int(round(0.9 * RATE / BLOCK)) * BLOCK) / RATE
-        self.assertAlmostEqual(quiet, speech.Listener.LONGEST, delta=0.05)
+        self.assertAlmostEqual(quiet, ear.LONGEST, delta=0.05)
         self.assertEqual(ears.calls, 1)
 
     def test_other_short_turns_end_as_soon_as_before(self):
@@ -387,6 +392,75 @@ class BareGreeting(Case):
             self.assertEqual(ears.calls, 1)
             ends.append(phrases[0][3])
         self.assertEqual(ends[0], ends[1])
+
+
+# --------------------------------------------------------------------------- 25 October: Settings > Wait before answering
+class FakeTurn:
+    """Smart Turn's stand-in: how sure it is that you've finished, whatever was said."""
+
+    def __init__(self, chance):
+        self.chance = chance
+
+    def finished(self, audio):
+        return self.chance
+
+
+class PatientWait(Case):
+    """931 of 1,459 turns ended after 0.22 s of quiet, Smart Turn being over 50% sure at the first pause, and "Job open
+    settings [pause] and Windows update" came as two turns, the second let go. Patient, OpenLive's preset and the
+    default now, waits for at least 0.7 s of quiet, and longer when Smart Turn isn't sure."""
+
+    def feed(self, ear, *parts):
+        """parts: (seconds, 1.0 for speech or 0.0 for quiet). Returns where the last speech ended, in samples."""
+        spoken = 0
+        for secs, value in parts:
+            for block in blocks(secs, value):
+                ear.feed(block)
+                spoken = ear.pos if value else spoken
+        return spoken
+
+    def test_a_pause_in_a_sentence_doesnt_end_it_however_sure_smart_turn_is(self):
+        for wait, turns in (("patient", 1), ("quick", 2)):
+            with self.subTest(wait=wait):
+                ear, phrases = listener(FakeEars(), turn=FakeTurn(0.95), wait=wait)
+                self.feed(ear, (0.5, 0.0), (1.2, 1.0), (0.6, 0.0), (0.8, 1.0), (3.0, 0.0))
+                self.assertEqual(len(phrases), turns)
+
+    def test_it_ends_once_its_quiet_is_up_when_smart_turn_says_youre_done(self):
+        ear, phrases = listener(FakeEars(), turn=FakeTurn(0.95), wait="patient")
+        spoken = self.feed(ear, (0.5, 0.0), (1.2, 1.0), (3.0, 0.0))
+        self.assertAlmostEqual((phrases[0][3] - spoken) / RATE, 0.7, delta=0.05)
+
+    def test_unsure_or_without_smart_turn_it_waits_longer(self):
+        for chance, waited in ((None, 1.0), (0.4, 1.0), (0.1, 2.5)):
+            with self.subTest(chance=chance):
+                ear, phrases = listener(FakeEars(), turn=None if chance is None else FakeTurn(chance), wait="patient")
+                spoken = self.feed(ear, (0.5, 0.0), (1.2, 1.0), (4.0, 0.0))
+                self.assertAlmostEqual((phrases[0][3] - spoken) / RATE, waited, delta=0.05)
+
+    def test_an_unknown_wait_is_patient_and_each_listener_keeps_its_own(self):
+        quick, _ = listener(FakeEars(), wait="quick")
+        other, _ = listener(FakeEars(), wait="something else")
+        self.assertEqual((quick.QUIET, quick.LONGEST), (0.0, 1.2))
+        self.assertEqual((other.QUIET, other.LONGEST), (0.7, 2.5))
+        self.assertEqual(speech.Listener.WAIT, "patient")
+        self.assertEqual(siri.settings.DEFAULTS["turn_wait"], "patient")
+
+    def test_in_the_loop_a_pause_mid_request_is_one_turn(self):
+        """As the loop hears it, with no Smart Turn: "Jev, open settings [0.6 s] and Windows update"."""
+        def write(audio):
+            return " ".join((["Jev, open settings"] if np.any(np.isclose(audio, 0.9)) else []) +
+                            (["and Windows update."] if np.any(np.isclose(audio, 0.8)) else []))
+        for wait, heard in (("patient", ["Jev, open settings and Windows update."]),
+                            ("quick", ["Jev, open settings", "and Windows update."])):
+            with self.subTest(wait=wait):
+                a = self.assistant(ears=FakeEars(write=write), wait=wait)
+                acted = []
+                a.put("act_on", lambda text, kind, ms: acted.append(str(text)))
+                a.speak(blocks(0.5, 0.0) + blocks(1.2, 0.9) + blocks(0.6, 0.0) + blocks(1.0, 0.8) + blocks(3.0, 0.0))
+                a.listen()
+                self.assertEqual(acted, heard)
+                self.assertIn(f"[waits before answering: {wait}", a.out.getvalue())
 
 
 # --------------------------------------------------------------------------- A2: how far behind she may fall
@@ -647,9 +721,22 @@ class TalkOver(Case):
         self.assertEqual(self.turns(after=after, words="okay send a WhatsApp to Ravi"),
                          [("okay send a WhatsApp to Ravi", True)])
         self.assertEqual(self.turns(after=after, words="and then we went to the market together"), [])
-        late = blocks(5.0, 0.0) + blocks(1.5, 0.8) + blocks(1.5, 0.0)
+        late = blocks(siri.FOLLOW_UP + 1, 0.0) + blocks(1.5, 0.8) + blocks(1.5, 0.0)
         self.assertEqual(self.turns(after=late, words="okay send a WhatsApp to Ravi"),
                          [("okay send a WhatsApp to Ravi", "cold")])
+
+    def test_after_a_chat_answer_a_question_back_is_a_follow_up(self):
+        """25 October: "Why" as she finished "No, I can't see you", then "Why you have my vision model right", both
+        let go as room talk, the window after an answer to words said without her name being for "okay, now ..."
+        alone. A question back is a follow-up, for Haiku to decide (GATE_NOTE); a question said over her isn't."""
+        soon = blocks(1.0, 0.0) + blocks(1.5, 0.8) + blocks(1.5, 0.0)
+        for words in ("Why you have my vision model right", "Why?", "really", "you said you can see it"):
+            with self.subTest(words=words):
+                self.assertEqual(self.turns(after=soon, words=words), [(words, True)])
+        later = blocks(5.0, 0.0) + blocks(1.5, 0.8) + blocks(1.5, 0.0)  # past the 4 s that was all it had
+        self.assertEqual(self.turns(after=later, words="Why?"), [("Why?", True)])
+        self.assertEqual(self.turns(self.OVER_END, self.AFTER, "what was that all about"),
+                         [("what was that all about", "cold")])
 
     def test_after_a_real_answer_the_window_is_as_before(self):
         after = blocks(1.0, 0.0) + blocks(1.5, 0.8) + blocks(1.5, 0.0)
@@ -659,6 +746,16 @@ class TalkOver(Case):
     def test_what_the_room_says_while_she_thinks_isnt_a_follow_up(self):
         before = blocks(0.5, 0.0) + blocks(1.5, 0.8) + blocks(1.0, 0.0)
         self.assertEqual(self.turns(before=before, words="pass the salt please"), [])
+
+    def test_what_carries_on_your_request_while_she_thinks_is_the_rest_of_it(self):
+        """25 October: "Job open settings", and as she opened Settings, "And Windows update" was let go as said cold
+        and not asked for. Words that carry on (and, also, then, on ...) said while she works on what you asked are a
+        follow-up to it, as after her answer; the room's talk meanwhile still isn't (above)."""
+        before = blocks(0.5, 0.0) + blocks(1.5, 0.8) + blocks(1.0, 0.0)
+        for no_name in (False, True):
+            with self.subTest(no_name=no_name):
+                self.assertEqual(self.turns(before=before, words="And Windows update.", no_name=no_name),
+                                 [("And Windows update.", True)])
 
     def test_a_long_turn_over_catch_up_keeps_what_was_said_over_her(self):
         before = blocks(siri.CATCH_UP - 5, 0.0)  # a long look-up
@@ -1069,6 +1166,39 @@ class MicTrouble(Case):
         a = self.assistant(unplugged={"USB mic"}, commands=[("mic", "USB mic"), ("mode", "ptt")])
         self.assertFalse(a.rec.wake)
         self.assertIn("USB mic isn't there", a.out.getvalue())
+
+
+class IslandTap(Case):
+    """Approve or Deny on the island for her question (siri.island_answer): a turn of hers, started off the controls
+    loop, and ended in the audio as any turn is. 27 October, review: she said "Sent." with the mic listening, its
+    start was marked and her turn's end never was, so all said after, "Hey Jev" too, waited as said over her."""
+
+    def tap(self, a, says):
+        def answer(yes, ask, notify=None):
+            if says:
+                a.rec.marked = True  # say(): the mic kept listening, so her line's start was marked
+            return True
+        with mock.patch.object(siri, "island_answer", answer), contextlib.redirect_stdout(io.StringIO()):
+            a.threads["island_tap"](True, "q1")
+        return [b[1] for b in list(a.rec.blocks.queue)]
+
+    def test_the_controls_loop_starts_it(self):
+        a = self.assistant(commands=[("island tap", True, "q1")])
+        self.assertIn("island_tap", a.threads)
+
+    def test_a_tap_she_answers_out_loud_ends_her_turn_in_the_audio(self):
+        a = self.assistant(commands=[("island tap", True, "q1")])
+        a.rec.category = "speech"
+        self.assertTrue(a.rec.keeps)
+        marks = [m for m in self.tap(a, says=True) if isinstance(m, siri.Mark)]
+        self.assertEqual([(m.kind, m.secs, m.strict) for m in marks], [("ask", siri.CARRY, True)])
+        self.assertFalse(a.rec.marked)
+
+    def test_with_the_mic_deaf_while_she_talks_there_is_nothing_to_mark(self):
+        a = self.assistant(commands=[("island tap", True, "q1")])
+        a.rec.category = "raw"
+        self.assertFalse(a.rec.marking)
+        self.assertEqual([m for m in self.tap(a, says=False) if isinstance(m, siri.Mark)], [])
 
 
 

@@ -1,4 +1,4 @@
-# From Hermes Agent by Nous Research, gateway/pairing.py, gateway/platforms/helpers.py, gateway/platforms/base.py at commit 3569fba6a686e17f9208da7500de8bd20b4c82f9
+# From Hermes Agent by Nous Research, gateway/pairing.py, gateway/platforms/helpers.py, gateway/platforms/base.py at commit 1ae3c55e4bb16f495ebf0536a5672782d903e15e
 # https://github.com/NousResearch/hermes-agent, MIT License, see LICENSE in this folder.
 # Copied by sync_hermes.py; only the imports are changed, see UPSTREAM.json. Don't edit by hand.
 
@@ -33,7 +33,7 @@ def _hash_code(code: str, salt: bytes) -> str:
 
 # --- gateway/platforms/helpers.py ---
 
-def fence_state_after(text: str, in_code: bool = False, lang: str = "") -> "tuple[bool, str]":
+def fence_state_after(text: str, in_code: bool = False, lang: str = "") -> tuple[bool, str]:
     """Walk ``text`` line by line toggling on ``` lines; return the final (in_code, lang)."""
     for line in text.split("\n"):
         stripped = line.strip()
@@ -69,7 +69,7 @@ def _custom_unit_to_cp(s: str, budget: int, len_fn) -> int:
 
 
 def truncate_message(content: str, max_length: int = 4096,
-                     len_fn: Optional["Callable[[str], int]"] = None) -> List[str]:
+                     len_fn: Optional[Callable[[str], int]] = None) -> list[str]:
     """Split a long message into chunks preserving code blocks: a split inside a fence closes it
     at the chunk end and reopens it (same language tag) in the next; multi-chunk output gets
     ``(1/3)`` indicators. ``len_fn`` overrides ``len`` (``utf16_len`` for Telegram)."""
@@ -78,7 +78,7 @@ def truncate_message(content: str, max_length: int = 4096,
         return [content]
     INDICATOR_RESERVE = 10   # room for " (XX/XX)"
     FENCE_CLOSE = "\n```"
-    chunks: List[str] = []
+    chunks: list[str] = []
     remaining = content
     carry_lang: Optional[str] = None  # language tag ("" ok) when previous chunk ended mid-fence
     while remaining:

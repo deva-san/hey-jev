@@ -1,4 +1,5 @@
 """Hey Jev's window on Windows: status on top, sidebar tabs for stats, the dictionary, apps, history, settings and keys."""
+import datetime
 import json
 import os
 import queue
@@ -10,12 +11,14 @@ import tkinter as tk
 import webbrowser
 from tkinter import messagebox, ttk
 
+import activity
 import hermes_memory
 import history
 import messaging
 import opencode
 import settings
 import tasks as tasking
+import todo
 import winplatform as win
 from bubble import Bubble
 from dictation import HISTORY, read_vocab, save_vocab
@@ -31,11 +34,19 @@ HINTS = {"ptt": "Hold right Alt to talk", "wake": "Say \u201cHey Jev\u201d, \u20
                                                  "Holding right Alt works too."}
 ENGINES = {"parakeet": "Parakeet (hears her name best)", "nemotron": "Nemotron (writes as you talk)",
            "whisper": "Whisper small.en (slower)"}
+WAITS = {"patient": "Patient (lets you pause)", "even": "Even", "quick": "Quick (can cut you off)"}  # speech.Listener
 MODES = ("ptt", "wake")
 MODE_LABELS = {"ptt": "Hold Right Alt", "wake": "Hey Jev"}
-TABS = (("home", "Home"), ("tasks", "Tasks"), ("contacts", "Contacts"), ("dict", "Dictionary"), ("apps", "Apps"),
-        ("hist", "Dictation history"), ("mem", "Memory"), ("priv", "Privacy"), ("settings", "Settings"),
-        ("keys", "Keys"))
+TABS = (("home", "Home"), ("todo", "To-do"), ("tasks", "Tasks"), ("contacts", "Contacts"), ("dict", "Dictionary"),
+        ("apps", "Apps"), ("hist", "Dictation history"), ("mem", "Memory"), ("priv", "Privacy"),
+        ("island", "Island"), ("settings", "Settings"), ("keys", "Keys"))
+# the Island tab's choices: what's saved, what it says
+POPUP_STYLES = {"island": "Her island at the top", "card": "The iPhone card at the top",
+                "pill": "The Siri pill at the bottom"}
+ISLAND_STYLES = {"capsule": "Glass capsule", "pill": "Black pill"}
+ISLAND_FACES = {"eyes": "Her eyes", "wave": "The Siri wave"}
+ISLAND_THEMES = {"amoled": "AMOLED black", "dark": "Dark", "light": "Light", "system": "Like Windows"}
+ISLAND_ALIGN = {"center": "In the middle", "left": "On the left", "right": "On the right"}
 hermes_memory.set_memory_dir(os.path.join(win.APPDATA_DIR, "memories"))  # the same places siri.py keeps them
 hermes_memory.set_home(win.APPDATA_DIR)
 skills.set_skills_dir(os.path.join(win.APPDATA_DIR, "skills"))
@@ -74,6 +85,10 @@ HOW_TO = ("Say \u201cHey Jev\u201d and what you want: \u201cplay Arijit Singh so
           "She remembers: \u201cremember that my website CareerID is careerid.in\u201d, then \u201copen CareerID\u201d. Ask "
           "\u201cwhat did we talk about yesterday?\u201d, or about the PC: \u201chow much space is on my C drive?\u201d, "
           "\u201cis my laptop charging?\u201d. Browser profiles work by name: \u201copen Gmail in my Work profile\u201d.\n"
+          "She keeps a to-do list: \u201cadd milk to my to-do list\u201d, \u201cwhat\u2019s on my to-do list?\u201d, "
+          "\u201ccross off milk\u201d, and it\u2019s in the To-do tab too. She finds your files by name: \u201cfind my "
+          "resume\u201d, \u201copen the offer letter PDF\u201d, then \u201copen the second one\u201d or \u201cshow me where "
+          "it is\u201d.\n"
           "She can see the screen when you ask: \u201cwhat\u2019s on my screen?\u201d, \u201cclick the second video\u201d, "
           "\u201cread this page to me\u201d, \u201csearch for lofi in this box\u201d.\n"
           "Ask her about the world: \u201cwho directed Iron Man 2?\u201d, \u201cwhat\u2019s the latest news?\u201d, "
@@ -101,9 +116,10 @@ PRIVACY = (
      "said in the half minute before it, so she can tell a conversation with someone else. When she looks something "
      "up for it, the answer: how full a drive is, what you said on a day, what a web page says. Once a day, the day "
      "before's conversation, for a short summary and anything worth remembering, and the turns her learning looks "
-     "back over, always to space-bunny-free, which keeps nothing and isn't trained on. Other free models may use what "
-     "you send to improve the model: opencode.ai/docs/zen lists which on OpenCode, and Kilo says some of its free "
-     "ones log what they're sent."),
+     "back over. With your Anthropic key saved, all of that goes to Claude Haiku on Anthropic's API, billed to your "
+     "Anthropic account; a free model gets a second try only when Haiku is slow. The day's summary and her learning "
+     "stay on Haiku, never a free model. Free models may use what you send to improve the model: "
+     "opencode.ai/docs/zen lists which on OpenCode, and Kilo says some of its free ones log what they're sent."),
     ("Messaging  ·  stays on this PC", "Who you can message and their number or username are kept in "
      "%APPDATA%\\Hey Jev\\contacts.json, on this PC. The chat is opened with WhatsApp's or Telegram's own link, so "
      "the message goes to that app and nowhere else, and nothing is sent until you say yes. In an app with no link "
@@ -114,6 +130,17 @@ PRIVACY = (
     ("Background tasks  ·  stays on this PC", "Tasks, schedules, command text, working folders, status and command "
      "output are kept in %APPDATA%\\Hey Jev\\tasks.db. Command output is never sent to the answer model or spoken; "
      "the Tasks tab shows it. Jev only says whether it finished."),
+    ("To-do list and your files  \u00b7  kept on this PC", "Your to-do list is kept in %APPDATA%\\Hey Jev\\todo.json, "
+     "and goes to the answer model with what you ask, as text, so \u201cwhat\u2019s left?\u201d makes sense. To find a "
+     "file she asks Windows Search\u2019s index on this PC, by name only, never what\u2019s inside it, and your "
+     "phone\u2019s files only when you say \u201con my phone\u201d. The names, folders and dates of the files she found "
+     "reach the answer model only when it was the one that asked. She opens documents, pictures, videos and songs; "
+     "a program or script she found only gets its folder shown."),
+    ("Her island  \u00b7  stays on this PC", "The island at the top of the screen reads what Windows already keeps "
+     "here: the notification list, for a popup from the apps you pick in the Island tab, what\u2019s playing and its "
+     "cover from Windows\u2019 media controls, the battery, and her own timers. None of it is sent anywhere, and the "
+     "notifications it shows aren\u2019t kept. Dictation is tidied here too, the ums and the words you put right, by "
+     "rules on this PC, not a model."),
     ("Internet  \u00b7  search words, web addresses, roughly where you are", "When you ask about the world, the words "
      "to look up go to Wikipedia, DuckDuckGo\u2019s instant answers and Google News, and she opens pages by their "
      "address, as a browser does. The weather comes from Open-Meteo, for roughly where you are: ipinfo.io works that "
@@ -128,16 +155,19 @@ PRIVACY = (
     ("Vision  \u00b7  a screenshot", "Only when you ask about the screen, or for something she has to see to do, like "
      "\u201cclick the second video\u201d or \u201cwhat\u2019s on my screen?\u201d: a picture of the screen in front goes to "
      "the answer model, and again after each step she takes there, five at most. Never otherwise. Her popup is left "
-     "out of it, and without her name she asks first. Turn it off in Settings."),
+     "out of it, and without her name she only looks when your words plainly ask for something on the screen "
+     "(\u201cturn on night light\u201d, \u201cwhat\u2019s on my screen?\u201d). Turn it off in Settings."),
     ("YouTube  \u00b7  search words", "When she plays something, what you asked for, to find the top video."),
     ("Fish Audio  \u00b7  text", "The text of her replies, to turn into her voice. Scripted replies are saved after the "
      "first time, so most are never sent again."),
 )
 KEY_ROWS = (
-    ("OpenCode Zen", "OPENCODE_ZEN_API_KEY", "Works out what you asked and answers, on free models only",
+    ("Anthropic", "ANTHROPIC_API_KEY", "Claude Haiku 5.5, her main model, paid per request",
+     "https://platform.claude.com/settings/keys"),
+    ("OpenCode Zen", "OPENCODE_ZEN_API_KEY", "Free answer models, for when Haiku isn't picked in Settings",
      "https://opencode.ai/zen"),
     ("Fish Audio", "FISH_AUDIO_API_KEY", "Her voice, on Fish's free model", "https://fish.audio/?fpr=henryk"),
-    ("Kilo", "KILO_API_KEY", "More free models, like Nemotron 3 Super, free ones only",
+    ("Kilo", "KILO_API_KEY", "More free models, like Nemotron 3 Ultra, Haiku's second try when it's slow",
      "https://kilo.ai/docs/gateway/authentication"),
     ("Telegram bot", "TELEGRAM_BOT_TOKEN", "Jev on your phone: make a bot with @BotFather, then Settings > Phone > "
      "Pair", "https://core.telegram.org/bots/tutorial#obtain-your-bot-token"),
@@ -160,6 +190,47 @@ def app_key(name):
 
 def split_list(text):
     return [a.strip() for a in text.split(",") if a.strip()]
+
+
+def apps_extra_json(value):
+    """apps.json's "_sites" written back the way it's laid out by hand, a site a line; "_bare" on one line."""
+    if isinstance(value, dict) and value:
+        return "{\n" + ",\n".join(f"    {json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}"
+                                  for k, v in value.items()) + "\n  }"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def when_text(t):
+    """A time as the To-do tab shows it: "Today 3:40 pm", "Yesterday 9:05 am", "Mon 12 Oct"."""
+    try:
+        when = datetime.datetime.fromtimestamp(float(t))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+    days = (datetime.date.today() - when.date()).days
+    clock = when.strftime("%I:%M %p").lstrip("0").lower()
+    if days == 0:
+        return f"Today {clock}"
+    if days == 1:
+        return f"Yesterday {clock}"
+    return when.strftime("%a %d %b" if days < 300 else "%d %b %Y").replace(" 0", " ")
+
+
+def skill_line(entry):
+    """A skill as the Memory tab lists it: "work-mode: Their work setup  (you say “work mode”)", its emoji first if it
+    has one, "(put in by hand)" for one in skills\\imported, and why it's hidden if it is (skills.why_hidden), so a
+    skill dropped in that never shows up in what she does says why."""
+    says = ", ".join(f"“{t}”" for t in entry["triggers"])
+    line = (f"{entry['emoji']} " if entry.get("emoji") else "") + f"{entry['name']}: {entry['description']}"
+    line += (f"  (you say {says})" if says else "") + ("  (put in by hand)" if entry.get("imported") else "")
+    return line + (f"  (hidden: {entry['hidden']})" if entry.get("hidden") else "")
+
+
+def todo_stamp():
+    """When the to-do list last changed, so the tab only reads it again when it has."""
+    try:
+        return os.stat(todo.PATH).st_mtime_ns
+    except OSError:
+        return None
 
 
 class HintEntry(ttk.Entry):
@@ -219,10 +290,11 @@ class AssistantWindow:
         self.bubble = Bubble(root)
         self._build_sidebar()
         self._build_main()
-        self.pages = {"home": self._build_home(), "tasks": self._build_tasks(),
+        self.pages = {"home": self._build_home(), "todo": self._build_todo(), "tasks": self._build_tasks(),
                       "contacts": self._build_contacts(), "dict": self._build_dictionary(),
                       "apps": self._build_apps(), "hist": self._build_history(), "mem": self._build_memory(),
-                      "priv": self._build_privacy(), "settings": self._build_settings(), "keys": self._build_keys()}
+                      "priv": self._build_privacy(), "island": self._build_island(),
+                      "settings": self._build_settings(), "keys": self._build_keys()}
         self._select_tab("keys" if missing_secrets() else "home")
         self.root.after(50, self._drain)
         self.root.after(500, self._tick)
@@ -488,6 +560,19 @@ class AssistantWindow:
                 self._load_contacts("Saved")
             except (ValueError, RuntimeError) as exc:
                 self._load_contacts(f"Couldn't save: {exc}")
+        elif tree is getattr(self, "todo_table", None):
+            if ident != "text":
+                self._load_todo("Only what it says can be changed")
+                return
+            try:
+                item = todo.edit(row, value)
+            except ValueError:
+                self._load_todo("Type what it says, or pick it and press Remove", error=True)
+                return
+            except (LookupError, OSError) as exc:
+                self._load_todo(f"Couldn't save: {exc}", error=True)
+                return
+            self._load_todo(f"Saved \u201c{item['text']}\u201d")
         elif tree is self.table:
             entry = self.vocab[self.visible[row]]
             if ident == "word":
@@ -566,7 +651,8 @@ class AssistantWindow:
             (f"{sum(actions.values()):,}", "Commands done", f"from {heard:,} things she heard"),
             (fav_name if len(fav_name) <= 14 else fav_name[:13] + "\u2026", "Most opened app",
              f"opened {opened[fav]} times" if fav else "Say \u201cHey Jev, open Spotify\u201d"),
-            (f"{answered:,}", "Questions answered", "by free models, $0"),
+            (f"{answered:,}", "Questions answered", "now by Claude Haiku" if opencode.is_anthropic(
+                settings.get("llm_model") or "") else "by free models, $0"),
         )
         for (value, title, sub), (v, t, s) in zip(self.stat_cards, cards):
             value.configure(text=v)
@@ -617,6 +703,101 @@ class AssistantWindow:
         messaging.forget_contact(key)
         self._load_contacts(f"Removed {key}")
 
+    # ------------------------------------------------------------------ to-do
+    def _build_todo(self):
+        page = self._page("To-do", "Say \u201cHey Jev, add milk to my to-do list\u201d, \u201cwhat\u2019s on my to-do "
+                          "list?\u201d or \u201ccross off milk\u201d. It stays on this PC. Things you tick off stay here a "
+                          "week, in grey, so one ticked by mistake can be put back. Double-click one to fix it.")
+        top = tk.Frame(page, bg=BG)
+        top.pack(fill="x", pady=(0, self.px(10)))
+        self.new_todo = HintEntry(top, "Something to do", width=48)
+        self.new_todo.pack(side="left")
+        self.new_todo.bind("<Return>", lambda e: self.add_todo())
+        ttk.Button(top, text="Add", command=self.add_todo).pack(side="left", padx=self.px(8))
+        frame, self.todo_table = self._table(page, (("text", "To do", 390), ("added", "Added", 130),
+                                                    ("done", "Done", 130)))
+        self.todo_table.tag_configure("done", foreground=MUTED)
+        frame.pack(fill="both", expand=True)
+        bar = tk.Frame(page, bg=BG)
+        bar.pack(fill="x", pady=(self.px(10), 0))
+        for i, (text, action) in enumerate((("Done", "done"), ("Put back", "back"), ("Remove", "remove"))):
+            ttk.Button(bar, text=text, command=lambda a=action: self._todo_action(a)).pack(
+                side="left", padx=(self.px(6) if i else 0, 0))
+        self.todo_message = self._label(bar, "", self.f_small, MUTED)
+        self.todo_message.pack(side="left", padx=self.px(10))
+        self.todo_seen = None
+        self._load_todo()
+        return page
+
+    def _load_todo(self, message=None, error=False):
+        self.todo_seen = todo_stamp()
+        try:
+            found = todo.items(done=True)
+        except Exception as exc:  # a file on this PC, but a broken one shouldn't take the window with it
+            self.todo_message.configure(text=f"Couldn't read your to-do list: {exc}", fg=ERROR)
+            return
+        keep = self.todo_table.selection()
+        self.todo_table.delete(*self.todo_table.get_children())
+        left = [i for i in found if not i.get("done")]
+        done = sorted((i for i in found if i.get("done")), key=lambda i: -float(i.get("done_at") or 0))
+        for item in left + done:
+            iid = str(item.get("id", ""))
+            if not iid.isdigit() or self.todo_table.exists(iid):  # one edited by hand, without a number of its own
+                continue
+            self.todo_table.insert("", "end", iid=iid, tags=("done",) if item.get("done") else (),
+                                   values=(item["text"], when_text(item.get("added")),
+                                           when_text(item.get("done_at")) if item.get("done") else ""))
+        for iid in keep:
+            if self.todo_table.exists(iid):
+                self.todo_table.selection_set(iid)
+        note = message or (f"{len(left)} to do" + (f" \u00b7 {len(done)} done this week" if done else ""))
+        self.todo_message.configure(text=note, fg=ERROR if error else MUTED)
+
+    def add_todo(self):
+        try:
+            item, new = todo.add(self.new_todo.get())
+        except (ValueError, OSError) as exc:
+            msg = "Type something to do first" if isinstance(exc, ValueError) else f"Couldn't save: {exc}"
+            self.todo_message.configure(text=msg, fg=ERROR)
+            return
+        self.new_todo.clear()
+        self.new_todo.focus_set()
+        self._load_todo(f"Added \u201c{item['text']}\u201d" if new else f"\u201c{item['text']}\u201d is already there")
+
+    def _todo_action(self, action):
+        sel = self.todo_table.selection()
+        if not sel:
+            self._load_todo("Pick one in the list first", error=True)
+            return
+        item_id = int(sel[0])
+        try:
+            if action == "done":
+                item = todo.tick(item_id)
+            elif action == "back":
+                item = todo.undo(item_id)
+            else:
+                item = todo.drop(item_id)
+        except (LookupError, OSError) as exc:
+            self._load_todo(str(exc), error=True)
+            return
+        self._load_todo({"done": "Ticked off", "back": "Put back", "remove": "Removed"}[action] +
+                        f" \u201c{item['text']}\u201d")
+
+    def _todo_tick(self):
+        """While the To-do tab is up, what she adds or ticks off by voice shows straight away."""
+        if getattr(self, "current_tab", None) == "todo" and todo_stamp() != self.todo_seen:
+            self._load_todo()
+
+    def _tasks_tick(self):
+        """While the Tasks tab is up, a task starting, moving on, finishing or waiting on you shows straight away:
+        looked at when anything she's working on changed (activity.version), and read again only when what the
+        island says of the tasks did, not for each round of a task in an app."""
+        if getattr(self, "current_tab", None) != "tasks" or activity.version == self.tasks_version:
+            return
+        self.tasks_version = activity.version
+        if activity.signature("task:") != self.tasks_seen:
+            self._load_tasks()
+
     # ------------------------------------------------------------------ tasks
     def _build_tasks(self):
         page = self._page("Background tasks", "Durable work and reminders. They survive a restart; commands that can "
@@ -635,9 +816,12 @@ class AssistantWindow:
                                                                                            padx=(self.px(6), 0))
         self.tasks_message = self._label(bar, "", self.f_small, MUTED)
         self.tasks_message.pack(side="left", padx=self.px(10))
+        self.tasks_seen = self.tasks_version = None  # the island's rows for tasks, and its version, last read
         return page
 
     def _load_tasks(self, message=None):
+        self.tasks_seen = activity.signature("task:")
+        live = {item["key"]: item for item in activity.snapshot()}  # how far each running one has got
         self.tasks_table.delete(*self.tasks_table.get_children())
         try:
             rows = self.task_store.list(80)
@@ -648,8 +832,11 @@ class AssistantWindow:
             due = tasking.describe_due(task["due"]) if task["status"] in ("queued", "waiting_approval") else "—"
             result = task.get("error") or task.get("result") or ""
             result = " ".join(str(result).split())
+            status = task["status"].replace("_", " ")
+            note = (live.get(f"task:{task['id']}") or {}).get("note") if task["status"] == "running" else ""
             self.tasks_table.insert("", "end", iid=str(task["id"]), values=(task["id"], task["description"],
-                                    task["status"].replace("_", " "), due, result[:100]))
+                                    f"{status}, {note[0].lower()}{note[1:]}" if note else status, due,
+                                    result[:100]))
         self.tasks_message.configure(text=message or f"{len(rows)} task{'s' if len(rows) != 1 else ''}", fg=MUTED)
 
     def _task_action(self, action):
@@ -745,9 +932,12 @@ class AssistantWindow:
         self.apps_message = self._bottom_bar(page, "Remove", self.remove_app)
         with open(APPS_FILE, encoding="utf-8") as f:
             raw = json.load(f)
-        # each row is [name you say (the key), app, heard as, spoken name in replies or None, exe names]
-        self.apps = []
+        # each row is [name you say (the key), app, heard as, spoken name in replies or None, exe names]. Keys
+        # starting "_" are her sites and the apps said on their own (siri.SITES, BARE_APPS), kept as they are on save
+        self.apps, self.apps_extra = [], {k: v for k, v in raw.items() if k.startswith("_")}
         for k, v in raw.items():
+            if k.startswith("_"):
+                continue
             if isinstance(v, str):
                 self.apps.append([k, v, [], None, []])
             else:
@@ -772,6 +962,7 @@ class AssistantWindow:
             else:
                 value = app
             lines.append(f"  {json.dumps(key)}: {json.dumps(value, ensure_ascii=False)}")
+        lines += [f"  {json.dumps(k)}: {apps_extra_json(v)}" for k, v in getattr(self, "apps_extra", {}).items()]
         try:
             with open(APPS_FILE, "w", encoding="utf-8") as f:
                 f.write("{\n" + ",\n".join(lines) + "\n}\n")  # one app per line, like the file you'd write by hand
@@ -865,10 +1056,11 @@ class AssistantWindow:
         return page
 
     def _load_memory(self, message=None):
-        store = hermes_memory.MemoryStore()
+        store = hermes_memory.store()
         try:
             store.load_from_disk()
-            learned = skills.list_skills()
+            # the hidden ones too, with why (skills.why_hidden); one just dropped in is scanned off the window's thread
+            learned = skills.list_skills(hidden=True, wait=False)
         except Exception as exc:
             self.mem_message.configure(text=f"Couldn't read her memory: {exc}", fg=ERROR)
             return
@@ -878,8 +1070,7 @@ class AssistantWindow:
         about = {"user": "You", "memory": "Her notes", "skill": "Skill"}
         for row, (target, entry) in enumerate(self.memories):
             if target == "skill":  # "work-mode: Their work setup (you say: work mode)"
-                says = ", ".join(f"\u201c{t}\u201d" for t in entry["triggers"])
-                entry = f"{entry['name']}: {entry['description']}" + (f"  (you say {says})" if says else "")
+                entry = skill_line(entry)
             self.mem_table.insert("", "end", iid=str(row), values=(about[target], " ".join(entry.split())))
         try:
             turns = history.count()
@@ -896,9 +1087,10 @@ class AssistantWindow:
             return
         target, entry = self.memories[int(sel[0])]
         if target == "skill":
-            result = skills.delete_skill(entry["dir"], really=True)  # you asked: gone, not archived
+            # you asked: gone, not archived; one put in by hand from skills\imported, not hers of the same name
+            result = skills.delete_skill(entry["dir"], really=True, imported=bool(entry.get("imported")))
         else:
-            result = hermes_memory.memory_tool(hermes_memory.MemoryStore(), "remove", target, old_text=entry)
+            result = hermes_memory.memory_tool(hermes_memory.store(), "remove", target, old_text=entry)
         if result.get("success"):
             self._load_memory("Forgotten")
         else:
@@ -942,6 +1134,205 @@ class AssistantWindow:
             self._label(page, body, fg=MUTED, wraplength=self.px(660)).pack(fill="x", pady=(0, self.px(12)))
         return page
 
+    # ------------------------------------------------------------------ the island
+    def _build_island(self):
+        import island_plugins as plugins
+        page = self._page("Island", "Her island at the top of the screen, like Nixi\u2019s: her eyes, your words "
+                          "under it as you talk, and while she isn\u2019t busy what\u2019s playing, new notifications, "
+                          "the battery and timers. Changes show on it straight away.", scroll=True)
+        form = tk.Frame(page, bg=BG)
+        form.pack(fill="x")
+        form.grid_columnconfigure(0, weight=1)
+        count = [0]
+        self.island_jobs, self.island_apps_loaded = {}, False
+
+        def row(title, sub):
+            r = count[0] * 2
+            count[0] += 1
+            self._label(form, title, self.f_h2).grid(row=r, column=0, sticky="w", pady=(self.px(12), 0))
+            self._label(form, sub, self.f_small, MUTED, wraplength=self.px(330)).grid(row=r + 1, column=0, sticky="w")
+            return r
+
+        def place(widget, r):
+            widget.grid(row=r, column=1, rowspan=2, sticky="e", padx=(self.px(12), 0))
+            return widget
+
+        def combo(r, key, choices, change=None):
+            box = place(ttk.Combobox(form, state="readonly", width=26, values=list(choices.values())), r)
+            box.set(choices.get(settings.get(key), next(iter(choices.values()))))
+            done = change or (lambda value: self.island_changed(key, value))
+            box.bind("<<ComboboxSelected>>", lambda e: done(list(choices)[box.current()]))
+
+        def check(r, key, text):
+            var = tk.BooleanVar(value=bool(settings.get(key)))
+            place(ttk.Checkbutton(form, text=text, variable=var,
+                                  command=lambda: self.island_changed(key, var.get())), r)
+
+        def slider(r, key, lo, hi, unit):
+            frame = place(tk.Frame(form, bg=BG), r)
+            start = settings.get(key)
+            start = int(lo if start is None else start)
+            scale = ttk.Scale(frame, from_=lo, to=hi, orient="horizontal", length=self.px(190))
+            scale.set(start)
+            shown = self._label(frame, f"{start}{unit}", self.f_small, MUTED, width=6)
+
+            def moved(value):  # saved once it stops moving, so dragging doesn't rebuild it every step
+                v = int(round(float(value)))
+                shown.configure(text=f"{v}{unit}")
+                job = self.island_jobs.pop(key, None)
+                if job:
+                    self.root.after_cancel(job)
+                self.island_jobs[key] = self.root.after(250, lambda: self.island_changed(key, v))
+            scale.configure(command=moved)
+            scale.pack(side="left")
+            shown.pack(side="left", padx=(self.px(8), 0))
+
+        combo(row("Popup", "Her island has her eyes and the plugins below. The card and the pill show only her "
+                           "turns."), "popup_style", POPUP_STYLES, self.style_changed)
+        combo(row("Style", "The glass capsule floats under the top of the screen, her glowing eyes following the "
+                           "mouse; the black pill sits at the top, as it was."), "island_style", ISLAND_STYLES)
+        combo(row("Face", "Her eyes blink, look about and react: hearts when you say thanks, glasses while she reads "
+                          "the screen, headphones while music plays. Or the Siri wave as she listens and talks."),
+              "island_face", ISLAND_FACES)
+        combo(row("Theme", "AMOLED is pure black, like a phone's notch. Like Windows follows light and dark mode."),
+              "island_theme", ISLAND_THEMES)
+        check(row("Border", "A thin line round it, so it shows on a dark wallpaper."), "island_border",
+              "Show a border")
+        combo(row("Where", "Along the top of the screen you're working on."), "island_align", ISLAND_ALIGN)
+        slider(row("Across", "Moves it left or right from there."), "island_x", -400, 400, " px")
+        slider(row("Down", "How far it sits from the top of the screen."), "island_y", 0, 80, " px")
+        slider(row("Size", "Bigger or smaller, eyes, words and all."), "island_scale", 70, 150, "%")
+        slider(row("Corners", "How round its corners are."), "island_radius", 6, 40, " px")
+        check(row("Always there", "Her eyes stay up while nothing's going on, and look at the mouse when you point "
+                                  "at them. Off, it shows only when there's something to show."), "island_always",
+              "Keep her eyes up")
+        check(row("Full screen", "Out of the way of a full-screen game, video or presentation. Her own turns still "
+                                 "show."), "island_hide_fullscreen", "Hide over full-screen apps")
+        slider(row("Popups stay", "How long a notification or the battery stays up. Pointing at one keeps it."),
+               "island_auto_hide", 2, 15, " s")
+
+        self._label(page, "Plugins", self.f_status).pack(fill="x", pady=(self.px(24), 0))
+        self._label(page, "What the island shows while she isn't busy. Each one reads only what Windows already "
+                          "keeps on this PC, and nothing it reads leaves it.", self.f_small, MUTED,
+                    wraplength=self.px(660)).pack(fill="x")
+        found = tk.Frame(page, bg=BG)
+        found.pack(fill="x")
+        found.grid_columnconfigure(0, weight=1)
+        for i, cls in enumerate(plugins.PLUGINS):
+            self._label(found, cls.name, self.f_h2).grid(row=i * 2, column=0, sticky="w", pady=(self.px(12), 0))
+            self._label(found, cls.description, self.f_small, MUTED, wraplength=self.px(330)).grid(
+                row=i * 2 + 1, column=0, sticky="nw")
+            box = tk.Frame(found, bg=BG)
+            box.grid(row=i * 2, column=1, rowspan=2, sticky="nw", padx=(self.px(12), 0), pady=(self.px(12), 0))
+            on = (settings.get("island_plugins") or {}).get(cls.id)
+            var = tk.BooleanVar(value=cls.default_on if on is None else bool(on))
+            ttk.Checkbutton(box, text="On", variable=var,
+                            command=lambda c=cls, v=var: self.plugin_changed(c.id, v.get())).pack(anchor="w")
+            opts = plugins.get_options(cls.id)
+            for key, label, default in cls.options:
+                ov = tk.BooleanVar(value=bool(opts.get(key, default)))
+                ttk.Checkbutton(box, text=label, variable=ov,
+                                command=lambda c=cls, k=key, v=ov: self.plugin_option(c.id, k, v.get())
+                                ).pack(anchor="w")
+
+        self._label(page, "Notifications from", self.f_h2).pack(fill="x", pady=(self.px(20), 0))
+        self._label(page, "The apps whose notifications pop up on the island. The ones people message you in are on "
+                          "to start with. Your phone's come through Phone Link.", self.f_small, MUTED,
+                    wraplength=self.px(660)).pack(fill="x")
+        self.island_apps_box = tk.Frame(page, bg=BG)
+        self.island_apps_box.pack(fill="x", pady=(self.px(6), 0))
+        self._label(self.island_apps_box, "Looking for them\u2026", self.f_small, MUTED).grid(row=0, column=0,
+                                                                                              sticky="w")
+        bar = tk.Frame(page, bg=BG)
+        bar.pack(fill="x", pady=(self.px(18), self.px(8)))
+        ttk.Button(bar, text="Preview", command=self.island_preview).pack(side="left")
+        self.island_note = self._label(bar, "Shows a notification on the island, the way they come.", self.f_small,
+                                       MUTED)
+        self.island_note.pack(side="left", padx=self.px(10))
+        return page
+
+    def island_changed(self, key, value):
+        if settings.get(key) == value:
+            return
+        settings.put(key, value)
+        getattr(self.bubble, "reload", lambda: None)()
+
+    def style_changed(self, style):
+        if settings.get("popup_style") == style:
+            return
+        settings.put("popup_style", style)
+        old = self.bubble
+        getattr(old, "destroy", old.close)()
+        self.bubble = Bubble(self.root)  # it falls back to the next one if Windows won't draw it
+        got = "island" if hasattr(self.bubble, "reload") else "pill" if type(self.bubble).__name__ == "Pill" else "card"
+        name = POPUP_STYLES[got][0].lower() + POPUP_STYLES[got][1:]  # "the Siri pill at the bottom"
+        self.island_note.configure(text=f"Switched to {name}" if got == style else
+                                   f"That one didn't start here, so it's {name}", fg=MUTED if got == style else ERROR)
+
+    def plugin_changed(self, plugin_id, on):
+        chosen = dict(settings.get("island_plugins") or {})
+        chosen[plugin_id] = bool(on)
+        settings.put("island_plugins", chosen)
+        getattr(self.bubble, "reload", lambda: None)()
+
+    def plugin_option(self, plugin_id, key, value):
+        chosen = {k: dict(v) for k, v in (settings.get("island_plugin_options") or {}).items()}
+        chosen.setdefault(plugin_id, {})[key] = bool(value)
+        settings.put("island_plugin_options", chosen)
+        getattr(self.bubble, "reload", lambda: None)()
+
+    def island_app_changed(self, name, on):
+        chosen = dict(settings.get("island_apps") or {})
+        chosen[name] = bool(on)
+        settings.put("island_apps", chosen)
+
+    def island_preview(self):
+        if not hasattr(self.bubble, "preview"):
+            self.island_note.configure(text="The preview is for her island: pick it under Popup above.", fg=ERROR)
+        elif not self.popup:
+            self.island_note.configure(text="Turn on Show the popup in Settings first.", fg=ERROR)
+        else:
+            self.island_note.configure(text="Shows a notification on the island, the way they come.", fg=MUTED)
+            self.bubble.preview()
+
+    def _load_island_apps(self):
+        """The apps that have notified lately, read on a thread (Windows' list of them), once."""
+        if self.island_apps_loaded:
+            return
+        self.island_apps_loaded = True
+        import island_plugins as plugins
+
+        def read():
+            try:
+                found = plugins.notification_apps()
+            except Exception as exc:
+                print(f"  couldn't list the apps that notify: {exc!r}")
+                found = []
+            self.events.put(("island_apps", found))
+        threading.Thread(target=read, daemon=True).start()
+
+    def _show_island_apps(self, found):
+        import island_plugins as plugins
+        box = self.island_apps_box
+        for child in box.winfo_children():
+            child.destroy()
+        if not found:
+            self._label(box, "No app has sent a notification here lately.", self.f_small, MUTED).grid(
+                row=0, column=0, sticky="w")
+            return
+        cols = 3
+        for c in range(cols):
+            box.grid_columnconfigure(c, weight=1, uniform="apps")
+        for i, app in enumerate(found):
+            name = app["name"]
+            var = tk.BooleanVar(value=plugins.app_on(name, app["messaging"]))
+            text = name if len(name) <= 24 else name[:23] + "\u2026"
+            if app["phone"] and not app["messaging"]:
+                text += " (phone)"
+            ttk.Checkbutton(box, text=text, variable=var,
+                            command=lambda n=name, v=var: self.island_app_changed(n, v.get())
+                            ).grid(row=i // cols, column=i % cols, sticky="w", pady=1)
+
     # ------------------------------------------------------------------ settings
     def _build_settings(self):
         page = self._page("Settings", "The microphone Jev listens with, the models she uses, and the window.", scroll=True)
@@ -960,11 +1351,12 @@ class AssistantWindow:
         self.mic_menu.grid(row=0, column=1, rowspan=2, sticky="e")
         self.mic_menu.bind("<<ComboboxSelected>>", lambda e: self.mic_changed())
 
-        row(1, "Answer model", "Free model on OpenCode Zen or Kilo that works out what you asked and answers. "
-                               "Refresh lists the free ones that answer here, fastest first.")
+        row(1, "Answer model", "The model that works out what you asked and answers: Claude Haiku 5.5 with your "
+                               "Anthropic key (paid per request), or a free one on OpenCode Zen or Kilo. Refresh lists "
+                               "the free ones that answer here, fastest first.")
         models = tk.Frame(form, bg=BG)
         models.grid(row=2, column=1, rowspan=2, sticky="e")
-        self.llm_menu = ttk.Combobox(models, width=29, values=opencode.FALLBACK_FREE)
+        self.llm_menu = ttk.Combobox(models, width=29, values=opencode.PAID_CHOICES + opencode.FALLBACK_FREE)
         self.llm_menu.set(settings.get("llm_model"))
         self.llm_menu.pack(side="left")
         ttk.Button(models, text="Refresh", command=self.refresh_models).pack(side="left", padx=(self.px(6), 0))
@@ -989,8 +1381,9 @@ class AssistantWindow:
         ttk.Checkbutton(form, text="Keep window on top", variable=self.on_top_var,
                         command=lambda: self.toggle_on_top(self.on_top_var.get())).grid(row=8, column=1, rowspan=2, sticky="e")
 
-        row(5, "Popup", "A small pill at the bottom of the screen: listening, what she heard, thinking, and what "
-                        "she's saying. Dictation and learning your voice always show it.")
+        row(5, "Popup", "Her island at the top of the screen: her eyes, your words under it as you talk, and what "
+                        "she's doing and saying. Its look and plugins are in the Island tab. Off, it shows only for "
+                        "dictation and learning your voice.")
         self.popup_var = tk.BooleanVar(value=self.popup)
         ttk.Checkbutton(form, text="Show the popup", variable=self.popup_var,
                         command=self.popup_changed).grid(row=10, column=1, rowspan=2, sticky="e")
@@ -1028,11 +1421,20 @@ class AssistantWindow:
             self.voice_menu.bind(event, lambda e: self.voice_changed())
 
         row(9, "Vision", "When you ask about the screen, or for something she has to see like \u201cclick the "
-                         "second video\u201d, she looks at a screenshot of it and acts on it. Never otherwise.")
+                         "second video\u201d, she looks at a screenshot of it and acts on it. Watching, she also reads "
+                         "the window in front on this PC all the time, so your questions come with what\u2019s on it, "
+                         "and speaking up, she glances at it now and then and tells you when something there needs "
+                         "you. Never password or payment pages, or private windows.")
+        eyes = tk.Frame(form, bg=BG)
+        eyes.grid(row=18, column=1, rowspan=2, sticky="e")
         self.vision_var = tk.BooleanVar(value=bool(settings.get("vision")))
-        ttk.Checkbutton(form, text="Let her see the screen", variable=self.vision_var,
-                        command=lambda: settings.put("vision", self.vision_var.get())).grid(row=18, column=1,
-                                                                                            rowspan=2, sticky="e")
+        ttk.Checkbutton(eyes, text="Let her see the screen", variable=self.vision_var,
+                        command=lambda: settings.put("vision", self.vision_var.get())).pack(anchor="e")
+        for key, text in (("screen_watch", "Watch it all the time"), ("screen_commentary", "Speak up about it")):
+            var = tk.BooleanVar(value=bool(settings.get(key)))
+            setattr(self, f"{key}_var", var)
+            ttk.Checkbutton(eyes, text=text, variable=var, command=lambda k=key, v=var: settings.put(k, v.get())
+                            ).pack(anchor="e")
         self.switches = {}
         for r, (key, title, sub, text) in enumerate((
                 ("no_name", "Without her name", "No \u201cHey Jev\u201d needed: she listens all the time, and the "
@@ -1077,6 +1479,13 @@ class AssistantWindow:
         self.phone_state = self._label(form, "", self.f_small, MUTED, wraplength=self.px(620))
         self.phone_state.grid(row=34, column=0, columnspan=2, sticky="w", pady=(self.px(4), 0))
         self._phone_status()
+        row(18, "Wait before answering", "How long she waits once you stop talking. Patient lets you pause in the "
+                                         "middle of a sentence; Quick answers soonest but can cut you off. Takes "
+                                         "effect when Hey Jev next starts.")
+        self.wait_menu = ttk.Combobox(form, state="readonly", width=38, values=list(WAITS.values()))
+        self.wait_menu.set(WAITS.get(settings.get("turn_wait"), WAITS["patient"]))
+        self.wait_menu.grid(row=36, column=1, rowspan=2, sticky="e")
+        self.wait_menu.bind("<<ComboboxSelected>>", lambda e: self.wait_changed())
         self.settings_note = self._label(page, "", self.f_small, MUTED, wraplength=self.px(660))
         self.settings_note.pack(fill="x", pady=(self.px(18), 0))
         self.models_loaded = False
@@ -1251,26 +1660,36 @@ class AssistantWindow:
         settings.put("popup", self.popup)
         if not self.popup:
             self.bubble.hide()
+        getattr(self.bubble, "reload", lambda: None)()  # the island's eyes and plugins go too, or come back
 
     def engine_changed(self):
         engine = list(ENGINES)[self.stt_menu.current()]
         settings.put("stt_engine", engine)
         self._note(f"Saved. Quit Hey Jev and open it again to switch to {ENGINES[engine]}.")
 
+    def wait_changed(self):
+        wait = list(WAITS)[self.wait_menu.current()]
+        settings.put("turn_wait", wait)
+        self._note(f"Saved. Quit Hey Jev and open it again for {WAITS[wait].split(' (')[0]}.")
+
     def model_changed(self, name, box):
         value = box.get().strip()
         if value == (settings.get(name) or ""):
             return
-        if value and not opencode.is_free(value):  # free only, a paid model never gets saved
+        if value and not opencode.allowed(value):  # free ones, or Anthropic's: any other paid model never gets saved
             box.set(settings.get(name))
-            self._note(f"{value} isn't free. Hey Jev only uses free models, the ones ending in -free or :free.",
-                       error=True)
+            self._note(f"{value} isn't free. Hey Jev uses free models (ending in -free or :free), or Claude Haiku "
+                       f"with an Anthropic key.", error=True)
+            return
+        if opencode.is_anthropic(value) and not get_secret("ANTHROPIC_API_KEY"):
+            box.set(settings.get(name))
+            self._note("Add your Anthropic key in the Keys tab first.", error=True)
             return
         settings.put(name, value)
         box.set(settings.get(name))  # an emptied box goes back to the default
         model = settings.get(name)
         key = get_secret("OPENCODE_ZEN_API_KEY")
-        if not key:
+        if not key and not opencode.is_anthropic(model):
             self._note(f"Saved, she now thinks with {model}")
             return
         self._note(f"Saved, checking {model} answers\u2026")
@@ -1299,10 +1718,10 @@ class AssistantWindow:
         """working is None without a key to check with, else the free models that answered, fastest first."""
         current = settings.get("llm_model")
         if working is None:
-            self.llm_menu.configure(values=free or opencode.FALLBACK_FREE)
+            self.llm_menu.configure(values=opencode.PAID_CHOICES + (free or opencode.FALLBACK_FREE))
             self._note(f"{len(free)} free models on OpenCode. Add your OpenCode key in Keys to check which answer here.")
             return
-        self.llm_menu.configure(values=working or free)
+        self.llm_menu.configure(values=opencode.PAID_CHOICES + (working or free))
         if not working:
             self._note("None of OpenCode's free models answer outside OpenCode right now, so only simple commands like "
                        "\u201copen Notepad\u201d or \u201cpause\u201d work.", error=True)
@@ -1369,6 +1788,8 @@ class AssistantWindow:
 
     # ------------------------------------------------------------------ tabs
     def _select_tab(self, key):
+        if key == "todo":
+            self._load_todo()
         if key == "tasks":
             self._load_tasks()
         if key == "contacts":
@@ -1379,6 +1800,8 @@ class AssistantWindow:
             self._load_memory()
         if key == "home":
             self._load_stats()
+        if key == "island":
+            self._load_island_apps()
         if key == "settings":
             self._load_mics()
             if not self.models_loaded:
@@ -1419,6 +1842,8 @@ class AssistantWindow:
                     self._note(event[1], error=event[2])
                 elif event[0] == "models":
                     self._show_models(*event[1:])
+                elif event[0] == "island_apps":
+                    self._show_island_apps(event[1])
         except queue.Empty:
             pass
         self.root.after(50, self._drain)
@@ -1427,6 +1852,9 @@ class AssistantWindow:
         if state == "Heard":  # what she heard you say, on its own line above the popup: nothing else changes
             if self.popup:
                 self.bubble.caption(detail)
+            return
+        if state == "Mood":  # how her eyes react on the island (thanks: hearts): nothing else changes
+            getattr(self.bubble, "react", lambda mood: None)(detail)
             return
         self.status.configure(text=state)
         if detail is not None:  # None keeps what's there, like her last reply
@@ -1467,6 +1895,8 @@ class AssistantWindow:
                     row.pack(fill="x", before=self.hint)
             elif row.winfo_ismapped():
                 row.pack_forget()
+        self._todo_tick()
+        self._tasks_tick()
         self.root.after(500, self._tick)
 
     def set_mode(self, mode):

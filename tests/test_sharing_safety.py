@@ -7,7 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.support import siri
+from tests.support import WIN_ORIGINAL, siri
 
 import telegram_bot
 
@@ -136,7 +136,7 @@ class ExplorerTabs(unittest.TestCase):
                 mock.patch.object(win, "_com", lambda: None), \
                 mock.patch("comtypes.client.CreateObject", lambda *a, **k: shell), \
                 mock.patch.object(win.os.path, "isfile", lambda p: True):
-            return win.selected_files()
+            return WIN_ORIGINAL["selected_files"]()  # the real one, with what it calls patched above
 
     def test_the_tab_in_front(self):
         self.assertEqual(self.tabs("Downloads - File Explorer", ["Documents", "Downloads"]), ["C:/Downloads/a.pdf"])

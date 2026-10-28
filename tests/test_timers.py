@@ -145,6 +145,56 @@ class Schedules(unittest.TestCase):
         self.assertEqual(self.due(step["when"])[0], at(7, 20))
 
 
+class ClockTimes(unittest.TestCase):
+    """22 October, with Haiku's thinking off: "remind me to call Mum at 6 pm" said at 2:40 pm was planned as a timer of
+    12,600 s (20 minutes late) or of 0; and "remind me at 6 to call Mum" in the afternoon was for 6 the next morning."""
+    T240PM = dt.datetime(2026, 10, 22, 14, 40).timestamp()
+
+    def test_the_time_said_last_is_a_reminder_with_no_model(self):
+        for said, when in (("remind me to call mum at 6 pm", "at 6 pm"), ("Remind me to call Mum tomorrow at 9.",
+                                                                          "tomorrow at 9"),
+                           ("remind me to wish rahul tonight at 12", "tonight at 12")):
+            step = siri.quick(said)["steps"][0]
+            self.assertEqual((step["do"], step["when"], step["task"]["kind"]), ("schedule", when, "reminder"), said)
+        self.assertEqual(siri.quick("remind me to call mum at 6 pm")["steps"][0]["task"]["text"], "call mum")
+        self.assertEqual(siri.quick("remind me to drink water every day at 9")["steps"][0]["repeat"],
+                         "every day at 9")  # a repeat, as before
+
+    def test_a_bare_hour_is_the_one_still_to_come(self):
+        four_am, eight_pm = at(22, 4), at(22, 20)
+        for now, when, got in ((self.T240PM, "at 6", "at 6 pm"), (four_am, "at 6", "at 6 am"),
+                               (eight_pm, "at 6", "at 6 am"), (self.T240PM, "at 6:30", "at 6:30 pm"),
+                               (self.T240PM, "at 3", "at 3 pm"), (self.T240PM, "today at 9", "today at 9 pm")):
+            self.assertEqual(siri.upcoming(when, now), got, (when, now))
+        for when in ("at 6 pm", "tonight at 8", "tomorrow at 9", "at 14", "at noon", "at 12"):
+            self.assertEqual(siri.upcoming(when, self.T240PM), when)
+        # the model's own sum, near enough, picks which 6
+        self.assertEqual(siri.upcoming("at 6", self.T240PM, near=self.T240PM + 12600), "at 6 pm")
+        self.assertEqual(siri.upcoming("at 6", self.T240PM, near=self.T240PM + 55000), "at 6 am")
+        with mock.patch.object(siri.time, "time", return_value=self.T240PM):
+            step = siri.quick("remind me at 6 to call mum")["steps"][0]
+        self.assertEqual(tasks.normalize_schedule(step["when"], "", self.T240PM)[0], at(22, 18))
+
+    def test_a_timer_for_a_time_of_day_is_a_reminder_then(self):
+        with mock.patch.object(siri.time, "time", return_value=self.T240PM):
+            for said, timer, when, text in (
+                    ("remind me to call mum at 6 pm, Jev", {"seconds": 12600, "label": "Call Mum"}, "at 6 pm",
+                     "call Mum"),
+                    ("can you remind me to call mum at 6", {"seconds": 0, "label": "Call Mum"}, "at 6 pm", "call Mum"),
+                    ("wake me up at 7 a.m.", {"seconds": 59000, "label": "Wake up"}, "at 7 am", "wake up"),
+                    ("set an alarm for 6:30 am", {"seconds": 57000}, "at 6:30 am", "your reminder"),
+                    ("And I need to go outside at uh five pm. Remind me okay", {"seconds": 8000, "label": "Go outside"},
+                     "at 5 pm", "go outside")):
+                step = siri.clock_timer({"do": "timer", **timer}, said)
+                self.assertEqual((step["do"], step["when"], step["task"]), ("schedule", when,
+                                                                           {"kind": "reminder", "text": text}), said)
+        self.assertEqual(tasks.normalize_schedule("at 5 pm", "", self.T240PM)[0], at(22, 17))
+        for said, step in (("set a timer for 20 minutes", {"do": "timer", "seconds": 1200}),
+                           ("remind me to stretch for 10 minutes in 1 hour", {"do": "timer", "seconds": 3600}),
+                           ("open notepad at 6 pm", {"do": "open", "app": "Notepad"})):
+            self.assertEqual(siri.clock_timer(dict(step), said), step, said)
+
+
 class Repeating(unittest.TestCase):
     """P3: 'remind me every hour to drink water' was lost, and 'every one hour' made a one-off reminder."""
 
@@ -337,6 +387,23 @@ class RemindersCountDown(WithStore):
             self.assertEqual(len(siri.timer_snapshot()), 1)
 
 
+class DurableOnly(WithStore):
+    """27 October, found while mapping: do_step started research on a bare thread of its own, beside the durable
+    research task, and had a second way to approve or cancel a task. Every plan passes prepare_task_steps first, so
+    neither was reached; a bare thread would be lost when Jev closed, with nothing in Tasks to say so."""
+
+    def test_research_and_task_control_are_only_ever_task_rows(self):
+        plan = siri.prepare_task_steps({"steps": [{"do": "research", "topic": "budget phones"}], "say": ""})
+        (queued,) = plan["steps"]
+        self.assertEqual((queued["do"], self.store.get(queued["id"])["kind"]), ("task_queued", "research"))
+        with mock.patch.object(siri, "research", lambda *a, **k: self.fail("researched on a thread of its own")):
+            for step in ({"do": "research", "topic": "budget phones"},
+                         {"do": "task_control", "action": "cancel", "id": queued["id"]}):
+                with self.subTest(step=step["do"]), self.assertRaisesRegex(RuntimeError, "wasn't queued"):
+                    siri.do_step(step)
+        self.assertEqual(self.store.get(queued["id"])["status"], "queued")  # not cancelled by the second way
+
+
 class StopsWorker(tasks.Store):
     """A store whose claim_due ends task_worker's loop once the test is over."""
     stopped = False
@@ -377,10 +444,38 @@ class Worker(unittest.TestCase):
                 worker.join(5)
             self.assertFalse(worker.is_alive())
 
-    def test_long_tasks_still_go_one_at_a_time(self):
+    def test_a_repeat_long_missed_while_the_pc_was_off_isnt_said_hours_late(self):
+        """24 October, on waking at 9: "Reminder from Friday 23 October at 9:35 PM: drink water.", an hourly one."""
+        store = StopsWorker(os.path.join(tempfile.mkdtemp(prefix="heyjev-worker-"), "tasks.db"))
+        said, now = queue.Queue(), time.time()
+        an_hour_ago = dt.datetime.fromtimestamp(now - 3600)
+        with mock.patch.object(siri, "TASK_STORE", store), mock.patch.object(siri, "ANNOUNCE", said):
+            hourly = store.create("Drink water", "reminder", {"text": "drink water"}, due=now - 11.5 * 3600,
+                                  repeat={"kind": "interval", "seconds": 3600})
+            store.create("Call Ravi", "reminder", {"text": "call Ravi"}, due=now - 2 * 3600)
+            store.create("Take the tablet", "reminder", {"text": "take the tablet"}, due=now - 3600,
+                         repeat={"kind": "daily", "hour": an_hour_ago.hour, "minute": an_hour_ago.minute})
+            worker = threading.Thread(target=siri.task_worker, daemon=True)
+            worker.start()
+            try:
+                lines = [said.get(timeout=5), said.get(timeout=5)]
+                time.sleep(0.5)  # time enough for the hourly one too, if it were said
+                self.assertTrue(said.empty(), said.queue)
+            finally:
+                store.stopped = True
+                tasks.WAKE.set()
+                worker.join(5)
+        self.assertTrue(lines[0].startswith("Reminder from ") and lines[0].endswith(": call Ravi."), lines)
+        self.assertTrue(lines[1].endswith(": take the tablet."), lines)  # a daily one an hour late still is
+        self.assertGreater(store.get(hourly)["due"], now)  # the next one comes round as ever
+
+    def test_long_tasks_go_one_at_a_time_and_jobs_beside_them(self):
+        """Rewritten on purpose on 27 October (it was test_long_tasks_still_go_one_at_a_time): the slow tasks still
+        go one at a time, and now jobs in the background (kind agent) run on a lane of their own beside them, two at
+        a time (siri.JOB_WORKERS), so a job asked for by voice doesn't wait 30 minutes behind an install."""
         store = StopsWorker(os.path.join(tempfile.mkdtemp(prefix="heyjev-worker-"), "tasks.db"))
         said, release, started, running = queue.Queue(), threading.Event(), threading.Event(), []
-        overlap = []
+        overlap, jobs, two = [], [], threading.Event()
 
         def slow_install(payload, cancelled):
             running.append(payload["id"])
@@ -390,25 +485,75 @@ class Worker(unittest.TestCase):
             running.remove(payload["id"])
             return True, f"{payload['id']} is installed.", ""
 
+        def job(task):  # a job in the background, waiting on its model while the install runs
+            jobs.append(task["payload"]["goal"])
+            if len(jobs) == 2:
+                two.set()
+            release.wait(10)
+            store.finish(task["id"], "done")
+
         with mock.patch.object(siri, "TASK_STORE", store), mock.patch.object(siri, "ANNOUNCE", said), \
-                mock.patch.object(installer, "install", slow_install):
+                mock.patch.object(installer, "install", slow_install), mock.patch.object(siri, "run_job", job):
             store.create("Install VLC", "install", {"id": "VLC", "approved": True})
             store.create("Install Git", "install", {"id": "Git", "approved": True})
+            for goal in ("job one", "job two", "job three"):
+                store.create(goal, "agent", {"goal": goal})
             worker = threading.Thread(target=siri.task_worker, daemon=True)
             worker.start()
             try:
                 self.assertTrue(started.wait(5))
-                time.sleep(0.5)  # time enough for the worker to start Git too, if it would
+                self.assertTrue(two.wait(5))  # two jobs going while VLC installs
+                time.sleep(0.5)  # time enough for the worker to start Git or a third job too, if it would
                 self.assertEqual(running, ["VLC"])
+                self.assertEqual(jobs, ["job one", "job two"])
                 release.set()
                 self.assertEqual({said.get(timeout=5), said.get(timeout=5)}, {"VLC is installed.", "Git is installed."})
                 self.assertEqual(overlap, [1, 1])
+                end = time.time() + 5
+                while len(jobs) < 3 and time.time() < end:
+                    time.sleep(0.05)
+                self.assertEqual(jobs, ["job one", "job two", "job three"])  # its turn came once one finished
             finally:
                 release.set()
                 store.stopped = True
                 tasks.WAKE.set()
                 worker.join(5)
             self.assertFalse(worker.is_alive())
+
+    def test_a_wake_as_her_wait_ends_is_kept_for_her_next_look(self):
+        """27 October, found while mapping: Store.wait cleared WAKE after waiting, so a set() that came between the
+        wait ending and the clear was lost. The worker clears it before it looks for due tasks instead."""
+        folder = tempfile.mkdtemp(prefix="heyjev-worker-")
+
+        class Late(threading.Event):
+            def wait(self, timeout=None):
+                woke = super().wait(0)
+                self.set()  # a task added just as the wait ended
+                return woke
+        with mock.patch.object(tasks, "WAKE", Late()):
+            tasks.Store(os.path.join(folder, "wait.db")).wait(5)
+            self.assertTrue(tasks.WAKE.is_set())  # still there: the next wait ends at once
+
+        looked = []
+
+        class Looks(StopsWorker):
+            def claim_due(self, *args, **kwargs):
+                looked.append(tasks.WAKE.is_set())
+                return super().claim_due(*args, **kwargs)
+        store = Looks(os.path.join(folder, "tasks.db"))
+        tasks.WAKE.set()  # an old one, from before she looked
+        with mock.patch.object(siri, "TASK_STORE", store):
+            worker = threading.Thread(target=siri.task_worker, daemon=True)
+            worker.start()
+            try:
+                end = time.time() + 5
+                while not looked and time.time() < end:
+                    time.sleep(0.02)
+            finally:
+                store.stopped = True
+                tasks.WAKE.set()
+                worker.join(5)
+        self.assertEqual(looked[:1], [False])  # cleared before the look, so a set() after it ends the wait
 
 
 if __name__ == "__main__":

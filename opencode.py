@@ -25,9 +25,17 @@ SESSION = requests.Session()  # one kept-open connection: an answer came in 0.6 
 # These speak a different API (Jev has its own endpoint, Muse Spark only does /responses), so they can't answer here
 NOT_CHAT = ("jev-", "muse-spark")
 FREE_EXTRA = {"big-pickle"}  # free on OpenCode's price list without "-free" in the name
-# OpenCode keeps most free chat models for its own app and turns other apps away with a 403.
-# space-bunny-free is the one that answered from Hey Jev in October 2026. Refresh in Settings checks again.
-FALLBACK_FREE = ["space-bunny-free", "kilo/nvidia/nemotron-3-super-120b-a12b:free"]
+# OpenCode keeps most free chat models for its own app and turns other apps away with a 403. On 11 October 2026
+# space-bunny-free was gone (410) and Kilo's Nemotron 3 Super 404'd; these answered. Refresh in Settings checks again.
+FALLBACK_FREE = ["kilo/nvidia/nemotron-3-ultra-550b-a55b:free", "kilo/cohere/north-mini-code:free",
+                 "kilo/nvidia/nemotron-3.5-lightning:free"]
+# Anthropic: the one paid choice, used only when it's picked in Settings and its key is saved. Billed per request
+# on your Anthropic account. Shown here as "anthropic/<id>"
+ANTHROPIC = "anthropic/"
+ANTHROPIC_BASE = "https://api.anthropic.com/v1"
+ANTHROPIC_VERSION = "2023-06-01"
+HAIKU = "anthropic/claude-haiku-5-5"
+PAID_CHOICES = [HAIKU]
 WHY = (("can only be used from within OpenCode", "OpenCode only lets this free model run inside OpenCode itself"),
        ("isn't a free model", "it isn't free, and Hey Jev only uses free models"),
        ("unavailable", "not available right now"),
@@ -55,8 +63,17 @@ def _where(model, key):
     return f"{BASE}/chat/completions", key, model
 
 
+def is_anthropic(model):
+    return bool(model) and str(model).startswith(ANTHROPIC)
+
+
+def allowed(model):
+    """Free models, and Anthropic's, which you chose to pay for. Any other paid model is refused."""
+    return is_free(model) or is_anthropic(model)
+
+
 def require_free(model):
-    if not is_free(model):
+    if not allowed(model):
         raise RuntimeError(f"OpenCode ({model}) isn't a free model, Hey Jev only uses free ones")
 
 
@@ -87,6 +104,8 @@ def chat(key, messages, max_tokens=400, timeout=30, model=None, on_text=None, st
     all there. stop: a threading.Event that ends the stream early, as when another try won."""
     model = model or settings.get("llm_model")
     require_free(model)
+    if is_anthropic(model):  # its own API: reasoning_effort and the like don't apply there
+        return _anthropic(messages, max_tokens, timeout, model, on_text, stop)
     url, key, model_id = _where(model, key)
     body = {"model": model_id, "max_tokens": max_tokens, "messages": messages, **extra}
     if on_text is not None:
@@ -132,6 +151,149 @@ def _streamed(r, model, on_text, stop):
     return _text(text), usage, model
 
 
+# --------------------------------------------------------------------------- Anthropic
+class Cached(str):
+    """A system prompt the same turn after turn up to cache_at (her soul and a prompt), with what changes after it:
+    Anthropic keeps that start for 5 minutes once asked to (prompt caching), and reads it back sooner and at a tenth
+    of the price. Haiku 5.5 caches one of 512 tokens or more; a shorter one is just sent. Still a str, so all else
+    reads it as before."""
+
+    def __new__(cls, text, cache_at=None):
+        s = super().__new__(cls, text)
+        s.cache_at = len(s) if cache_at is None else max(0, min(int(cache_at), len(s)))
+        return s
+
+
+def _system(system):
+    """The system prompt as Anthropic takes it: a string, or for one with a start to cache (Cached), that start as a
+    text block marked for the cache, then the rest."""
+    at = getattr(system, "cache_at", 0)
+    if not at:
+        return str(system)
+    head, tail = str(system)[:at], str(system)[at:]
+    return [{"type": "text", "text": head, "cache_control": {"type": "ephemeral"}}] + \
+        ([{"type": "text", "text": tail}] if tail.strip() else [])
+
+
+def _usage(u, into=None):
+    """Anthropic's token counts as hers: in and out, and how many came from the cache or went into it."""
+    into = {} if into is None else into
+    for ours, theirs in (("prompt_tokens", "input_tokens"), ("completion_tokens", "output_tokens"),
+                         ("cache_read", "cache_read_input_tokens"), ("cache_write", "cache_creation_input_tokens")):
+        if (u or {}).get(theirs) is not None:
+            into[ours] = u[theirs]
+    return into
+
+
+def _anthropic_part(part):
+    """One piece of an OpenAI-style message as Anthropic wants it: text, or a picture from a data: or web address."""
+    if not isinstance(part, dict):
+        return {"type": "text", "text": str(part)}
+    if part.get("type") == "image_url":
+        url = str((part.get("image_url") or {}).get("url") or "")
+        m = re.match(r"data:(image/[\w.+-]+);base64,(.+)$", url, re.S)
+        if m:
+            return {"type": "image", "source": {"type": "base64", "media_type": m.group(1), "data": m.group(2)}}
+        return {"type": "image", "source": {"type": "url", "url": url}}
+    return {"type": "text", "text": str(part.get("text") or "")}
+
+
+def _anthropic_messages(messages):
+    """(system, messages) from OpenAI-style ones. The leading system messages are Anthropic's system prompt; a
+    system note later on goes in as user text where it was. Turns from the same side are joined, as Anthropic wants
+    them taking turns, and it must start with the user."""
+    system, out, started, cache_at = [], [], False, 0
+    for m in messages:
+        role, content = m.get("role"), m.get("content")
+        if role == "system" and not started:
+            text = content if isinstance(content, str) else \
+                "".join(p.get("text", "") for p in content or [] if isinstance(p, dict))
+            if not cache_at and getattr(content, "cache_at", 0) and text:  # where its fixed start ends, once joined
+                cache_at = sum(len(s) + 2 for s in system if s) + content.cache_at
+            system.append(text)
+            continue
+        started = True
+        role = "assistant" if role == "assistant" else "user"
+        parts = [_anthropic_part(p) for p in content] if isinstance(content, list) else \
+            [{"type": "text", "text": str(content or "")}]
+        parts = [p for p in parts if p["type"] != "text" or p["text"].strip()] or [{"type": "text", "text": "..."}]
+        if out and out[-1]["role"] == role:
+            out[-1]["content"] += parts
+        else:
+            out.append({"role": role, "content": parts})
+    if not out or out[0]["role"] != "user":
+        out.insert(0, {"role": "user", "content": [{"type": "text", "text": "..."}]})
+    if out[-1]["role"] == "assistant":  # a last assistant turn would be taken as the start of its answer
+        for p in out[-1]["content"]:
+            if p["type"] == "text":
+                p["text"] = p["text"].rstrip() or "..."
+    joined = "\n\n".join(s for s in system if s)
+    return (Cached(joined, cache_at) if cache_at else joined), out
+
+
+# Claude Haiku 5.5 thinks before it answers unless it's told not to: adaptive thinking is on there by default, so
+# every request had a hidden think first. On her own prompt on 22 October that was 2.4 s to the first word against
+# 1.4 s with it off (the worst 3.5 s against 1.9 s), and 280 tokens a reply against 50. A model that won't have it
+# off says so with a 400: it's asked again without, and left to think from then on (THINKS)
+NO_THINKING = {"type": "disabled"}
+THINKS = set()
+
+
+def _anthropic(messages, max_tokens, timeout, model, on_text=None, stop=None):
+    from secrets_store import get_secret
+    key = get_secret("ANTHROPIC_API_KEY")
+    if not key:
+        raise RuntimeError("Add your Anthropic key in the Keys tab")
+    system, msgs = _anthropic_messages(messages)
+    body = {"model": model[len(ANTHROPIC):], "max_tokens": max_tokens, "messages": msgs}
+    if model not in THINKS:
+        body["thinking"] = NO_THINKING
+    if system:
+        body["system"] = _system(system)
+    if on_text is not None:
+        body["stream"] = True
+
+    def send():
+        return SESSION.post(f"{ANTHROPIC_BASE}/messages", json=body, timeout=timeout, stream=on_text is not None,
+                            headers={"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION})
+    r = send()
+    if r.status_code == 400 and "thinking" in body and "thinking" in r.text.lower():
+        THINKS.add(model)
+        body.pop("thinking")
+        r.close()
+        r = send()
+    if not r.ok:
+        raise RuntimeError(f"Anthropic ({model}) {error_text(r)}")
+    if on_text is None:
+        j = r.json()
+        text = "".join(b.get("text", "") for b in j.get("content") or [] if b.get("type") == "text")
+        return _text(text), _usage(j.get("usage"), {"prompt_tokens": None, "completion_tokens": None}), model
+    text, usage = "", {}
+    try:
+        for line in r.iter_lines():
+            if stop is not None and stop.is_set():
+                break
+            if not line.startswith(b"data:"):
+                continue
+            j = json.loads(line[5:].strip() or b"{}")
+            kind = j.get("type")
+            if kind == "error":
+                raise RuntimeError(f"Anthropic ({model}) {(j.get('error') or {}).get('type', 'error')}: "
+                                   f"{str((j.get('error') or {}).get('message'))[:200]}")
+            if kind == "message_start":  # with what was read from the cache, or written to it
+                _usage((j.get("message") or {}).get("usage"), usage)
+            elif kind == "message_delta":
+                usage["completion_tokens"] = (j.get("usage") or {}).get("output_tokens")
+            elif kind == "content_block_delta" and (j.get("delta") or {}).get("type") == "text_delta":
+                text += j["delta"].get("text", "")
+                on_text(text)
+            elif kind == "message_stop":
+                break
+    finally:
+        r.close()
+    return _text(text), usage, model
+
+
 def _model_ids(timeout):
     r = requests.get(f"{BASE}/models", timeout=timeout)
     r.raise_for_status()
@@ -160,7 +322,7 @@ def explain(error):
     for clue, why in WHY:
         if clue in error:
             return why
-    return error.split(") ", 1)[-1] if error.startswith("OpenCode (") else error
+    return error.split(") ", 1)[-1] if error.startswith(("OpenCode (", "Anthropic (")) else error
 
 
 def check_model(key, model, timeout=25):

@@ -357,6 +357,30 @@ class Tries(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertIn("quick", raw)
 
+    def test_slow_haiku_gets_haiku_again_never_a_free_models_quicker_answer(self):
+        """22 October: Haiku hadn't started by 2.5 s, the free model's try won and searched "GTA 6 new trailer 2024
+        2025". Slow, it's Haiku again; only once Haiku's tries fail does a free model answer."""
+        haiku = siri.opencode.HAIKU
+        chat, calls = self.chat([(0.6, '{"steps": [], "say": "first"}'), (0.0, '{"steps": [], "say": "second"}')])
+        with mock.patch.object(siri.opencode, "chat", chat), mock.patch.object(siri, "COOLDOWN", {}):
+            raw, _, _ = siri.ask_model([{"role": "user", "content": "hi"}], hedge_after=0.2, model=haiku)
+        self.assertEqual(calls, [haiku, haiku])
+        self.assertIn("second", raw)
+
+        calls = []
+
+        def failing(key, messages, model=None, on_text=None, stop=None, **kw):
+            calls.append(model)
+            if siri.opencode.is_anthropic(model):
+                raise RuntimeError("Anthropic 529: overloaded")
+            on_text('{"steps": [], "say": "free"}')
+            return '{"steps": [], "say": "free"}', {}, model
+        with mock.patch.object(siri.opencode, "chat", failing), mock.patch.object(siri, "COOLDOWN", {}):
+            raw, _, _ = siri.ask_model([{"role": "user", "content": "hi"}], hedge_after=0.2, model=haiku)
+        self.assertEqual(calls[0], haiku)
+        self.assertFalse(siri.opencode.is_anthropic(calls[-1]))
+        self.assertIn("free", raw)
+
     def test_the_answer_returned_is_the_one_she_is_saying(self):
         FakeLine.said = []
         said = '{"steps": [], "say": "The one being said aloud right now. Yes."}'
@@ -367,6 +391,54 @@ class Tries(unittest.TestCase):
             raw, _, _ = siri.ask_model([{"role": "user", "content": "hi"}], hedge_after=0.01, live=live)
             self.assertEqual(raw, said)
             self.assertEqual(live.finish(), ["The one being said aloud right now.", "Yes."])
+
+
+class NoThinking(unittest.TestCase):
+    """Haiku 5.5 thinks before answering unless told not to: on her prompt, 2.4 s to the first word against 1.4 s."""
+
+    class Reply:
+        def __init__(self, status, text=""):
+            self.status_code, self.ok, self.text = status, status < 400, text
+            self.reason, self.closed = "Bad Request" if status >= 400 else "OK", False
+
+        def json(self):
+            if not self.ok:
+                return json.loads(self.text)
+            return {"content": [{"type": "text", "text": '{"steps": [], "say": "Hi."}'}], "usage": {}}
+
+        def close(self):
+            self.closed = True
+
+    def send(self, replies):
+        bodies = []
+
+        def post(url, json=None, **kw):
+            bodies.append(dict(json))
+            return replies.pop(0)
+        self.addCleanup(opencode.THINKS.clear)
+        with mock.patch.object(opencode.SESSION, "post", post), \
+                mock.patch("secrets_store.get_secret", return_value="key"):  # chat itself is a tripwire here
+            text, _, _ = opencode._anthropic([{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}],
+                                             400, 10, opencode.HAIKU)
+        return text, bodies
+
+    def test_every_request_asks_for_no_thinking(self):
+        text, bodies = self.send([self.Reply(200)])
+        self.assertEqual(bodies[0]["thinking"], {"type": "disabled"})
+        self.assertIn("Hi.", text)
+
+    def test_a_model_that_wont_have_it_off_is_asked_again_without_and_from_then_on(self):
+        refused = self.Reply(400, '{"error": {"message": "thinking.type disabled isn\'t supported"}}')
+        text, bodies = self.send([refused, self.Reply(200)])
+        self.assertEqual(["thinking" in b for b in bodies], [True, False])
+        self.assertTrue(refused.closed)
+        self.assertIn("Hi.", text)
+        _, later = self.send([self.Reply(200)])
+        self.assertNotIn("thinking", later[0])
+
+    def test_other_errors_are_errors(self):
+        with self.assertRaises(RuntimeError):
+            self.send([self.Reply(400, '{"error": {"message": "max_tokens: too large"}}')])
 
 
 class Filler(unittest.TestCase):

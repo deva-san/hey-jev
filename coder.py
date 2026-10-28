@@ -1,7 +1,7 @@
 """Coding jobs in the background: the OpenCode CLI already on this PC (opencode.ai) does the work in one project
 folder while you carry on, and she tells you when it's done.
 
-It's driven the way Hermes Agent drives a coding agent (agent/copilot_acp_client.py, its helpers copied into
+It's driven the way Hermes Agent drives a coding agent (agent/acp_client.py, its helpers copied into
 hermes_memory/acp_bits.py): `opencode acp` on stdin and stdout, the Agent Client Protocol, one session per job.
 
 Kept on a short leash, because OpenCode itself lets an agent edit files and run commands without asking:
@@ -194,10 +194,18 @@ def choose(options, allow):
     return None
 
 
+def edited(n):
+    """How far a job's got, for its row on the island: a count, never the files' names, which the model chose."""
+    return f"{n} file{'' if n == 1 else 's'} edited"
+
+
 class Job:
-    def __init__(self, folder, task, ask=None, cancelled=lambda: False, timeout=TIMEOUT):
-        """ask(question) -> True/False, or None when there's nobody to ask: then it's refused and reported."""
+    def __init__(self, folder, task, ask=None, cancelled=lambda: False, timeout=TIMEOUT, progress=None):
+        """ask(question) -> True/False, or None when there's nobody to ask: then it's refused and reported. siri's
+        job_ask is the ask for every job, started by voice or from the phone: the job's row waits on you with the
+        command, and a no or no answer refuses it. progress(n): told each time it edits a file, n of them so far."""
         self.folder, self.task, self.ask, self.cancelled, self.timeout = folder, task, ask, cancelled, timeout
+        self.progress = progress
         self.text, self.refused, self.ran, self.edited = [], [], [], []
         self.defined = False  # it edited a file that says what the project's test or build command runs
         self.changed = False  # it edited anything: a test file it rewrote runs as the project's own tests
@@ -209,6 +217,8 @@ class Job:
         raw = call.get("rawInput") or {}
         if kind == "edit":
             self.edited.append(title)
+            if self.progress is not None:
+                self.progress(len(self.edited))
             where = [title, raw.get("filePath"), raw.get("path")]
             where += [p.get("path") for p in call.get("locations") or [] if isinstance(p, dict)]
             self.defined = self.defined or any(defines(w) for w in where if w)

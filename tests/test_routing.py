@@ -1,10 +1,16 @@
-"""The local fast path: what quick() and fast_intent plan on this PC, and what they leave to the model."""
+"""The local fast path: what quick() plans on this PC from its one table (siri.QUICK, fast_intent's own table moved in
+on 27 October), and what it leaves to the model."""
 import contextlib
 import io
+import json
+import os
+import tempfile
 import threading
 import time
 import unittest
 from unittest import mock
+
+import numpy as np
 
 from tests.support import siri, winplatform
 
@@ -21,6 +27,9 @@ class Routing(unittest.TestCase):
         for patch in (
                 mock.patch.object(siri.win, "loaded_start_apps", lambda: []),
                 mock.patch.object(siri, "focused_on", lambda app: False),
+                # nothing in front for shortcut_plan either: with the real Notepad in front, "type the date" was its
+                # F5, which inserts the date (27 October, after a live run left Notepad up)
+                mock.patch.object(siri.win, "foreground_exe", lambda *a, **k: ""),
                 mock.patch.object(siri, "youtube_title", lambda: ""),
                 mock.patch.object(siri, "LAST_QUERY", [""]),
                 mock.patch.object(siri, "routines", lambda: []),
@@ -88,19 +97,33 @@ class Writing(Routing):
 
 
 class Play(Routing):
-    """A17, R8: what QUICK leaves to the model isn't played by fast_intent as a YouTube search for those words."""
+    """A17, R8: what QUICK leaves to the model isn't played as a YouTube search for those words, nor once put right
+    (fast_intent's own table did that, until it moved into QUICK on 27 October)."""
 
     def test_what_siri_leaves_to_the_model_isnt_searched(self):
         for words in ("play shape of you on Spotify", "play the second song", "play the same song again",
                       "play the top result", "play the second video", "play the third video"):
             with self.subTest(words=words):
                 self.assertIsNone(self.quick(words))
-                self.assertIsNone(fast_intent.FastIntentMatcher(siri).match(words))
+                self.assertIsNone(self.quick(f"hey jev can you {words} please"))
 
     def test_a_song_still_plays(self):
         self.assertEqual(self.steps("play Arijit Singh songs"),
                          [{"do": "youtube", "query": "arijit singh songs", "play": True}])
         self.assertEqual(self.steps("play It's My Life"), [{"do": "youtube", "query": "it's my life", "play": True}])
+
+
+class Slips(Routing):
+    """27 October, found while mapping: fast_intent looked its slips up a word at a time, so the eleven of more than
+    one word, "note pad" and "you tube" among them, could never match."""
+
+    def test_slips_of_more_than_one_word_are_put_right(self):
+        for heard, meant in (("open note pad", "open notepad"), ("open you tube please", "open youtube"),
+                             ("clothes the tab", "close the tab"), ("open whats app", "open whatsapp"),
+                             ("open v s code", "open vs code"), ("open a new terminal", "open a new terminal")):
+            with self.subTest(heard=heard):  # whole words only: "new term" isn't the start of "new terminal"
+                self.assertEqual(fast_intent.clean_text(heard), meant)
+        self.assertEqual(self.steps("open note pad"), [{"do": "open", "app": "Notepad"}])
 
 
 class MisheardQueries(Routing):
@@ -327,6 +350,46 @@ class Asking(Routing):
             with self.subTest(words=words):
                 self.assertTrue(siri.could_be_request(words))
 
+    def test_sending_said_without_her_name(self):
+        """23 October: "Send a message to Amma" was let go as room talk, the model never seeing it."""
+        for words in ("Send a message to Amma", "message Amma hi", "Text Ravi I'm running late", "reply to him",
+                      "Send a WhatsApp to Bunty", "email Ravi the report"):
+            with self.subTest(words=words):
+                self.assertTrue(siri.could_be_request(words))
+        for words in ("The message was nice", "I got your text", "Text me later", "Message me tonight"):
+            with self.subTest(words=words):
+                self.assertFalse(siri.could_be_request(words))
+
+
+class LateNo(unittest.TestCase):
+    """23 October: "No" to "Is that them?", said once her few seconds for it had gone, was let go as room talk."""
+
+    def setUp(self):
+        saved = dict(siri.PENDING)
+        self.addCleanup(lambda: siri.PENDING.update(saved))
+        siri.PENDING.update(plan={"steps": [{"do": "contact_found", "id": "x"}]}, soon=time.time() + 10,
+                            until=time.time() + 60, origin="voice")
+
+    def route(self, words, sure=0.9):
+        return siri.route(speech.heard(words, sure), "other", open_mic=True)
+
+    def test_a_no_still_answers_her(self):
+        for words in ("No.", "Nope", "No, no.", "No, not him.", "Not her", "That's not them", "Wrong one"):
+            with self.subTest(words=words):
+                self.assertEqual(self.route(words)[2], True)
+
+    def test_talk_with_a_no_in_it_doesnt(self):
+        for words in ("No problem", "Wait, I'm coming", "Not bad", "No worries yaar"):
+            with self.subTest(words=words):
+                self.assertIsNone(self.route(words))
+
+    def test_not_once_a_no_isnt_taken_or_mumbled(self):
+        self.assertIsNone(self.route("No", sure=0.4))
+        siri.PENDING["soon"] = time.time() - 1
+        self.assertIsNone(self.route("No"))
+        siri.PENDING.update(soon=time.time() + 10, origin="phone")
+        self.assertIsNone(self.route("No"))
+
 
 class Power(Routing):
     """R2: shutting down and restarting the PC are planned on the PC, and always asked about first."""
@@ -377,6 +440,200 @@ class PcQuestions(Routing):
         for words in ("is my battery at 5%", "is my battery at 50 percent"):  # a level, not a time
             with self.subTest(words=words):
                 self.assertEqual(siri.sys_intent(siri.plain(words)), ("battery", None))
+
+
+class OneTable(Routing):
+    """27 October: fast_intent.py held a second table of the same commands, run on every miss after QUICK, and the
+    two had drifted apart. Its phrasings QUICK lacked are QUICK rows now, gated in handle like the rest."""
+
+    def test_fast_intent_keeps_only_the_text_side(self):
+        self.assertFalse(hasattr(fast_intent, "FastIntentMatcher"))
+        self.assertFalse(hasattr(siri, "get_fast_matcher"))
+        self.assertEqual(fast_intent.clean_text("hey jev can you zoom in please"), "zoom in")
+
+    def test_what_only_the_second_table_had_is_planned_from_quick(self):
+        for words, steps in (
+                ("zoom in", [{"do": "keys", "keys": "ctrl+plus"}]), ("reset zoom", [{"do": "keys", "keys": "ctrl+0"}]),
+                ("make it full screen", [{"do": "keys", "keys": "f11"}]),
+                ("reopen closed tab", [{"do": "keys", "keys": "ctrl+shift+t"}]),
+                ("copy the text", [{"do": "keys", "keys": "ctrl+c"}]),
+                ("save the file", [{"do": "keys", "keys": "ctrl+s"}]),
+                ("maximise this window", [{"do": "window", "action": "maximize"}]),
+                ("take a screenshot", [{"do": "screenshot"}]), ("screen capture", [{"do": "screenshot"}]),
+                ("open my downloads", [{"do": "open_folder", "path": "shell:Downloads"}]),
+                ("open the recycle bin", [{"do": "open_folder", "path": "shell:RecycleBinFolder"}]),
+                ("open task manager", [{"do": "keys", "keys": "ctrl+shift+esc"}]),
+                ("reboot the system", [{"do": "restart"}]), ("power off", [{"do": "shutdown"}]),
+                ("abort restart", [{"do": "abort_shutdown"}]),
+                ("turn the volume down by 10 percent", [{"do": "volume", "to": "down 10"}]),
+                ("set spotify volume to 30", [{"do": "volume", "app": "spotify", "to": "30"}]),
+                ("2 hour timer", [{"do": "timer", "seconds": 7200}]), ("take dictation", [{"do": "dictate"}]),
+                ("go to the bottom", [{"do": "scroll", "direction": "bottom", "times": 1}]),
+                ("scroll down a lot", [{"do": "scroll", "direction": "down", "times": 3}])):
+            with self.subTest(words=words):
+                self.assertEqual(self.steps(words), steps)
+
+    def test_an_app_named_a_little_off_opens_but_is_never_closed_on_a_guess(self):
+        with mock.patch.object(siri.win, "loaded_start_apps", lambda: [("Spotify", "")]):
+            self.assertEqual(self.steps("open spotfy"), [{"do": "open", "app": "Spotify"}])
+            self.assertEqual(self.steps("activate spotify"), [{"do": "open", "app": "Spotify"}])
+            self.assertIsNone(self.quick("terminate spotfy"))
+            self.assertEqual(self.steps("terminate spotify"), [{"do": "close", "app": "Spotify"}])
+
+    def test_without_her_name_the_moved_rows_are_gated_like_the_rest(self):
+        """fast_intent ran them with no say from the gate: in the room "copy" or "save" would press the keys."""
+        for words in ("copy", "save the file", "close this window", "select all"):
+            with self.subTest(words=words):
+                asked, ran, _ = self.handle(words, "cold")
+                self.assertTrue(asked)
+                self.assertIsNone(ran)
+        asked, ran, pending = self.handle("power off", False)  # by name: a yes or no first, still
+        self.assertFalse(asked)
+        self.assertEqual(ran["steps"], [])
+        self.assertEqual(pending["steps"], [{"do": "shutdown"}])
+
+    def test_put_right_politeness_is_one_more_look_not_a_name_said_alone(self):
+        self.assertEqual(self.steps("can you zoom out more please"), [{"do": "keys", "keys": "ctrl+minus"}])
+        self.assertIsNone(self.quick("noted"))  # put right it would be "notepad", said alone: not opened
+
+
+class SitesAndBareApps(Routing):
+    """27 October: SITES and BARE_APPS moved from the code to apps.json's "_sites" and "_bare", so one is added
+    the way an app is. The loaders keep what's well formed and fall back to the defaults."""
+
+    def test_apps_json_has_what_the_code_had(self):
+        with open(os.path.join(siri.HERE, "apps.json"), encoding="utf-8") as f:
+            raw = json.load(f)
+        self.assertEqual(siri.listed_sites(raw["_sites"]), siri.DEFAULT_SITES)
+        self.assertEqual(siri.listed_bare(raw["_bare"]), siri.DEFAULT_BARE)
+        self.assertNotIn("_sites", siri.APPS)
+        self.assertNotIn("_bare", siri.APP_SPECS)
+
+    def test_without_them_or_with_typos_the_rest_still_load(self):
+        self.assertEqual(siri.listed_sites(None), siri.DEFAULT_SITES)
+        self.assertEqual(siri.listed_bare("chrome"), siri.DEFAULT_BARE)
+        self.assertEqual(siri.listed_sites({"Hacker News": ["Hacker News", "https://news.ycombinator.com"],
+                                            "bad": ["Bad", "javascript:alert(1)"], "short": ["Short"], "none": None}),
+                         {"hacker news": ("Hacker News", "https://news.ycombinator.com")})
+        self.assertEqual(siri.listed_sites({"bad": "x"}), siri.DEFAULT_SITES)  # nothing usable: the defaults
+        self.assertEqual(siri.listed_bare(["Zoom", 3, ""]), {"zoom"})
+
+    def test_a_site_added_there_opens(self):
+        sites = {**siri.SITES, "hacker news": ("Hacker News", "https://news.ycombinator.com")}
+        with mock.patch.object(siri, "SITES", sites):
+            self.assertEqual(self.steps("open hacker news"),
+                             [{"do": "website", "url": "https://news.ycombinator.com"}])
+
+    def test_the_apps_tab_writes_them_back_as_they_were(self):
+        import assistant_ui
+        sites = {"youtube": ["YouTube", "https://www.youtube.com"], "maps": ["Google Maps", "https://maps.google.com"]}
+        self.assertEqual(json.loads(assistant_ui.apps_extra_json(sites)), sites)
+        self.assertEqual(len(assistant_ui.apps_extra_json(sites).splitlines()), 4)  # a site a line
+        self.assertEqual(json.loads(assistant_ui.apps_extra_json(["chrome", "kiro"])), ["chrome", "kiro"])
+
+
+class FakeEncoder:
+    """decider's encoder with made-up numbers: each sentence a unit vector of its own, the listed ones as given."""
+
+    def __init__(self, known):
+        self.known, self.asked = known, []
+
+    def encode(self, text):
+        self.asked.append(text)
+        if text in self.known:
+            v = np.asarray(self.known[text], np.float32)
+        else:
+            v = np.zeros(4, np.float32)
+            v[3] = 1.0
+        return v / np.linalg.norm(v)
+
+
+class ParaphrasedRoutines(Routing):
+    """27 October: a routine ran only on its exact words. Words close in meaning, said by name, are logged in
+    shadow mode (the default) and run only with "paraphrase_routines" on, never without her name."""
+
+    ROUTINE = {"dir": "work-mode", "triggers": ["work mode"],
+               "plan": {"steps": [{"do": "open", "app": "Notepad"}, {"do": "volume", "to": "mute"}], "say": "Work mode."}}
+
+    real_routines = staticmethod(siri.routines)  # Routing leaves her none; these go through the real one
+
+    def skills(self, *found):
+        """skills.list_skills' stand-in, read through the real routines() and its cache."""
+        return mock.patch.object(siri.skills, "list_skills", lambda **_: [json.loads(json.dumps(s)) for s in found])
+
+    def setUp(self):
+        super().setUp()
+        self.folder = tempfile.mkdtemp(prefix="heyjev-paraphrase-")
+        self.encoder = FakeEncoder({"work mode": [1, 0, 0, 0], "start work mode": [0.95, 0.31, 0, 0],
+                                    "what is work mode": [0.95, 0.31, 0, 0], "get ready for work": [0.6, 0.8, 0, 0],
+                                    "can you start work mode please": [0.95, 0.31, 0, 0]})
+        for patch in (mock.patch.object(siri, "routines", self.real_routines), self.skills(self.ROUTINE),
+                      mock.patch.object(siri, "_skill_cache", [0.0, []]),
+                      mock.patch.object(siri.decider, "available", lambda: True),
+                      mock.patch.object(siri.decider, "get", lambda: self.encoder),
+                      mock.patch.object(siri.decider, "folder", lambda: self.folder),
+                      mock.patch.object(siri, "used_later", lambda name: None),
+                      mock.patch.dict(siri._trigger_vectors, clear=True)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def mode(self, value):
+        p = mock.patch.object(siri.settings, "get", lambda k, d=None: value if k == "paraphrase_routines" else d)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def logged(self):
+        path = os.path.join(self.folder, "paraphrase.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as f:
+            return [json.loads(line) for line in f]
+
+    def test_shadow_by_default_logs_what_it_would_have_run_and_runs_nothing(self):
+        self.assertEqual(siri.settings.DEFAULTS["paraphrase_routines"], "shadow")
+        self.mode("shadow")
+        self.assertIsNone(self.quick("start work mode"))
+        (entry,) = self.logged()
+        self.assertEqual((entry["said"], entry["trigger"], entry["skill"], entry["mode"]),
+                         ("start work mode", "work mode", "work-mode", "shadow"))
+        self.assertGreaterEqual(entry["score"], siri.PARAPHRASE_AT)
+
+    def test_on_it_runs_the_routine(self):
+        self.mode("on")
+        self.assertEqual(self.quick("start work mode"), {"steps": self.ROUTINE["plan"]["steps"], "say": "Work mode."})
+        self.assertEqual(self.quick("can you start work mode please")["say"], "Work mode.")
+
+    def test_never_without_her_name_below_the_bar_off_or_for_a_question(self):
+        self.mode("on")
+        for words, gate in (("start work mode", "cold"), ("start work mode", True), ("get ready for work", False),
+                            ("what is work mode", False)):  # as close as "start work mode", but asks about it
+            with self.subTest(words=words, gate=gate):
+                self.assertIsNone(self.quick(words, gate))
+        self.mode("off")
+        self.assertIsNone(self.quick("start work mode"))
+        self.assertEqual(self.logged(), [])
+        self.assertEqual(self.encoder.asked, ["work mode", "get ready for work"])  # only the one that could count
+
+    def test_the_words_asked_are_worked_out_last_for_think_to_reuse(self):
+        self.mode("shadow")
+        self.quick("start work mode")
+        self.assertEqual(self.encoder.asked[-1], "start work mode")
+
+    def test_a_trigger_with_a_slot_is_never_matched_by_meaning(self):
+        """plain() turns "work mode {x}" into "work mode", so the slot is judged on the trigger as written."""
+        self.mode("on")
+        slotted = {**self.ROUTINE, "triggers": ["work mode {x}"]}
+        with self.skills(slotted), mock.patch.object(siri, "_skill_cache", [0.0, []]):
+            self.assertIsNone(siri.closest_routine("start work mode"))
+            self.assertIsNone(self.quick("start work mode"))
+        self.assertEqual(self.logged(), [])
+
+    def test_the_triggers_are_worked_out_when_the_decider_loads_not_on_her_turn(self):
+        self.mode("shadow")
+        self.assertEqual([phrase for phrase, _ in siri.warm_triggers()], ["work mode"])
+        self.encoder.asked.clear()
+        self.quick("start work mode")
+        self.assertEqual(self.encoder.asked, ["start work mode"])  # only her words, on the voice thread
 
 
 if __name__ == "__main__":
